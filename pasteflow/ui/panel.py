@@ -3,7 +3,6 @@
 고정 섹션 + 히스토리 섹션, 검색, 우클릭 컨텍스트 메뉴, 다중 선택.
 Alt+V / 트레이 / 미니창 ▲ 버튼으로 토글.
 """
-from datetime import datetime
 from typing import Optional
 
 from PyQt6.QtWidgets import (
@@ -124,7 +123,7 @@ class PanelItemWidget(QWidget):
         icon_label.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
         layout.addWidget(icon_label)
 
-        # 미리보기 (최대 2줄)
+        # 미리보기 (최대 3줄)
         content_layout = QVBoxLayout()
         content_layout.setContentsMargins(0, 4, 0, 4)
         content_layout.setSpacing(0)
@@ -140,53 +139,22 @@ class PanelItemWidget(QWidget):
             content_layout.addWidget(thumb_label)
             self.setMinimumHeight(72)
         else:
-            preview = item.preview_text or ""
-            lines = preview.split("\n")[:2]
+            preview = item.text_content or item.preview_text or ""
+            lines = preview.strip().split("\n")[:3]
             display_text = "\n".join(lines)
-            if len(display_text) > 80:
-                display_text = display_text[:80] + "..."
+            if len(display_text) > 150:
+                display_text = display_text[:150] + "..."
 
             text_label = QLabel(display_text)
             text_label.setWordWrap(True)
-            text_label.setMaximumHeight(32)
+            text_label.setMaximumHeight(52)
             text_label.setStyleSheet(f"color: {text_color}; font-size: 12px;")
             content_layout.addWidget(text_label)
+            self.setMinimumHeight(60)
 
         layout.addLayout(content_layout, 1)
 
-        # 시간 표시
-        time_str = self._format_time(item.created_at)
-        time_label = QLabel(time_str)
-        time_label.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 10px;")
-        time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(time_label)
-
         self._apply_bg_style()
-
-    def _format_time(self, created_at) -> str:
-        """상대 시간 포맷"""
-        if isinstance(created_at, str):
-            try:
-                dt = datetime.fromisoformat(created_at)
-            except Exception:
-                return created_at
-        elif isinstance(created_at, datetime):
-            dt = created_at
-        else:
-            return ""
-
-        now = datetime.now()
-        diff = now - dt
-        seconds = diff.total_seconds()
-
-        if seconds < 60:
-            return "방금"
-        elif seconds < 3600:
-            return f"{int(seconds // 60)}분전"
-        elif seconds < 86400:
-            return f"{int(seconds // 3600)}시간전"
-        else:
-            return f"{int(seconds // 86400)}일전"
 
     def _apply_bg_style(self):
         if self._is_selected:
@@ -208,24 +176,22 @@ class PanelItemWidget(QWidget):
     def enterEvent(self, event):
         self._is_hovered = True
         self._apply_bg_style()
-        # F8-5: 이미지 항목 호버 시 확대 미리보기
-        if self.item.content_type == "image" and self.item.image_data:
-            ImagePreviewPopup.instance().show_preview(
-                self.item.image_data, QCursor.pos()
-            )
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         self._is_hovered = False
         self._apply_bg_style()
-        if self.item.content_type == "image" and self.item.image_data:
-            ImagePreviewPopup.instance().hide_preview()
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_start_pos = event.pos()
             self._did_drag = False
+            # 이미지 항목 클릭 시 확대 미리보기
+            if self.item.content_type == "image" and self.item.image_data:
+                ImagePreviewPopup.instance().toggle_preview(
+                    self.item.image_data, QCursor.pos()
+                )
             # 고정 항목은 release에서 클릭 처리 (드래그와 충돌 방지)
             if not self._is_pinned:
                 self.clicked.emit(self.item_id, event)
@@ -612,11 +578,10 @@ class ClipboardPanel(QWidget):
             self._selected_ids.add(ids[idx])
 
     def _on_item_double_clicked(self, item_id: int):
-        """더블클릭 → 붙여넣기 후 패널 닫기 (F5-2)"""
+        """더블클릭 → 붙여넣기 (패널은 열린 상태 유지)"""
         item = self._find_item(item_id)
         if item:
             self.paste_item_requested.emit(item)
-            self.hide()
 
     def _on_item_context_menu(self, item_id: int, pos: QPoint):
         """우클릭 컨텍스트 메뉴 (F4-8)"""

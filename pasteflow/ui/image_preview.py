@@ -75,6 +75,13 @@ class ImagePreviewPopup(QLabel):
         self.show()
         self.raise_()
 
+    def toggle_preview(self, image_data: bytes, global_pos: QPoint):
+        """클릭 시 토글 — 보이면 숨기고, 숨겨져 있으면 표시"""
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show_preview(image_data, global_pos)
+
     def hide_preview(self):
         self.hide()
 

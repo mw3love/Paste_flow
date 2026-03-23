@@ -61,6 +61,9 @@ _user32.GetAsyncKeyState.restype = ctypes.c_short
 _kernel32.GetModuleHandleW.argtypes = [ctypes.wintypes.LPCWSTR]
 _kernel32.GetModuleHandleW.restype = ctypes.wintypes.HMODULE
 
+_user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
+_user32.SetForegroundWindow.restype = ctypes.wintypes.BOOL
+
 
 class PasteInterceptor:
     """Ctrl+V 키다운 → 클립보드 교체 (저수준 키보드 훅)
@@ -175,25 +178,34 @@ class PasteInterceptor:
             except Exception:
                 pass
 
-    def direct_paste(self, item: ClipboardItem):
+    def direct_paste(self, item: ClipboardItem, target_hwnd=None):
         """항목을 클립보드에 설정 후 SendInput으로 Ctrl+V 전송 (F5)
 
         순차 큐 포인터에 영향 없음. Alt+1~9 또는 패널 더블클릭에서 사용.
+        target_hwnd가 주어지면 해당 윈도우에 포커스를 먼저 설정한다.
         """
         self._set_clipboard(item)
 
-        # 짧은 딜레이 후 Ctrl+V 전송 (클립보드 안정화)
+        # 대상 윈도우로 포커스 이동 (패널에서 호출 시)
+        if target_hwnd:
+            try:
+                _user32.SetForegroundWindow(target_hwnd)
+                time.sleep(0.1)
+            except Exception:
+                pass
+
+        # 눌려 있는 수정키(Alt, Shift, Ctrl) 해제 후 Ctrl+V 전송
         time.sleep(0.05)
         self._direct_paste_active = True
         try:
-            self._send_ctrl_v()
+            self._release_modifiers_and_send_ctrl_v()
         finally:
             # SendInput이 훅에 전달될 시간 확보
             time.sleep(0.05)
             self._direct_paste_active = False
 
-    def _send_ctrl_v(self):
-        """SendInput API로 Ctrl+V 키 입력 전송"""
+    def _release_modifiers_and_send_ctrl_v(self):
+        """눌려 있는 수정키를 해제하고 Ctrl+V를 보낸 뒤 원래 수정키를 복원"""
 
         class KEYBDINPUT(ctypes.Structure):
             _fields_ = [
@@ -219,14 +231,28 @@ class PasteInterceptor:
             inp.union.ki.dwFlags = flags
             return inp
 
-        # Ctrl 다운, V 다운, V 업, Ctrl 업
-        inputs = (INPUT * 4)(
+        def send(input_list):
+            arr = (INPUT * len(input_list))(*input_list)
+            _user32.SendInput(len(input_list), ctypes.byref(arr), ctypes.sizeof(INPUT))
+
+        # 현재 눌려 있는 수정키 확인
+        held_keys = []
+        for vk in (VK_MENU, VK_CONTROL, VK_SHIFT):
+            if _user32.GetAsyncKeyState(vk) & 0x8000:
+                held_keys.append(vk)
+
+        # 1) 눌려 있는 수정키 모두 해제
+        if held_keys:
+            send([make_key_input(vk, KEYEVENTF_KEYUP) for vk in held_keys])
+            time.sleep(0.02)
+
+        # 2) Ctrl+V 전송
+        send([
             make_key_input(VK_CONTROL),
             make_key_input(VK_V),
             make_key_input(VK_V, KEYEVENTF_KEYUP),
             make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
-        )
-        _user32.SendInput(4, ctypes.byref(inputs), ctypes.sizeof(INPUT))
+        ])
 
     def _set_clipboard(self, item: ClipboardItem):
         """클립보드에 항목 설정 — 모든 형식 보존"""
@@ -241,9 +267,9 @@ class PasteInterceptor:
                 else:
                     return  # 실패 시 self_triggered 설정 안 함
 
-        # 클립보드 열기 성공 → self_triggered 설정
+        # 클립보드 열기 성공 → 자체 트리거 무시 설정 (500ms)
         if self.monitor:
-            self.monitor.self_triggered = True
+            self.monitor.set_self_triggered(0.5)
 
         try:
             win32clipboard.EmptyClipboard()

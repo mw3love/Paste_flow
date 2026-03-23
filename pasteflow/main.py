@@ -4,6 +4,7 @@
 """
 import sys
 import os
+import ctypes
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer
 
@@ -41,6 +42,9 @@ class PasteFlowApp:
         self.mini_window = MiniWindow()
         self.panel = ClipboardPanel()
         self.tray = TrayIcon()
+
+        # 패널 열기 전 포커스된 윈도우 추적
+        self._prev_foreground_hwnd = None
 
         # 시그널 연결
         self._connect_signals()
@@ -107,6 +111,8 @@ class PasteFlowApp:
         if self.panel.isVisible():
             self.panel.hide()
         else:
+            # 패널 열기 전 현재 포커스된 윈도우 기억
+            self._prev_foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
             self._refresh_panel()
             self.panel.show()
             self.panel.raise_()
@@ -132,11 +138,34 @@ class PasteFlowApp:
         ).start()
 
     def _on_panel_paste(self, item: ClipboardItem):
-        """패널에서 붙여넣기 요청 — 클립보드 설정 후 SendInput (F5-2, F5-4)"""
+        """패널에서 붙여넣기 요청 — 이전 윈도우에 포커스 후 SendInput (F5-2, F5-4)"""
+        target_hwnd = self._prev_foreground_hwnd
+        # 패널 auto-close 비활성화 (SetForegroundWindow가 앱 비활성화 유발)
+        self.panel._auto_close = False
         import threading
         threading.Thread(
-            target=self.interceptor.direct_paste, args=(item,), daemon=True
+            target=self._do_panel_paste,
+            args=(item, target_hwnd),
+            daemon=True,
         ).start()
+
+    def _do_panel_paste(self, item: ClipboardItem, target_hwnd):
+        """패널 붙여넣기 워커 스레드"""
+        try:
+            self.interceptor.direct_paste(item, target_hwnd=target_hwnd)
+        finally:
+            import time
+            time.sleep(0.2)
+            # 패널에 포커스 복원 후 auto-close 재활성화
+            QTimer.singleShot(0, self._restore_panel_after_paste)
+
+    def _restore_panel_after_paste(self):
+        """패널 붙여넣기 후 포커스 복원"""
+        if self.panel.isVisible():
+            self.panel.raise_()
+            self.panel.activateWindow()
+        # auto-close 재활성화
+        self.panel._auto_close = True
 
     def _on_copy_item(self, item: ClipboardItem):
         """고정 항목 클릭 → 클립보드 복사 + 큐 추가 (F7-6)"""

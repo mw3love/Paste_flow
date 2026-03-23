@@ -3,6 +3,7 @@ import ctypes
 import io
 import hashlib
 import time
+import threading
 from typing import Optional, Callable
 
 import win32clipboard
@@ -30,19 +31,16 @@ class ClipboardMonitor:
 
     def __init__(self, on_new_item: Optional[Callable[[ClipboardItem], None]] = None):
         self.on_new_item = on_new_item
-        self._ignore_count: int = 0
+        self._ignore_until: float = 0.0  # 시간 기반 무시
+        self._lock = threading.Lock()
         self._last_hash: Optional[str] = None
         self._hwnd = None
         self._running = False
 
-    @property
-    def self_triggered(self) -> bool:
-        return self._ignore_count > 0
-
-    @self_triggered.setter
-    def self_triggered(self, value: bool):
-        if value:
-            self._ignore_count += 1
+    def set_self_triggered(self, duration: float = 0.5):
+        """클립보드 이벤트를 duration초 동안 무시"""
+        with self._lock:
+            self._ignore_until = time.monotonic() + duration
 
     def start(self):
         """클립보드 리스너 등록 (숨겨진 윈도우 생성)"""
@@ -85,11 +83,11 @@ class ClipboardMonitor:
 
     def _on_clipboard_changed(self):
         """클립보드 변경 이벤트 처리"""
-        # 자체 트리거 무시 (카운터 기반 — 한 번 무시 후 즉시 해제)
-        if self._ignore_count > 0:
-            self._ignore_count -= 1
-            print(f"[Monitor] 자체 트리거 무시 (남은 카운트: {self._ignore_count})")
-            return
+        # 자체 트리거 무시 (시간 기반)
+        with self._lock:
+            if time.monotonic() < self._ignore_until:
+                print("[Monitor] 자체 트리거 무시")
+                return
 
         item = self._read_clipboard()
         if item is None:
