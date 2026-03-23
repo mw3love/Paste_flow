@@ -22,7 +22,7 @@ class TrayIcon(QObject):
     """시스템 트레이 아이콘"""
 
     panel_toggle_requested = pyqtSignal()
-    mini_window_toggle_requested = pyqtSignal()
+    settings_requested = pyqtSignal()
     quit_requested = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -34,7 +34,7 @@ class TrayIcon(QObject):
 
     def _setup_menu(self):
         """우클릭 메뉴"""
-        menu = QMenu()
+        self._menu = menu = QMenu()
         menu.setStyleSheet("""
             QMenu {
                 background-color: #313244;
@@ -46,9 +46,8 @@ class TrayIcon(QObject):
             }
         """)
         menu.addAction("📋 패널 열기", self.panel_toggle_requested.emit)
-        menu.addAction("🪟 미니 창 표시/숨기기", self.mini_window_toggle_requested.emit)
         menu.addSeparator()
-        menu.addAction("⚙️ 설정", lambda: None)  # Phase 3에서 구현
+        menu.addAction("⚙️ 설정", self.settings_requested.emit)
         menu.addAction("❌ 종료", self.quit_requested.emit)
         self._tray.setContextMenu(menu)
 

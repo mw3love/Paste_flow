@@ -304,6 +304,7 @@ class ClipboardPanel(QWidget):
 
     paste_item_requested = pyqtSignal(object)
     copy_item_requested = pyqtSignal(object)
+    combine_copy_requested = pyqtSignal(object)  # F6: 다중 선택 결합 복사
     pin_item_requested = pyqtSignal(int)
     unpin_item_requested = pyqtSignal(int)
     delete_item_requested = pyqtSignal(int)
@@ -318,8 +319,11 @@ class ClipboardPanel(QWidget):
         self._selected_ids: set[int] = set()
         self._last_clicked_id: Optional[int] = None
         self._search_text: str = ""
+        self._queue_item_ids: list[int] = []
         self._drag_pos = None
         self._pinned_collapsed = True
+        self._auto_close = True  # F4-9: 외부 클릭 시 자동 닫기
+        self._user_activated = False  # 사용자가 직접 열었는지 (vs 복사 팝업)
 
         self._setup_window()
         self._setup_ui()
@@ -330,6 +334,7 @@ class ClipboardPanel(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         # 투명 배경 대신 solid 배경 — 리사이즈 가장자리에서 마우스 이벤트 수신 가능
         self.setStyleSheet(f"background-color: {COLORS['base']};")
         self.setMouseTracking(True)
@@ -450,11 +455,13 @@ class ClipboardPanel(QWidget):
         history: list[ClipboardItem],
         pointer: int,
         total: int,
+        queue_item_ids: list[int] = None,
     ):
         self._pinned_items = pinned
         self._history_items = history
         self._pointer = pointer
         self._total = total
+        self._queue_item_ids = queue_item_ids or []
         self._rebuild()
 
     def update_queue_status(self, pointer: int, total: int):
@@ -530,8 +537,20 @@ class ClipboardPanel(QWidget):
         filtered_history = self._filter_items(self._history_items, search)
 
         for i, item in enumerate(filtered_history, 1):
+            # 큐 상태 계산: 큐에 있는 항목이면 포인터 기준으로 current/done 판단
+            is_current = False
+            is_done = False
+            if item.id in self._queue_item_ids:
+                q_idx = self._queue_item_ids.index(item.id)
+                if q_idx < self._pointer:
+                    is_done = True
+                elif q_idx == self._pointer:
+                    is_current = True
+
             widget = PanelItemWidget(
                 item, i,
+                is_current=is_current,
+                is_done=is_done,
                 is_selected=item.id in self._selected_ids,
             )
             self._connect_item_signals(widget)
@@ -680,6 +699,34 @@ class ClipboardPanel(QWidget):
                 return item
         return None
 
+    def _combine_selected_items(self) -> Optional[ClipboardItem]:
+        """선택된 항목들을 순서대로 결합하여 새 ClipboardItem 생성"""
+        all_items = self._pinned_items + self._history_items
+        selected = [item for item in all_items if item.id in self._selected_ids]
+        if not selected:
+            return None
+
+        texts = []
+        first_image = None
+        for item in selected:
+            if item.text_content:
+                texts.append(item.text_content)
+            elif item.content_type == "image":
+                texts.append("[이미지]")
+                if first_image is None:
+                    first_image = item
+
+        combined_text = "\n".join(texts)
+
+        # 전체가 이미지면 첫 이미지 반환
+        if all(item.content_type == "image" for item in selected) and first_image:
+            return first_image
+
+        return ClipboardItem(
+            content_type="text",
+            text_content=combined_text,
+        )
+
     def _on_pin_reorder(self, source_id: int, target_id: int):
         ids = [item.id for item in self._pinned_items]
         if source_id not in ids or target_id not in ids:
@@ -746,7 +793,7 @@ class ClipboardPanel(QWidget):
         except Exception:
             pass
 
-        return super().nativeEvent(eventType, message)
+        return False, 0
 
     # ── 드래그 이동 (타이틀바 영역 = 검색바 위쪽) ──
 
@@ -763,3 +810,43 @@ class ClipboardPanel(QWidget):
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
         super().mouseReleaseEvent(event)
+
+    # ── F10-4: 위치/크기 저장 복원 ──
+
+    def get_geometry_dict(self) -> dict:
+        """현재 위치/크기를 dict로 반환"""
+        g = self.geometry()
+        return {"x": g.x(), "y": g.y(), "w": g.width(), "h": g.height()}
+
+    def restore_geometry_dict(self, d: dict):
+        """dict에서 위치/크기 복원"""
+        try:
+            x, y, w, h = int(d["x"]), int(d["y"]), int(d["w"]), int(d["h"])
+            self.setGeometry(x, y, w, h)
+        except (KeyError, ValueError):
+            pass
+
+    # ── F4-9: 외부 클릭 시 자동 닫기 ──
+
+    def changeEvent(self, event):
+        """창 비활성화 시 자동 닫기 (사용자가 직접 연 경우만)"""
+        if (event.type() == QEvent.Type.ActivationChange
+                and self._auto_close
+                and self._user_activated
+                and not self.isActiveWindow()):
+            self._user_activated = False
+            self.hide()
+        super().changeEvent(event)
+
+    # ── F6: 다중 선택 Ctrl+C 결합 복사 ──
+
+    def keyPressEvent(self, event):
+        """Ctrl+C: 선택된 항목들을 결합하여 새 클립보드 항목 생성"""
+        if (event.key() == Qt.Key.Key_C
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                and len(self._selected_ids) > 1):
+            combined = self._combine_selected_items()
+            if combined:
+                self.combine_copy_requested.emit(combined)
+            return
+        super().keyPressEvent(event)

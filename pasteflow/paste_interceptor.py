@@ -18,6 +18,11 @@ from pasteflow.paste_queue import PasteQueue
 CF_HTML = win32clipboard.RegisterClipboardFormat("HTML Format")
 CF_RTF = win32clipboard.RegisterClipboardFormat("Rich Text Format")
 
+# --- ctypes 클립보드 API (훅 스레드용 — pywin32 C 확장 우회) ---
+_CF_UNICODETEXT = 13
+_CF_DIB = 8
+_GMEM_MOVEABLE = 0x0002
+
 # 저수준 키보드 훅 상수
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
@@ -107,6 +112,25 @@ _kernel32.GetModuleHandleW.restype = ctypes.wintypes.HMODULE
 _user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
 _user32.SetForegroundWindow.restype = ctypes.wintypes.BOOL
 
+# 클립보드 API (ctypes — 훅 스레드에서 pywin32 우회용)
+_user32.OpenClipboard.argtypes = [ctypes.wintypes.HWND]
+_user32.OpenClipboard.restype = ctypes.wintypes.BOOL
+_user32.CloseClipboard.argtypes = []
+_user32.CloseClipboard.restype = ctypes.wintypes.BOOL
+_user32.EmptyClipboard.argtypes = []
+_user32.EmptyClipboard.restype = ctypes.wintypes.BOOL
+_user32.SetClipboardData.argtypes = [ctypes.wintypes.UINT, ctypes.wintypes.HANDLE]
+_user32.SetClipboardData.restype = ctypes.wintypes.HANDLE
+
+_kernel32.GlobalAlloc.argtypes = [ctypes.wintypes.UINT, ctypes.c_size_t]
+_kernel32.GlobalAlloc.restype = ctypes.wintypes.HGLOBAL
+_kernel32.GlobalLock.argtypes = [ctypes.wintypes.HGLOBAL]
+_kernel32.GlobalLock.restype = ctypes.c_void_p
+_kernel32.GlobalUnlock.argtypes = [ctypes.wintypes.HGLOBAL]
+_kernel32.GlobalUnlock.restype = ctypes.wintypes.BOOL
+_kernel32.GlobalFree.argtypes = [ctypes.wintypes.HGLOBAL]
+_kernel32.GlobalFree.restype = ctypes.wintypes.HGLOBAL
+
 
 # --- SendInput 헬퍼 ---
 
@@ -194,30 +218,34 @@ class PasteInterceptor:
 
         Ctrl+V 키다운 시 클립보드 교체 후 키 이벤트를 그대로 통과시킨다.
         절대 키를 차단하지 않는다.
+
+        중요: ctypes 콜백 안에서 예외가 C 레벨로 전파되면 프로세스 크래시.
+        반드시 모든 예외를 잡아야 한다.
         """
-        if nCode >= 0 and wParam == WM_KEYDOWN:
-            # KBDLLHOOKSTRUCT에서 vkCode 추출 (첫 4바이트)
-            vk_code = ctypes.cast(
-                lParam, ctypes.POINTER(ctypes.c_ulong)
-            ).contents.value
+        try:
+            if nCode >= 0 and wParam == WM_KEYDOWN:
+                # KBDLLHOOKSTRUCT에서 vkCode 추출 (첫 4바이트)
+                vk_code = ctypes.cast(
+                    lParam, ctypes.POINTER(ctypes.c_ulong)
+                ).contents.value
 
-            if vk_code == VK_V:
-                # Ctrl 키 눌림 확인
-                ctrl_pressed = _user32.GetAsyncKeyState(VK_CONTROL) & 0x8000
-                shift_pressed = _user32.GetAsyncKeyState(VK_SHIFT) & 0x8000
-                alt_pressed = _user32.GetAsyncKeyState(VK_MENU) & 0x8000
+                if vk_code == VK_V:
+                    # Ctrl 키 눌림 확인
+                    ctrl_pressed = _user32.GetAsyncKeyState(VK_CONTROL) & 0x8000
+                    shift_pressed = _user32.GetAsyncKeyState(VK_SHIFT) & 0x8000
+                    alt_pressed = _user32.GetAsyncKeyState(VK_MENU) & 0x8000
 
-                # Ctrl+V만 처리 (Ctrl+Shift+V 등은 무시)
-                if ctrl_pressed and not shift_pressed and not alt_pressed:
-                    # direct_paste가 보낸 Ctrl+V는 무시
-                    if self._direct_paste_active:
-                        pass
-                    else:
-                        # 키 반복 디바운스 (100ms)
-                        now = time.monotonic()
-                        if now - self._last_paste_time > 0.1:
-                            self._last_paste_time = now
-                            self._on_ctrl_v()
+                    # Ctrl+V만 처리 (Ctrl+Shift+V 등은 무시)
+                    if ctrl_pressed and not shift_pressed and not alt_pressed:
+                        # direct_paste가 보낸 Ctrl+V는 무시
+                        if not self._direct_paste_active:
+                            # 키 반복 디바운스 (100ms)
+                            now = time.monotonic()
+                            if now - self._last_paste_time > 0.1:
+                                self._last_paste_time = now
+                                self._on_ctrl_v()
+        except Exception as e:
+            print(f"[Hook] 훅 프로시저 예외 (무시): {e}")
 
         # 키 이벤트를 절대 차단하지 않음 — 항상 CallNextHookEx
         return _user32.CallNextHookEx(
@@ -225,7 +253,7 @@ class PasteInterceptor:
         )
 
     def _on_ctrl_v(self):
-        """Ctrl+V 키다운 시 클립보드 교체"""
+        """Ctrl+V 키다운 시 클립보드 교체 (훅 콜백 내부 — 빠르게 완료해야 함)"""
         next_item = self.queue.get_next()
         if next_item is None:
             print("[Interceptor] 큐 소진 — 기본 동작")
@@ -234,8 +262,8 @@ class PasteInterceptor:
         preview = (next_item.preview_text or "")[:30]
         print(f"[Interceptor] 순차 붙여넣기: '{preview}'")
 
-        # self_triggered는 _set_clipboard 내부에서 설정 (성공 시에만)
-        self._set_clipboard(next_item)
+        # fast=True: 훅 콜백이므로 재시도/sleep 없이 단일 시도
+        self._set_clipboard(next_item, fast=True)
 
         # 붙여넣기 콜백 (UI 업데이트 등)
         if self.on_paste:
@@ -313,50 +341,131 @@ class PasteInterceptor:
             time.sleep(0.05)
             self._direct_paste_active = False
 
-    def _set_clipboard(self, item: ClipboardItem):
-        """클립보드에 항목 설정 — 모든 형식 보존"""
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                win32clipboard.OpenClipboard()
-                break
-            except Exception:
-                if attempt < max_retries - 1:
-                    time.sleep(0.01)
-                else:
-                    print("[Interceptor] 클립보드 열기 실패")
-                    return  # 실패 시 self_triggered 설정 안 함
+    def _set_clipboard(self, item: ClipboardItem, *, fast: bool = False):
+        """클립보드에 항목 설정 — 모든 형식 보존
 
-        # 클립보드 열기 성공 → 자체 트리거 무시 설정 (500ms)
+        fast=True: 훅 콜백에서 호출 — raw ctypes로 pywin32 C 확장 우회.
+        fast=False: direct_paste 등 일반 경로 — pywin32 사용, 최대 3회 재시도.
+        """
+        if fast:
+            self._set_clipboard_ctypes(item)
+        else:
+            self._set_clipboard_pywin32(item)
+
+    def _set_clipboard_ctypes(self, item: ClipboardItem):
+        """ctypes 기반 클립보드 설정 (훅 스레드 전용 — pywin32 우회)"""
+        if not _user32.OpenClipboard(None):
+            print("[Interceptor] ctypes 클립보드 열기 실패")
+            return
+
         if self.monitor:
             self.monitor.set_self_triggered(0.5)
 
         try:
-            win32clipboard.EmptyClipboard()
+            _user32.EmptyClipboard()
 
             # 텍스트
             if item.text_content:
-                win32clipboard.SetClipboardData(
-                    win32con.CF_UNICODETEXT, item.text_content
-                )
+                data = item.text_content.encode("utf-16-le") + b"\x00\x00"
+                h = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(data))
+                if h:
+                    p = _kernel32.GlobalLock(h)
+                    if p:
+                        ctypes.memmove(p, data, len(data))
+                        _kernel32.GlobalUnlock(h)
+                        _user32.SetClipboardData(_CF_UNICODETEXT, h)
+                    else:
+                        _kernel32.GlobalFree(h)
 
             # HTML
             if item.html_content:
                 try:
-                    html_bytes = item.html_content.encode("utf-8")
-                    win32clipboard.SetClipboardData(CF_HTML, html_bytes)
+                    html_bytes = item.html_content.encode("utf-8") + b"\x00"
+                    h = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(html_bytes))
+                    if h:
+                        p = _kernel32.GlobalLock(h)
+                        if p:
+                            ctypes.memmove(p, html_bytes, len(html_bytes))
+                            _kernel32.GlobalUnlock(h)
+                            _user32.SetClipboardData(CF_HTML, h)
+                        else:
+                            _kernel32.GlobalFree(h)
                 except Exception:
                     pass
 
             # RTF
             if item.rtf_content:
                 try:
-                    rtf_bytes = item.rtf_content.encode("utf-8")
-                    win32clipboard.SetClipboardData(CF_RTF, rtf_bytes)
+                    rtf_bytes = item.rtf_content.encode("utf-8") + b"\x00"
+                    h = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(rtf_bytes))
+                    if h:
+                        p = _kernel32.GlobalLock(h)
+                        if p:
+                            ctypes.memmove(p, rtf_bytes, len(rtf_bytes))
+                            _kernel32.GlobalUnlock(h)
+                            _user32.SetClipboardData(CF_RTF, h)
+                        else:
+                            _kernel32.GlobalFree(h)
                 except Exception:
                     pass
 
-            # 이미지
+            # 이미지 (DIB)
+            if item.image_data:
+                try:
+                    h = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(item.image_data))
+                    if h:
+                        p = _kernel32.GlobalLock(h)
+                        if p:
+                            ctypes.memmove(p, item.image_data, len(item.image_data))
+                            _kernel32.GlobalUnlock(h)
+                            _user32.SetClipboardData(_CF_DIB, h)
+                        else:
+                            _kernel32.GlobalFree(h)
+                except Exception:
+                    pass
+        finally:
+            _user32.CloseClipboard()
+
+    def _set_clipboard_pywin32(self, item: ClipboardItem):
+        """pywin32 기반 클립보드 설정 (메인/일반 스레드용)"""
+        for attempt in range(3):
+            try:
+                win32clipboard.OpenClipboard()
+                break
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.01)
+                else:
+                    print("[Interceptor] 클립보드 열기 실패")
+                    return
+
+        if self.monitor:
+            self.monitor.set_self_triggered(0.5)
+
+        try:
+            win32clipboard.EmptyClipboard()
+
+            if item.text_content:
+                win32clipboard.SetClipboardData(
+                    win32con.CF_UNICODETEXT, item.text_content
+                )
+
+            if item.html_content:
+                try:
+                    win32clipboard.SetClipboardData(
+                        CF_HTML, item.html_content.encode("utf-8")
+                    )
+                except Exception:
+                    pass
+
+            if item.rtf_content:
+                try:
+                    win32clipboard.SetClipboardData(
+                        CF_RTF, item.rtf_content.encode("utf-8")
+                    )
+                except Exception:
+                    pass
+
             if item.image_data:
                 try:
                     win32clipboard.SetClipboardData(
@@ -364,6 +473,5 @@ class PasteInterceptor:
                     )
                 except Exception:
                     pass
-
         finally:
             win32clipboard.CloseClipboard()

@@ -8,7 +8,7 @@ import ctypes
 import threading
 import time
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, QObject, pyqtSignal
 
 from pasteflow.database import Database
 from pasteflow.models import ClipboardItem
@@ -18,6 +18,12 @@ from pasteflow.paste_interceptor import PasteInterceptor
 from pasteflow.hotkey_manager import HotkeyManager
 from pasteflow.ui.panel import ClipboardPanel
 from pasteflow.ui.tray import TrayIcon
+from pasteflow.ui.settings_dialog import SettingsDialog
+
+
+class _SignalBridge(QObject):
+    """훅 스레드 → 메인 스레드 시그널 전달"""
+    paste_happened = pyqtSignal()
 
 
 class PasteFlowApp:
@@ -26,6 +32,10 @@ class PasteFlowApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
+
+        # 스레드 안전 시그널 브릿지
+        self._bridge = _SignalBridge()
+        self._bridge.paste_happened.connect(self._update_paste_ui)
 
         # 코어 모듈
         db_path = os.path.join(os.path.dirname(__file__), "..", "pasteflow.db")
@@ -46,6 +56,9 @@ class PasteFlowApp:
         # 패널 열기 전 포커스된 윈도우 추적
         self._prev_foreground_hwnd = None
 
+        # DB에서 설정 로드 및 적용
+        self._apply_settings_from_db()
+
         # 시그널 연결
         self._connect_signals()
 
@@ -53,9 +66,11 @@ class PasteFlowApp:
         """모든 시그널 연결"""
         self.tray.quit_requested.connect(self._quit)
         self.tray.panel_toggle_requested.connect(self._toggle_panel)
+        self.tray.settings_requested.connect(self._open_settings)
 
         self.panel.paste_item_requested.connect(self._on_panel_paste)
         self.panel.copy_item_requested.connect(self._on_copy_item)
+        self.panel.combine_copy_requested.connect(self._on_combine_copy)
         self.panel.pin_item_requested.connect(self._on_pin_item)
         self.panel.unpin_item_requested.connect(self._on_unpin_item)
         self.panel.delete_item_requested.connect(self._on_delete_item)
@@ -77,14 +92,14 @@ class PasteFlowApp:
 
         self._refresh_panel()
         if not self.panel.isVisible():
-            # 포커스를 빼앗지 않고 표시 (SW_SHOWNOACTIVATE)
-            self.panel.show()
+            # 포커스를 빼앗지 않고 표시 — WA_ShowWithoutActivating + SW_SHOWNOACTIVATE
             hwnd = int(self.panel.winId())
             ctypes.windll.user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+            self.panel.setVisible(True)
 
     def _on_paste_from_hook(self, item: ClipboardItem):
-        """붙여넣기 콜백 — 훅 스레드에서 호출됨 → 메인 스레드로 전달"""
-        QTimer.singleShot(0, self._update_paste_ui)
+        """붙여넣기 콜백 — 훅 스레드에서 호출됨 → 시그널로 메인 스레드 전달"""
+        self._bridge.paste_happened.emit()
 
     def _update_paste_ui(self):
         """메인 스레드에서 붙여넣기 UI 업데이트"""
@@ -99,6 +114,7 @@ class PasteFlowApp:
         else:
             self._prev_foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
             self._refresh_panel()
+            self.panel._user_activated = True
             self.panel.show()
             self.panel.raise_()
             self.panel.activateWindow()
@@ -108,7 +124,8 @@ class PasteFlowApp:
         pinned = self.db.get_pinned_items()
         history = self.db.get_recent_items()
         pointer, total = self.queue.get_status()
-        self.panel.refresh(pinned, history, pointer, total)
+        queue_item_ids = [item.id for item in self.queue.get_items()]
+        self.panel.refresh(pinned, history, pointer, total, queue_item_ids)
 
     def _on_direct_paste(self, n: int):
         """Alt+N 직접 붙여넣기"""
@@ -156,6 +173,13 @@ class PasteFlowApp:
         self.queue.add_item(item)
         self._refresh_panel()
 
+    def _on_combine_copy(self, item: ClipboardItem):
+        """F6: 다중 선택 결합 복사 → DB 저장 + 클립보드 + 큐"""
+        saved = self.db.save_item(item)
+        self.interceptor._set_clipboard(saved)
+        self.queue.add_item(saved)
+        self._refresh_panel()
+
     def _on_pin_item(self, item_id: int):
         self.db.pin_item(item_id)
         self._refresh_panel()
@@ -172,7 +196,83 @@ class PasteFlowApp:
         self.db.update_pin_orders(id_order_list)
         self._refresh_panel()
 
+    # ── 설정 ──
+
+    def _apply_settings_from_db(self):
+        """DB에서 설정 로드 → UI/동작에 적용"""
+        auto_close = self.db.get_setting("panel_auto_close", "1")
+        self.panel._auto_close = auto_close == "1"
+
+        # 패널 위치/크기 복원
+        import json
+        geo_json = self.db.get_setting("panel_geometry")
+        if geo_json:
+            try:
+                self.panel.restore_geometry_dict(json.loads(geo_json))
+            except Exception:
+                pass
+
+    def _open_settings(self):
+        """설정 다이얼로그 열기"""
+        current = {
+            "hotkey_panel_toggle": self.db.get_setting("hotkey_panel_toggle", "alt+v"),
+            "history_max": self.db.get_setting("history_max", "50"),
+            "panel_auto_close": self.db.get_setting("panel_auto_close", "1"),
+            "auto_start": self.db.get_setting("auto_start", "0"),
+        }
+        dlg = SettingsDialog(current)
+        dlg.settings_changed.connect(self._on_settings_changed)
+        dlg.exec()
+
+    def _on_settings_changed(self, new_settings: dict):
+        """설정 변경 적용"""
+        for key, value in new_settings.items():
+            self.db.set_setting(key, value)
+
+        # 패널 자동 닫기
+        self.panel._auto_close = new_settings.get("panel_auto_close", "1") == "1"
+
+        # 단축키 재등록
+        old_hotkey = self.db.get_setting("hotkey_panel_toggle", "alt+v")
+        new_hotkey = new_settings.get("hotkey_panel_toggle", "alt+v")
+        if old_hotkey != new_hotkey:
+            self.hotkey_manager.unregister_all()
+            self.hotkey_manager.register(new_hotkey, self._toggle_panel)
+            for n in range(1, 10):
+                self.hotkey_manager.register(
+                    f"alt+{n}", lambda idx=n: self._on_direct_paste(idx)
+                )
+
+        # 자동 시작
+        auto_start = new_settings.get("auto_start", "0") == "1"
+        self._set_auto_start(auto_start)
+
+    def _set_auto_start(self, enable: bool):
+        """Windows 시작 시 자동 실행 레지스트리 설정"""
+        import winreg
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        try:
+            reg_key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE
+            )
+            if enable:
+                exe_path = os.path.abspath(sys.argv[0])
+                winreg.SetValueEx(reg_key, "PasteFlow", 0, winreg.REG_SZ, exe_path)
+            else:
+                try:
+                    winreg.DeleteValue(reg_key, "PasteFlow")
+                except FileNotFoundError:
+                    pass
+            winreg.CloseKey(reg_key)
+        except Exception as e:
+            print(f"[Settings] 자동 시작 설정 실패: {e}")
+
     def _quit(self):
+        # 패널 위치/크기 저장
+        import json
+        geo = self.panel.get_geometry_dict()
+        self.db.set_setting("panel_geometry", json.dumps(geo))
+
         self.interceptor.stop()
         self.monitor.stop()
         self.hotkey_manager.destroy()
