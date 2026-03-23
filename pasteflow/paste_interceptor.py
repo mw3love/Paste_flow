@@ -30,6 +30,49 @@ VK_MENU = 0x12  # Alt
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
 
+
+# --- SendInput 구조체 (64비트 호환 — union 크기 정확히 맞춤) ---
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", ctypes.c_long),
+        ("dy", ctypes.c_long),
+        ("mouseData", ctypes.wintypes.DWORD),
+        ("dwFlags", ctypes.wintypes.DWORD),
+        ("time", ctypes.wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.wintypes.WORD),
+        ("wScan", ctypes.wintypes.WORD),
+        ("dwFlags", ctypes.wintypes.DWORD),
+        ("time", ctypes.wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", ctypes.wintypes.DWORD),
+        ("wParamL", ctypes.wintypes.WORD),
+        ("wParamH", ctypes.wintypes.WORD),
+    ]
+
+class _INPUT_UNION(ctypes.Union):
+    _fields_ = [
+        ("mi", MOUSEINPUT),
+        ("ki", KEYBDINPUT),
+        ("hi", HARDWAREINPUT),
+    ]
+
+class INPUT(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.wintypes.DWORD),
+        ("union", _INPUT_UNION),
+    ]
+
+
 # --- ctypes 타입 정의 (64비트 호환) ---
 LRESULT = ctypes.c_ssize_t  # 포인터 크기 (64비트에서 8바이트)
 HOOKPROC = ctypes.CFUNCTYPE(
@@ -63,6 +106,22 @@ _kernel32.GetModuleHandleW.restype = ctypes.wintypes.HMODULE
 
 _user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
 _user32.SetForegroundWindow.restype = ctypes.wintypes.BOOL
+
+
+# --- SendInput 헬퍼 ---
+
+def _make_key_input(vk, flags=0):
+    inp = INPUT()
+    inp.type = INPUT_KEYBOARD
+    inp.union.ki.wVk = vk
+    inp.union.ki.dwFlags = flags
+    return inp
+
+
+def _send_inputs(input_list):
+    arr = (INPUT * len(input_list))(*input_list)
+    result = _user32.SendInput(len(input_list), ctypes.byref(arr), ctypes.sizeof(INPUT))
+    return result
 
 
 class PasteInterceptor:
@@ -114,8 +173,11 @@ class PasteInterceptor:
             0,
         )
         if not self._hook:
+            print(f"[Hook] 훅 설치 실패! GetLastError={ctypes.GetLastError()}")
             self._running = False
             return
+
+        print("[Hook] 키보드 훅 설치 성공")
 
         msg = ctypes.wintypes.MSG()
         while self._running:
@@ -166,7 +228,11 @@ class PasteInterceptor:
         """Ctrl+V 키다운 시 클립보드 교체"""
         next_item = self.queue.get_next()
         if next_item is None:
+            print("[Interceptor] 큐 소진 — 기본 동작")
             return  # 큐 소진 → 개입 안 함 → OS 기본 동작
+
+        preview = (next_item.preview_text or "")[:30]
+        print(f"[Interceptor] 순차 붙여넣기: '{preview}'")
 
         # self_triggered는 _set_clipboard 내부에서 설정 (성공 시에만)
         self._set_clipboard(next_item)
@@ -205,35 +271,7 @@ class PasteInterceptor:
             self._direct_paste_active = False
 
     def _release_modifiers_and_send_ctrl_v(self):
-        """눌려 있는 수정키를 해제하고 Ctrl+V를 보낸 뒤 원래 수정키를 복원"""
-
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [
-                ("wVk", ctypes.wintypes.WORD),
-                ("wScan", ctypes.wintypes.WORD),
-                ("dwFlags", ctypes.wintypes.DWORD),
-                ("time", ctypes.wintypes.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-            ]
-
-        class INPUT(ctypes.Structure):
-            class _INPUT_UNION(ctypes.Union):
-                _fields_ = [("ki", KEYBDINPUT)]
-            _fields_ = [
-                ("type", ctypes.wintypes.DWORD),
-                ("union", _INPUT_UNION),
-            ]
-
-        def make_key_input(vk, flags=0):
-            inp = INPUT()
-            inp.type = INPUT_KEYBOARD
-            inp.union.ki.wVk = vk
-            inp.union.ki.dwFlags = flags
-            return inp
-
-        def send(input_list):
-            arr = (INPUT * len(input_list))(*input_list)
-            _user32.SendInput(len(input_list), ctypes.byref(arr), ctypes.sizeof(INPUT))
+        """눌려 있는 수정키를 해제하고 Ctrl+V를 전송 후 수정키 복원"""
 
         # 현재 눌려 있는 수정키 확인
         held_keys = []
@@ -243,16 +281,37 @@ class PasteInterceptor:
 
         # 1) 눌려 있는 수정키 모두 해제
         if held_keys:
-            send([make_key_input(vk, KEYEVENTF_KEYUP) for vk in held_keys])
+            _send_inputs([_make_key_input(vk, KEYEVENTF_KEYUP) for vk in held_keys])
             time.sleep(0.02)
 
         # 2) Ctrl+V 전송
-        send([
-            make_key_input(VK_CONTROL),
-            make_key_input(VK_V),
-            make_key_input(VK_V, KEYEVENTF_KEYUP),
-            make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+        _send_inputs([
+            _make_key_input(VK_CONTROL),
+            _make_key_input(VK_V),
+            _make_key_input(VK_V, KEYEVENTF_KEYUP),
+            _make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
         ])
+
+        # 3) Alt가 눌려있었으면 복원 (연속 Alt+N 지원)
+        #    Ctrl+V 완료 후이므로 간섭 없음
+        if VK_MENU in held_keys:
+            time.sleep(0.02)
+            _send_inputs([_make_key_input(VK_MENU)])
+
+    def send_ctrl_v_to(self, target_hwnd):
+        """대상 윈도우에 포커스 후 Ctrl+V 전송 (메인 스레드에서 포커스 이동 후 호출)"""
+        time.sleep(0.1)
+        self._direct_paste_active = True
+        try:
+            _send_inputs([
+                _make_key_input(VK_CONTROL),
+                _make_key_input(VK_V),
+                _make_key_input(VK_V, KEYEVENTF_KEYUP),
+                _make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+            ])
+        finally:
+            time.sleep(0.05)
+            self._direct_paste_active = False
 
     def _set_clipboard(self, item: ClipboardItem):
         """클립보드에 항목 설정 — 모든 형식 보존"""
@@ -265,6 +324,7 @@ class PasteInterceptor:
                 if attempt < max_retries - 1:
                     time.sleep(0.01)
                 else:
+                    print("[Interceptor] 클립보드 열기 실패")
                     return  # 실패 시 self_triggered 설정 안 함
 
         # 클립보드 열기 성공 → 자체 트리거 무시 설정 (500ms)

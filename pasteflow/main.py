@@ -5,6 +5,8 @@
 import sys
 import os
 import ctypes
+import threading
+import time
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer
 
@@ -14,7 +16,6 @@ from pasteflow.paste_queue import PasteQueue
 from pasteflow.clipboard_monitor import ClipboardMonitor
 from pasteflow.paste_interceptor import PasteInterceptor
 from pasteflow.hotkey_manager import HotkeyManager
-from pasteflow.ui.mini_window import MiniWindow
 from pasteflow.ui.panel import ClipboardPanel
 from pasteflow.ui.tray import TrayIcon
 
@@ -38,8 +39,7 @@ class PasteFlowApp:
         )
         self.hotkey_manager = HotkeyManager()
 
-        # UI
-        self.mini_window = MiniWindow()
+        # UI (패널이 기본 UI — 미니창 없음)
         self.panel = ClipboardPanel()
         self.tray = TrayIcon()
 
@@ -49,19 +49,11 @@ class PasteFlowApp:
         # 시그널 연결
         self._connect_signals()
 
-        # 큐에는 DB 히스토리를 넣지 않음 — 큐는 현재 세션 복사분만 관리
-        # DB 히스토리는 패널 UI에서만 사용
-
     def _connect_signals(self):
         """모든 시그널 연결"""
-        # 트레이
         self.tray.quit_requested.connect(self._quit)
         self.tray.panel_toggle_requested.connect(self._toggle_panel)
 
-        # 미니 창 → 패널
-        self.mini_window.open_panel_requested.connect(self._toggle_panel)
-
-        # 패널 시그널
         self.panel.paste_item_requested.connect(self._on_panel_paste)
         self.panel.copy_item_requested.connect(self._on_copy_item)
         self.panel.pin_item_requested.connect(self._on_pin_item)
@@ -69,29 +61,26 @@ class PasteFlowApp:
         self.panel.delete_item_requested.connect(self._on_delete_item)
         self.panel.pin_reorder_requested.connect(self._on_pin_reorder)
 
-        # 글로벌 단축키: Alt+V → 패널 토글
         self.hotkey_manager.register("alt+v", self._toggle_panel)
 
-        # Alt+1~9 → 히스토리 N번째 항목 즉시 붙여넣기 (F5-1)
         for n in range(1, 10):
             self.hotkey_manager.register(f"alt+{n}", lambda idx=n: self._on_direct_paste(idx))
 
     def _on_new_clipboard_item(self, item: ClipboardItem):
         """클립보드 모니터 콜백 — 새 항목 감지"""
-        # DB 저장
         saved = self.db.save_item(item)
-
-        # 큐에 추가
         self.queue.add_item(saved)
 
-        # 미니 창 표시
-        recent = self.queue.get_items()
-        pointer, total = self.queue.get_status()
-        self.mini_window.show_and_refresh(recent, pointer, total)
+        # 패널이 아직 안 보이면 현재 포커스 윈도우 기억
+        if not self.panel.isVisible():
+            self._prev_foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
 
-        # 패널 갱신 (열려 있으면)
-        if self.panel.isVisible():
-            self._refresh_panel()
+        self._refresh_panel()
+        if not self.panel.isVisible():
+            # 포커스를 빼앗지 않고 표시 (SW_SHOWNOACTIVATE)
+            self.panel.show()
+            hwnd = int(self.panel.winId())
+            ctypes.windll.user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
 
     def _on_paste_from_hook(self, item: ClipboardItem):
         """붙여넣기 콜백 — 훅 스레드에서 호출됨 → 메인 스레드로 전달"""
@@ -100,9 +89,6 @@ class PasteFlowApp:
     def _update_paste_ui(self):
         """메인 스레드에서 붙여넣기 UI 업데이트"""
         pointer, total = self.queue.get_status()
-        self.mini_window.update_status(pointer, total)
-
-        # 패널도 갱신
         if self.panel.isVisible():
             self.panel.update_queue_status(pointer, total)
 
@@ -111,7 +97,6 @@ class PasteFlowApp:
         if self.panel.isVisible():
             self.panel.hide()
         else:
-            # 패널 열기 전 현재 포커스된 윈도우 기억
             self._prev_foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
             self._refresh_panel()
             self.panel.show()
@@ -126,82 +111,68 @@ class PasteFlowApp:
         self.panel.refresh(pinned, history, pointer, total)
 
     def _on_direct_paste(self, n: int):
-        """Alt+N 직접 붙여넣기 (F5-1) — 히스토리 N번째 항목"""
+        """Alt+N 직접 붙여넣기"""
         history = self.db.get_recent_items()
         if n > len(history):
             return
         item = history[n - 1]
-        # 별도 스레드에서 실행 (SendInput 대기 방지)
-        import threading
         threading.Thread(
             target=self.interceptor.direct_paste, args=(item,), daemon=True
         ).start()
 
     def _on_panel_paste(self, item: ClipboardItem):
-        """패널에서 붙여넣기 요청 — 메인 스레드에서 포커스 이동 후 SendInput"""
+        """패널에서 더블클릭 붙여넣기 — 패널 유지, 대상 앱에 붙여넣기"""
         target_hwnd = self._prev_foreground_hwnd
-        # 패널 auto-close 비활성화 (SetForegroundWindow가 앱 비활성화 유발)
-        self.panel._auto_close = False
 
-        # 1) 클립보드 설정 (메인 스레드, 빠름)
+        # 클립보드 설정
         self.interceptor._set_clipboard(item)
 
-        # 2) 메인 스레드에서 포커스 이동 (Windows 정책상 메인 스레드만 가능)
-        if target_hwnd:
-            ctypes.windll.user32.SetForegroundWindow(target_hwnd)
+        def _do_paste():
+            try:
+                time.sleep(0.05)
+                if target_hwnd:
+                    ctypes.windll.user32.SetForegroundWindow(target_hwnd)
+                    time.sleep(0.1)
+                self.interceptor.send_ctrl_v_to(None)
+                time.sleep(0.2)
+                QTimer.singleShot(0, self._reactivate_panel)
+            except Exception as e:
+                print(f"[PanelPaste] Error: {e}")
 
-        # 3) 백그라운드에서 Ctrl+V 전송 (딜레이 필요)
-        import threading
-        threading.Thread(
-            target=self._do_panel_send_ctrl_v,
-            daemon=True,
-        ).start()
+        threading.Thread(target=_do_paste, daemon=True).start()
 
-    def _do_panel_send_ctrl_v(self):
-        """패널 붙여넣기: Ctrl+V 전송 후 패널 복원"""
+    def _reactivate_panel(self):
+        """붙여넣기 완료 → 패널 다시 활성화"""
         try:
-            self.interceptor.send_ctrl_v_to(None)
-        finally:
-            import time
-            time.sleep(0.2)
-            QTimer.singleShot(0, self._restore_panel_after_paste)
-
-    def _restore_panel_after_paste(self):
-        """패널 붙여넣기 후 auto-close 복원"""
-        self.panel._auto_close = True
+            if self.panel.isVisible():
+                self.panel.raise_()
+                self.panel.activateWindow()
+        except Exception:
+            pass
 
     def _on_copy_item(self, item: ClipboardItem):
-        """고정 항목 클릭 → 클립보드 복사 + 큐 추가 (F7-6)"""
+        """고정 항목 클릭 → 클립보드 복사 + 큐 추가"""
         self.interceptor._set_clipboard(item)
         self.queue.add_item(item)
-
-        # 미니 창 업데이트
-        recent = self.queue.get_items()
-        pointer, total = self.queue.get_status()
-        self.mini_window.show_and_refresh(recent, pointer, total)
+        self._refresh_panel()
 
     def _on_pin_item(self, item_id: int):
-        """항목 고정"""
         self.db.pin_item(item_id)
         self._refresh_panel()
 
     def _on_unpin_item(self, item_id: int):
-        """항목 고정 해제"""
         self.db.unpin_item(item_id)
         self._refresh_panel()
 
     def _on_delete_item(self, item_id: int):
-        """항목 삭제"""
         self.db.delete_item(item_id)
         self._refresh_panel()
 
     def _on_pin_reorder(self, id_order_list: list):
-        """고정 항목 순서 변경 (F7-5)"""
         self.db.update_pin_orders(id_order_list)
         self._refresh_panel()
 
     def _quit(self):
-        """앱 종료"""
         self.interceptor.stop()
         self.monitor.stop()
         self.hotkey_manager.destroy()
@@ -210,30 +181,22 @@ class PasteFlowApp:
         self.app.quit()
 
     def run(self):
-        """앱 시작"""
-        # 모니터 시작
         self.monitor.start()
-
-        # Ctrl+V 인터셉터 시작
         self.interceptor.start()
-
-        # 시스템 트레이 표시
         self.tray.show()
 
-        # Windows 메시지 루프 폴링 (클립보드 모니터용)
         self._msg_timer = QTimer()
         self._msg_timer.timeout.connect(self._pump_messages)
-        self._msg_timer.start(50)  # 50ms 간격
+        self._msg_timer.start(50)
 
         return self.app.exec()
 
     def _pump_messages(self):
-        """Windows 메시지 루프 처리 (WM_CLIPBOARDUPDATE + WM_HOTKEY 수신용)"""
         import ctypes
         import ctypes.wintypes
         msg = ctypes.wintypes.MSG()
         while ctypes.windll.user32.PeekMessageW(
-            ctypes.byref(msg), None, 0, 0, 1  # PM_REMOVE
+            ctypes.byref(msg), None, 0, 0, 1
         ):
             ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
             ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
