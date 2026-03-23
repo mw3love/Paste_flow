@@ -138,33 +138,36 @@ class PasteFlowApp:
         ).start()
 
     def _on_panel_paste(self, item: ClipboardItem):
-        """패널에서 붙여넣기 요청 — 이전 윈도우에 포커스 후 SendInput (F5-2, F5-4)"""
+        """패널에서 붙여넣기 요청 — 메인 스레드에서 포커스 이동 후 SendInput"""
         target_hwnd = self._prev_foreground_hwnd
         # 패널 auto-close 비활성화 (SetForegroundWindow가 앱 비활성화 유발)
         self.panel._auto_close = False
+
+        # 1) 클립보드 설정 (메인 스레드, 빠름)
+        self.interceptor._set_clipboard(item)
+
+        # 2) 메인 스레드에서 포커스 이동 (Windows 정책상 메인 스레드만 가능)
+        if target_hwnd:
+            ctypes.windll.user32.SetForegroundWindow(target_hwnd)
+
+        # 3) 백그라운드에서 Ctrl+V 전송 (딜레이 필요)
         import threading
         threading.Thread(
-            target=self._do_panel_paste,
-            args=(item, target_hwnd),
+            target=self._do_panel_send_ctrl_v,
             daemon=True,
         ).start()
 
-    def _do_panel_paste(self, item: ClipboardItem, target_hwnd):
-        """패널 붙여넣기 워커 스레드"""
+    def _do_panel_send_ctrl_v(self):
+        """패널 붙여넣기: Ctrl+V 전송 후 패널 복원"""
         try:
-            self.interceptor.direct_paste(item, target_hwnd=target_hwnd)
+            self.interceptor.send_ctrl_v_to(None)
         finally:
             import time
             time.sleep(0.2)
-            # 패널에 포커스 복원 후 auto-close 재활성화
             QTimer.singleShot(0, self._restore_panel_after_paste)
 
     def _restore_panel_after_paste(self):
-        """패널 붙여넣기 후 포커스 복원"""
-        if self.panel.isVisible():
-            self.panel.raise_()
-            self.panel.activateWindow()
-        # auto-close 재활성화
+        """패널 붙여넣기 후 auto-close 복원"""
         self.panel._auto_close = True
 
     def _on_copy_item(self, item: ClipboardItem):
