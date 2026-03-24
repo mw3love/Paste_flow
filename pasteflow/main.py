@@ -24,6 +24,7 @@ from pasteflow.ui.settings_dialog import SettingsDialog
 class _SignalBridge(QObject):
     """훅 스레드 → 메인 스레드 시그널 전달"""
     paste_happened = pyqtSignal()
+    new_item_saved = pyqtSignal(object)  # ClipboardItem — 클립보드 모니터 스레드 → 메인 스레드
 
 
 class PasteFlowApp:
@@ -36,6 +37,7 @@ class PasteFlowApp:
         # 스레드 안전 시그널 브릿지
         self._bridge = _SignalBridge()
         self._bridge.paste_happened.connect(self._update_paste_ui)
+        self._bridge.new_item_saved.connect(self._on_new_item_ui)
 
         # 코어 모듈
         db_path = os.path.join(os.path.dirname(__file__), "..", "pasteflow.db")
@@ -75,6 +77,7 @@ class PasteFlowApp:
         self.panel.unpin_item_requested.connect(self._on_unpin_item)
         self.panel.delete_item_requested.connect(self._on_delete_item)
         self.panel.pin_reorder_requested.connect(self._on_pin_reorder)
+        self.panel.edit_item_requested.connect(self._on_edit_item)
 
         self.hotkey_manager.register("alt+v", self._toggle_panel)
 
@@ -82,10 +85,14 @@ class PasteFlowApp:
             self.hotkey_manager.register(f"alt+{n}", lambda idx=n: self._on_direct_paste(idx))
 
     def _on_new_clipboard_item(self, item: ClipboardItem):
-        """클립보드 모니터 콜백 — 새 항목 감지"""
+        """클립보드 모니터 콜백 — 백그라운드 스레드에서 호출됨.
+        DB/큐 작업만 수행하고 UI 갱신은 시그널로 메인 스레드에 위임."""
         saved = self.db.save_item(item)
         self.queue.add_item(saved)
+        self._bridge.new_item_saved.emit(saved)
 
+    def _on_new_item_ui(self, saved: ClipboardItem):
+        """메인 스레드에서 UI 갱신 — new_item_saved 시그널 수신"""
         # 패널이 아직 안 보이면 현재 포커스 윈도우 기억
         if not self.panel.isVisible():
             self._prev_foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
@@ -121,8 +128,8 @@ class PasteFlowApp:
 
     def _refresh_panel(self):
         """패널 데이터 갱신"""
-        pinned = self.db.get_pinned_items()
-        history = self.db.get_recent_items()
+        pinned = self.db.get_pinned_items_summary()
+        history = self.db.get_recent_items_summary()
         pointer, total = self.queue.get_status()
         queue_item_ids = [item.id for item in self.queue.get_items()]
         self.panel.refresh(pinned, history, pointer, total, queue_item_ids)
@@ -139,28 +146,34 @@ class PasteFlowApp:
 
     def _on_panel_paste(self, item: ClipboardItem):
         """패널에서 더블클릭 붙여넣기 — 패널 유지, 대상 앱에 붙여넣기"""
+        # 패널 표시용 항목은 image_data/extra_formats 없음 → DB에서 전체 로드
+        full_item = self.db.get_item(item.id) or item
         target_hwnd = self._prev_foreground_hwnd
 
+        # 붙여넣기 중 포커스 이동으로 패널이 자동닫기되지 않도록 플래그 설정
+        self.panel._paste_in_progress = True
+
         # 클립보드 설정
-        self.interceptor._set_clipboard(item)
+        self.interceptor._set_clipboard(full_item)
 
         def _do_paste():
             try:
-                time.sleep(0.05)
                 if target_hwnd:
                     ctypes.windll.user32.SetForegroundWindow(target_hwnd)
-                    time.sleep(0.1)
+                    time.sleep(0.05)
                 self.interceptor.send_ctrl_v_to(None)
-                time.sleep(0.2)
-                QTimer.singleShot(0, self._reactivate_panel)
+                time.sleep(0.1)
             except Exception as e:
                 print(f"[PanelPaste] Error: {e}")
+            finally:
+                QTimer.singleShot(0, self._reactivate_panel)
 
         threading.Thread(target=_do_paste, daemon=True).start()
 
     def _reactivate_panel(self):
         """붙여넣기 완료 → 패널 다시 활성화"""
         try:
+            self.panel._paste_in_progress = False
             if self.panel.isVisible():
                 self.panel.raise_()
                 self.panel.activateWindow()
@@ -169,8 +182,9 @@ class PasteFlowApp:
 
     def _on_copy_item(self, item: ClipboardItem):
         """고정 항목 클릭 → 클립보드 복사 + 큐 추가"""
-        self.interceptor._set_clipboard(item)
-        self.queue.add_item(item)
+        full_item = self.db.get_item(item.id) or item
+        self.interceptor._set_clipboard(full_item)
+        self.queue.add_item(full_item)
         self._refresh_panel()
 
     def _on_combine_copy(self, item: ClipboardItem):
@@ -194,6 +208,10 @@ class PasteFlowApp:
 
     def _on_pin_reorder(self, id_order_list: list):
         self.db.update_pin_orders(id_order_list)
+        self._refresh_panel()
+
+    def _on_edit_item(self, item_id: int, new_text: str):
+        self.db.update_item_text(item_id, new_text)
         self._refresh_panel()
 
     # ── 설정 ──
@@ -226,6 +244,9 @@ class PasteFlowApp:
 
     def _on_settings_changed(self, new_settings: dict):
         """설정 변경 적용"""
+        # 단축키 비교는 DB 저장 전에 이전 값을 먼저 읽어야 함
+        old_hotkey = self.db.get_setting("hotkey_panel_toggle", "alt+v")
+
         for key, value in new_settings.items():
             self.db.set_setting(key, value)
 
@@ -233,7 +254,6 @@ class PasteFlowApp:
         self.panel._auto_close = new_settings.get("panel_auto_close", "1") == "1"
 
         # 단축키 재등록
-        old_hotkey = self.db.get_setting("hotkey_panel_toggle", "alt+v")
         new_hotkey = new_settings.get("hotkey_panel_toggle", "alt+v")
         if old_hotkey != new_hotkey:
             self.hotkey_manager.unregister_all()
