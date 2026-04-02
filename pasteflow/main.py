@@ -112,14 +112,19 @@ def _activate_and_send_ctrl_v(hwnd):
 def _get_explorer_folder(hwnd: int):
     """CabinetWClass HWND → 현재 폴더 경로 반환. 실패 시 None."""
     try:
+        import pythoncom
         import win32com.client
-        shell = win32com.client.Dispatch("Shell.Application")
-        for window in shell.Windows():
-            try:
-                if int(window.HWND) == hwnd:
-                    return window.Document.Folder.Self.Path
-            except Exception:
-                continue
+        pythoncom.CoInitialize()
+        try:
+            shell = win32com.client.Dispatch("Shell.Application")
+            for window in shell.Windows():
+                try:
+                    if int(window.HWND) == hwnd:
+                        return window.Document.Folder.Self.Path
+                except Exception:
+                    continue
+        finally:
+            pythoncom.CoUninitialize()
     except Exception:
         pass
     return None
@@ -128,8 +133,13 @@ def _get_explorer_folder(hwnd: int):
 def _get_desktop_path() -> str:
     """사용자 바탕화면 경로 반환."""
     try:
+        import pythoncom
         import win32com.client
-        return win32com.client.Dispatch("WScript.Shell").SpecialFolders("Desktop")
+        pythoncom.CoInitialize()
+        try:
+            return win32com.client.Dispatch("WScript.Shell").SpecialFolders("Desktop")
+        finally:
+            pythoncom.CoUninitialize()
     except Exception:
         return os.path.expanduser("~/Desktop")
 
