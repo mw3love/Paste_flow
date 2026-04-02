@@ -1,4 +1,4 @@
-"""이미지 확대 미리보기 팝업 — 드래그 이동·닫기 버튼 지원"""
+"""이미지 확대 미리보기 팝업 — 드래그 이동·휠 줌·닫기 버튼 지원"""
 import io
 
 from PyQt6.QtWidgets import (
@@ -42,6 +42,8 @@ class ImagePreviewPopup(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         self._drag_pos: QPoint | None = None
+        self._original_pixmap: QPixmap | None = None
+        self._scale_factor: float = 1.0
 
         self.setStyleSheet(f"""
             QWidget {{
@@ -105,14 +107,11 @@ class ImagePreviewPopup(QWidget):
         if not pixmap.loadFromData(png_data):
             return
 
-        scaled = pixmap.scaled(
-            PREVIEW_MAX_W, PREVIEW_MAX_H,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._image_label.setPixmap(scaled)
-        self._image_label.adjustSize()
-        self.adjustSize()
+        # 원본 픽스맵 보존 (휠 줌 기준점)
+        self._original_pixmap = pixmap
+        self._scale_factor = 1.0
+
+        self._apply_scale()
 
         # 커서 우측 하단에 배치, 화면 밖으로 나가지 않도록 조정
         screen = QApplication.primaryScreen()
@@ -138,6 +137,51 @@ class ImagePreviewPopup(QWidget):
 
     def hide_preview(self):
         self.hide()
+
+    # ------------------------------------------------------------------
+    # 휠 줌
+    # ------------------------------------------------------------------
+
+    def wheelEvent(self, event):
+        if self._original_pixmap is None:
+            return
+        delta = event.angleDelta().y()
+        factor = 1.1 if delta > 0 else (1 / 1.1)
+        self._scale_factor = max(0.1, min(8.0, self._scale_factor * factor))
+        self._apply_scale()
+
+    def _apply_scale(self):
+        """현재 _scale_factor를 _original_pixmap에 적용하고 창 크기·위치를 갱신."""
+        if self._original_pixmap is None:
+            return
+
+        # 초기 표시 크기: PREVIEW_MAX 상한 이내로 맞춘 후 scale_factor 적용
+        base = self._original_pixmap.scaled(
+            PREVIEW_MAX_W, PREVIEW_MAX_H,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        target_w = max(1, round(base.width() * self._scale_factor))
+        target_h = max(1, round(base.height() * self._scale_factor))
+
+        scaled = self._original_pixmap.scaled(
+            target_w, target_h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._image_label.setPixmap(scaled)
+        self._image_label.adjustSize()
+        self.adjustSize()
+
+        # 화면 경계 클램핑 (드래그·줌 후 창이 화면 밖으로 벗어나지 않도록)
+        screen = QApplication.primaryScreen()
+        if screen:
+            geom = screen.availableGeometry()
+            pos = self.pos()
+            x = max(geom.left(), min(pos.x(), geom.right() - self.width()))
+            y = max(geom.top(), min(pos.y(), geom.bottom() - self.height()))
+            if (x, y) != (pos.x(), pos.y()):
+                self.move(x, y)
 
     # ------------------------------------------------------------------
     # 드래그 이동
