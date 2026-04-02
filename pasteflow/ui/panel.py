@@ -120,7 +120,6 @@ class PanelItemWidget(QWidget):
             scaled = pixmap.scaled(80, 60, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             thumb_label.setPixmap(scaled)
             thumb_label.setFixedSize(80, 60)
-            thumb_label.setStyleSheet("border: none; background: transparent;")
             layout.addWidget(thumb_label)
             layout.addStretch(1)
             self.setFixedHeight(72)
@@ -137,7 +136,7 @@ class PanelItemWidget(QWidget):
             text_label.setMinimumWidth(0)
             text_label.setMaximumHeight(30)  # 최대 2줄
             text_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-            text_label.setStyleSheet(f"color: {text_color}; font-size: 12px; border: none;")
+            text_label.setStyleSheet(f"color: {text_color}; font-size: 12px;")
             # AlignVCenter 명시: label이 행 내 상단/하단 쏠림 방지
             layout.addWidget(text_label, 1, Qt.AlignmentFlag.AlignVCenter)
             self._text_label = text_label
