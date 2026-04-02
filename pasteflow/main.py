@@ -5,6 +5,7 @@
 import sys
 import os
 import ctypes
+import ctypes.wintypes
 import threading
 import time
 from PyQt6.QtWidgets import QApplication
@@ -17,14 +18,103 @@ from pasteflow.clipboard_monitor import ClipboardMonitor
 from pasteflow.paste_interceptor import PasteInterceptor
 from pasteflow.hotkey_manager import HotkeyManager
 from pasteflow.ui.panel import ClipboardPanel
+from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.tray import TrayIcon
 from pasteflow.ui.settings_dialog import SettingsDialog
+
+# ── 드래그 붙여넣기 헬퍼 ──────────────────────────────────────────────────────
+
+_CHROMIUM_CLASS_PREFIXES = (
+    "Chrome_RenderWidgetHostHWND",
+    "Chrome_WidgetWin_",
+    "CefBrowserWindow",
+    "CEF",
+    "Intermediate D3D Window",
+)
+
+
+def _find_deepest_child(hwnd, screen_pt, visited=None, depth=0):
+    """커서 위치의 가장 깊은 자식 HWND를 재귀 탐색.
+    visited set + MAX_DEPTH 20으로 무한루프 방지.
+    """
+    if visited is None:
+        visited = set()
+    if depth > 20 or hwnd in visited:
+        return hwnd
+    visited.add(hwnd)
+    try:
+        import win32gui
+        client_pt = win32gui.ScreenToClient(hwnd, screen_pt)
+        child = win32gui.ChildWindowFromPoint(hwnd, client_pt)
+        if child and child != hwnd:
+            return _find_deepest_child(child, screen_pt, visited, depth + 1)
+    except Exception:
+        pass
+    return hwnd
+
+
+def _is_chromium_window(class_name: str) -> bool:
+    """창 클래스명이 Electron/Chromium 계열인지 판별."""
+    return any(class_name.startswith(p) for p in _CHROMIUM_CLASS_PREFIXES)
+
+
+def _activate_and_send_ctrl_v(hwnd):
+    """AttachThreadInput으로 포그라운드 잠금을 우회한 뒤 SendInput(Ctrl+V).
+    Qt 메인 스레드에서만 호출해야 한다.
+    """
+    import win32gui
+    import win32process
+    from pasteflow.paste_interceptor import _make_key_input, _send_inputs, VK_V, KEYEVENTF_KEYUP
+    VK_CONTROL = 0x11
+
+    fg_hwnd = win32gui.GetForegroundWindow()
+    current_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+    fg_tid = win32process.GetWindowThreadProcessId(fg_hwnd)[0]
+
+    attached = False
+    try:
+        if fg_tid and fg_tid != current_tid:
+            win32process.AttachThreadInput(current_tid, fg_tid, True)
+            attached = True
+        win32gui.SetForegroundWindow(hwnd)
+        win32gui.BringWindowToTop(hwnd)
+    except Exception:
+        pass
+    finally:
+        if attached:
+            try:
+                win32process.AttachThreadInput(current_tid, fg_tid, False)
+            except Exception:
+                pass
+
+    # 창 활성화 후 80ms 대기 → SendInput(Ctrl+V)
+    def _send():
+        # 현재 포그라운드가 타겟인지 확인
+        try:
+            current_fg = win32gui.GetForegroundWindow()
+            if current_fg != hwnd and win32gui.GetParent(current_fg) != hwnd:
+                return  # 다른 창이 활성화됐으면 전송 안 함
+        except Exception:
+            pass
+        _send_inputs([
+            _make_key_input(VK_CONTROL),
+            _make_key_input(VK_V),
+            _make_key_input(VK_V, KEYEVENTF_KEYUP),
+            _make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+        ])
+
+    QTimer.singleShot(80, _send)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 class _SignalBridge(QObject):
     """훅 스레드 → 메인 스레드 시그널 전달"""
     paste_happened = pyqtSignal()
-    new_item_saved = pyqtSignal(object)  # ClipboardItem — 클립보드 모니터 스레드 → 메인 스레드
+    new_item_saved = pyqtSignal(object)  # 모든 복사 경로: DB + 큐 추가
+    queue_cleared = pyqtSignal()         # Ctrl+Shift+X: 큐 초기화
+    undo_happened = pyqtSignal()         # Ctrl+Shift+Z: 실수 복구
 
 
 class PasteFlowApp:
@@ -38,21 +128,31 @@ class PasteFlowApp:
         self._bridge = _SignalBridge()
         self._bridge.paste_happened.connect(self._update_paste_ui)
         self._bridge.new_item_saved.connect(self._on_new_item_ui)
+        self._bridge.queue_cleared.connect(self._on_queue_clear_ui)
+        self._bridge.undo_happened.connect(self._update_paste_ui)
 
         # 코어 모듈
         db_path = os.path.join(os.path.dirname(__file__), "..", "pasteflow.db")
         self.db = Database(db_path)
         self.queue = PasteQueue()
-        self.monitor = ClipboardMonitor(on_new_item=self._on_new_clipboard_item)
+        self.monitor = ClipboardMonitor(
+            on_new_item=self._on_new_clipboard_item,
+            on_duplicate=self._on_duplicate_clipboard_item,
+        )
         self.interceptor = PasteInterceptor(
             paste_queue=self.queue,
             clipboard_monitor=self.monitor,
             on_paste=self._on_paste_from_hook,
+            on_queue_clear=self._on_queue_clear_from_hook,
+            on_undo=self._on_undo_from_hook,
         )
         self.hotkey_manager = HotkeyManager()
 
         # UI (패널이 기본 UI — 미니창 없음)
         self.panel = ClipboardPanel()
+        # 첫 표시 지연 제거: 네이티브 윈도우 핸들을 미리 생성해 둠
+        self.panel.show()
+        self.panel.hide()
         self.tray = TrayIcon()
 
         # 패널 열기 전 포커스된 윈도우 추적
@@ -77,32 +177,48 @@ class PasteFlowApp:
         self.panel.unpin_item_requested.connect(self._on_unpin_item)
         self.panel.delete_item_requested.connect(self._on_delete_item)
         self.panel.pin_reorder_requested.connect(self._on_pin_reorder)
+        self.panel.history_reorder_requested.connect(self._on_hist_reorder)
         self.panel.edit_item_requested.connect(self._on_edit_item)
+        self.panel.preview_image_requested.connect(self._on_preview_image)
+        self.panel.open_settings_requested.connect(self._open_settings)
+        self.panel.quit_requested.connect(self._quit)
+        self.panel.clear_history_requested.connect(self._on_clear_history)
+        self.panel.drag_to_app_requested.connect(self._on_drag_to_app)
+        self.panel.queue_select_requested.connect(self._on_queue_select)
 
-        self.hotkey_manager.register("alt+v", self._toggle_panel)
+        panel_hotkey = self.db.get_setting("hotkey_panel_toggle", "ctrl+space")
+        self.hotkey_manager.register(panel_hotkey, self._toggle_panel)
 
         for n in range(1, 10):
             self.hotkey_manager.register(f"alt+{n}", lambda idx=n: self._on_direct_paste(idx))
 
     def _on_new_clipboard_item(self, item: ClipboardItem):
-        """클립보드 모니터 콜백 — 백그라운드 스레드에서 호출됨.
-        DB/큐 작업만 수행하고 UI 갱신은 시그널로 메인 스레드에 위임."""
+        """Ctrl+Shift+C 경로: DB 저장 + 큐 추가 — 백그라운드 스레드에서 호출됨."""
         saved = self.db.save_item(item)
         self.queue.add_item(saved)
         self._bridge.new_item_saved.emit(saved)
 
-    def _on_new_item_ui(self, saved: ClipboardItem):
-        """메인 스레드에서 UI 갱신 — new_item_saved 시그널 수신"""
-        # 패널이 아직 안 보이면 현재 포커스 윈도우 기억
-        if not self.panel.isVisible():
-            self._prev_foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
+    def _on_duplicate_clipboard_item(self):
+        """중복 클립보드 콜백 — 무시 (중복은 큐/DB에 추가하지 않음)."""
+        pass
 
-        self._refresh_panel()
-        if not self.panel.isVisible():
-            # 포커스를 빼앗지 않고 표시 — WA_ShowWithoutActivating + SW_SHOWNOACTIVATE
-            hwnd = int(self.panel.winId())
-            ctypes.windll.user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
-            self.panel.setVisible(True)
+    def _on_queue_clear_from_hook(self):
+        """Ctrl+Shift+X 콜백 — 훅 스레드에서 호출됨."""
+        self._bridge.queue_cleared.emit()
+
+    def _on_undo_from_hook(self, item: ClipboardItem):
+        """Ctrl+Shift+Z 콜백 — 훅 스레드에서 호출됨."""
+        self._bridge.undo_happened.emit()
+
+    def _on_new_item_ui(self, saved: ClipboardItem):
+        """메인 스레드에서 UI 갱신 — 패널이 열려 있을 때만 갱신"""
+        if self.panel.isVisible():
+            self._refresh_panel()
+
+    def _on_queue_clear_ui(self):
+        """메인 스레드: Ctrl+Shift+X — 큐 초기화 후 패널 갱신"""
+        if self.panel.isVisible():
+            self._refresh_panel()
 
     def _on_paste_from_hook(self, item: ClipboardItem):
         """붙여넣기 콜백 — 훅 스레드에서 호출됨 → 시그널로 메인 스레드 전달"""
@@ -153,16 +269,9 @@ class PasteFlowApp:
         # 붙여넣기 중 포커스 이동으로 패널이 자동닫기되지 않도록 플래그 설정
         self.panel._paste_in_progress = True
 
-        # 클립보드 설정
-        self.interceptor._set_clipboard(full_item)
-
         def _do_paste():
             try:
-                if target_hwnd:
-                    ctypes.windll.user32.SetForegroundWindow(target_hwnd)
-                    time.sleep(0.05)
-                self.interceptor.send_ctrl_v_to(None)
-                time.sleep(0.1)
+                self.interceptor.direct_paste(full_item, target_hwnd)
             except Exception as e:
                 print(f"[PanelPaste] Error: {e}")
             finally:
@@ -171,12 +280,9 @@ class PasteFlowApp:
         threading.Thread(target=_do_paste, daemon=True).start()
 
     def _reactivate_panel(self):
-        """붙여넣기 완료 → 패널 다시 활성화"""
+        """붙여넣기 완료 → 플래그 해제 (포커스는 대상 앱 유지)"""
         try:
             self.panel._paste_in_progress = False
-            if self.panel.isVisible():
-                self.panel.raise_()
-                self.panel.activateWindow()
         except Exception:
             pass
 
@@ -185,6 +291,18 @@ class PasteFlowApp:
         full_item = self.db.get_item(item.id) or item
         self.interceptor._set_clipboard(full_item)
         self.queue.add_item(full_item)
+        self._refresh_panel()
+
+    def _on_queue_select(self, item_id: int):
+        """패널 히스토리 항목 클릭 → 해당 항목부터 최신까지 큐로 설정"""
+        history = self.db.get_recent_items()  # newest-first (id DESC)
+        ids = [item.id for item in history]
+        if item_id not in ids:
+            return
+        i = ids.index(item_id)
+        # history[0:i+1] = [newest, ..., selected] → reverse → [selected, ..., newest]
+        queue_items = list(reversed(history[0 : i + 1]))
+        self.queue.set_queue(queue_items)
         self._refresh_panel()
 
     def _on_combine_copy(self, item: ClipboardItem):
@@ -210,9 +328,57 @@ class PasteFlowApp:
         self.db.update_pin_orders(id_order_list)
         self._refresh_panel()
 
+    def _on_hist_reorder(self, id_order_list: list):
+        self.db.update_history_orders(id_order_list)
+        # 패널 레이아웃은 이미 라이브 스왑으로 반영됨 — refresh 불필요
+
     def _on_edit_item(self, item_id: int, new_text: str):
         self.db.update_item_text(item_id, new_text)
         self._refresh_panel()
+
+    def _on_preview_image(self, item_id: int, pos):
+        item = self.db.get_item(item_id)
+        if item and item.image_data:
+            ImagePreviewPopup.instance().toggle_preview(item.image_data, pos)
+
+    def _on_clear_history(self):
+        self.db.clear_history()
+        self.queue.clear()
+        self._refresh_panel()
+
+    def _on_drag_to_app(self, item_id: int, cursor_pos):
+        """패널 항목 드래그 → 외부 앱 붙여넣기.
+        - Win32/WinUI3: 재귀 탐색으로 찾은 최하위 컨트롤에 WM_PASTE
+        - Electron/Chromium: AttachThreadInput + SetForegroundWindow + SendInput(Ctrl+V)
+        """
+        full_item = self.db.get_item(item_id)
+        if not full_item:
+            return
+
+        self.interceptor._set_clipboard(full_item)
+
+        import win32gui
+        import win32con
+
+        screen_pt = (cursor_pos.x(), cursor_pos.y())
+        hwnd = win32gui.WindowFromPoint(screen_pt)
+        if not hwnd:
+            return
+
+        target = _find_deepest_child(hwnd, screen_pt)
+        class_name = ""
+        try:
+            class_name = win32gui.GetClassName(target)
+        except Exception:
+            pass
+
+        if _is_chromium_window(class_name):
+            # Electron/Chromium: 포그라운드 활성화 후 SendInput(Ctrl+V)
+            top_hwnd = win32gui.GetAncestor(target, win32con.GA_ROOT)
+            _activate_and_send_ctrl_v(top_hwnd)
+        else:
+            # Win32 / WinUI3: WM_PASTE 직접 전송
+            win32gui.SendMessage(target, win32con.WM_PASTE, 0, 0)
 
     # ── 설정 ──
 
@@ -233,19 +399,21 @@ class PasteFlowApp:
     def _open_settings(self):
         """설정 다이얼로그 열기"""
         current = {
-            "hotkey_panel_toggle": self.db.get_setting("hotkey_panel_toggle", "alt+v"),
+            "hotkey_panel_toggle": self.db.get_setting("hotkey_panel_toggle", "ctrl+space"),
             "history_max": self.db.get_setting("history_max", "50"),
             "panel_auto_close": self.db.get_setting("panel_auto_close", "1"),
             "auto_start": self.db.get_setting("auto_start", "0"),
         }
-        dlg = SettingsDialog(current)
+        dlg = SettingsDialog(current, parent=self.panel)
         dlg.settings_changed.connect(self._on_settings_changed)
+        dlg.raise_()
+        dlg.activateWindow()
         dlg.exec()
 
     def _on_settings_changed(self, new_settings: dict):
         """설정 변경 적용"""
         # 단축키 비교는 DB 저장 전에 이전 값을 먼저 읽어야 함
-        old_hotkey = self.db.get_setting("hotkey_panel_toggle", "alt+v")
+        old_hotkey = self.db.get_setting("hotkey_panel_toggle", "ctrl+space")
 
         for key, value in new_settings.items():
             self.db.set_setting(key, value)
@@ -254,7 +422,7 @@ class PasteFlowApp:
         self.panel._auto_close = new_settings.get("panel_auto_close", "1") == "1"
 
         # 단축키 재등록
-        new_hotkey = new_settings.get("hotkey_panel_toggle", "alt+v")
+        new_hotkey = new_settings.get("hotkey_panel_toggle", "ctrl+space")
         if old_hotkey != new_hotkey:
             self.hotkey_manager.unregister_all()
             self.hotkey_manager.register(new_hotkey, self._toggle_panel)
@@ -307,13 +475,11 @@ class PasteFlowApp:
 
         self._msg_timer = QTimer()
         self._msg_timer.timeout.connect(self._pump_messages)
-        self._msg_timer.start(50)
+        self._msg_timer.start(1)
 
         return self.app.exec()
 
     def _pump_messages(self):
-        import ctypes
-        import ctypes.wintypes
         msg = ctypes.wintypes.MSG()
         while ctypes.windll.user32.PeekMessageW(
             ctypes.byref(msg), None, 0, 0, 1
