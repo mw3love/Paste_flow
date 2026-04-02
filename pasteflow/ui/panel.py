@@ -8,12 +8,14 @@ from typing import Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QScrollArea, QMenu, QApplication, QGraphicsOpacityEffect,
+    QSizePolicy, QDialog, QPlainTextEdit, QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QMimeData, QRect
-from PyQt6.QtGui import QPixmap, QDrag, QCursor
+from PyQt6.QtGui import QPixmap, QDrag, QCursor, QFontMetrics, QFont
 
 from pasteflow.models import ClipboardItem
 from pasteflow.ui.image_preview import ImagePreviewPopup
+from pasteflow.ui.text_preview import TextPreviewPopup
 
 # Catppuccin Mocha 색상
 COLORS = {
@@ -36,24 +38,13 @@ COLORS = {
 PANEL_WIDTH = 280
 PANEL_HEIGHT = 350
 PANEL_MIN_WIDTH = 220
-PANEL_MIN_HEIGHT = 200
+PANEL_MIN_HEIGHT = 325
 RESIZE_MARGIN = 6
 
 # 드래그 MIME 타입
 MIME_PIN_REORDER = "application/x-pasteflow-pin-id"
 MIME_ITEM_TO_PIN = "application/x-pasteflow-item-id"
-
-# Windows WM_NCHITTEST 값
-HTCLIENT = 1
-HTCAPTION = 2
-HTLEFT = 10
-HTRIGHT = 11
-HTTOP = 12
-HTTOPLEFT = 13
-HTTOPRIGHT = 14
-HTBOTTOM = 15
-HTBOTTOMLEFT = 16
-HTBOTTOMRIGHT = 17
+MIME_HIST_REORDER = "application/x-pasteflow-hist-id"
 
 
 class PanelItemWidget(QWidget):
@@ -63,6 +54,7 @@ class PanelItemWidget(QWidget):
     double_clicked = pyqtSignal(int)
     context_menu_requested = pyqtSignal(int, object)
     delete_clicked = pyqtSignal(int)
+    external_drag_paste = pyqtSignal(int, QPoint)
 
     def __init__(
         self,
@@ -82,6 +74,9 @@ class PanelItemWidget(QWidget):
         self._is_hovered = False
         self._drag_start_pos = None
         self._did_drag = False
+        self._ext_drag_active = False
+        self._text_label: Optional[QLabel] = None
+        self._first_resize = True
 
         self._setup_ui(item, number, is_current, is_done, is_pinned)
         self.setMouseTracking(True)
@@ -94,46 +89,73 @@ class PanelItemWidget(QWidget):
         self, item: ClipboardItem, number: int,
         is_current: bool, is_done: bool, is_pinned: bool,
     ):
-        self.setMinimumHeight(48)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(6)
 
-        # 좌측 강조 바
-        bar = QWidget()
-        bar.setFixedSize(3, 48)
+        # 좌측 번호 레이블 — 고정=빨간, 현재 큐 항목=청록, 완료=회색, 일반=주황
         if is_pinned:
-            bar.setStyleSheet(f"background-color: {COLORS['peach']}; border-radius: 2px;")
+            accent_color = "#ff0000"
         elif is_current:
-            bar.setStyleSheet(f"background-color: {COLORS['teal']}; border-radius: 2px;")
+            accent_color = COLORS['teal']
         elif is_done:
-            bar.setStyleSheet(f"background-color: {COLORS['overlay0']}; border-radius: 2px;")
+            accent_color = COLORS['surface2']
         else:
-            bar.setStyleSheet("background: transparent;")
-        layout.addWidget(bar)
+            accent_color = COLORS['peach']
+        self._accent_color = accent_color
+
+        num_label = QLabel(str(number))
+        num_label.setFixedWidth(22)
+        num_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        num_label.setStyleSheet("color: #ffffff; font-size: 11px; background: transparent; border: none;")
+        layout.addWidget(num_label)
 
         # 미리보기
-        text_color = COLORS['subtext0'] if is_done else COLORS['text']
+        text_color = COLORS['subtext0'] if is_done else "#ffffff"
         if item.content_type == "image" and item.thumbnail:
             thumb_label = QLabel()
+            thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             pixmap = QPixmap()
             pixmap.loadFromData(item.thumbnail)
             scaled = pixmap.scaled(80, 60, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             thumb_label.setPixmap(scaled)
             thumb_label.setFixedSize(80, 60)
+            thumb_label.setStyleSheet("border: none; background: transparent;")
             layout.addWidget(thumb_label)
             layout.addStretch(1)
-            self.setMinimumHeight(72)
+            self.setFixedHeight(72)
         else:
             preview = item.text_content or item.preview_text or ""
-            lines = preview.strip().split("\n")[:3]
+            all_lines = preview.strip().split("\n")
+            lines = all_lines[:2]
             display_text = "\n".join(line[:80] for line in lines)
+            line_count = len(lines)
 
             text_label = QLabel(display_text)
             text_label.setWordWrap(True)
-            text_label.setStyleSheet(f"color: {text_color}; font-size: 12px;")
-            layout.addWidget(text_label, 1)
-            self.setMinimumHeight(56)
+            text_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            text_label.setMinimumWidth(0)
+            text_label.setMaximumHeight(30)  # 최대 2줄
+            text_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            text_label.setStyleSheet(f"color: {text_color}; font-size: 12px; border: none;")
+            # AlignVCenter 명시: label이 행 내 상단/하단 쏠림 방지
+            layout.addWidget(text_label, 1, Qt.AlignmentFlag.AlignVCenter)
+            self._text_label = text_label
+
+            # 생성 시 높이 미리 계산 → 첫 resizeEvent 점프(지직) 방지
+            # 실제 레이블 너비 ≈ PANEL_WIDTH - 패널마진(20) - 아이템내부(lmargin4+num22+spacing6+del22+rmargin4) = PANEL_WIDTH - 78
+            _f = QFont(); _f.setPixelSize(12)
+            _fm = QFontMetrics(_f)
+            _rect = _fm.boundingRect(
+                QRect(0, 0, max(1, PANEL_WIDTH - 78), 10000),
+                Qt.TextFlag.TextWordWrap | int(Qt.AlignmentFlag.AlignLeft),
+                display_text,
+            )
+            _vl = max(1, (_rect.height() + _fm.height() - 1) // _fm.height())
+            _init_h = 26 if _vl == 1 else 38
+            self.setFixedHeight(_init_h)
+
+        # 바는 레이아웃이 행 높이에 맞춰 자동 조정 (타이머 불필요)
 
         # 삭제 버튼 (×)
         del_btn = QPushButton("\u2715")
@@ -157,13 +179,44 @@ class PanelItemWidget(QWidget):
 
         self._apply_bg_style()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._first_resize:
+            self._first_resize = False
+            return
+        self._adjust_text_height()
+
+    def _adjust_text_height(self):
+        if self._text_label is None:
+            return
+        avail_w = self.width() - 58  # lmargin(4) + num(22) + spacing(6) + del_btn(22) + rmargin(4)
+        if avail_w <= 0:
+            return
+        fm = self._text_label.fontMetrics()
+        rect = fm.boundingRect(
+            QRect(0, 0, avail_w, 10000),
+            Qt.TextFlag.TextWordWrap | int(Qt.AlignmentFlag.AlignLeft),
+            self._text_label.text(),
+        )
+        actual_lines = max(1, (rect.height() + fm.height() - 1) // fm.height())
+        visual_lines = min(2, actual_lines)
+        new_h = 26 if visual_lines == 1 else 38
+        # 3줄 이상: AlignTop(1·2번째 줄 표시, 나머지 하단 클립)
+        # 1~2줄: AlignVCenter(균등 여백)
+        align = (Qt.AlignmentFlag.AlignTop if actual_lines > 2
+                 else Qt.AlignmentFlag.AlignVCenter) | Qt.AlignmentFlag.AlignLeft
+        self._text_label.setAlignment(align)
+        if self.height() != new_h:
+            self.setFixedHeight(new_h)
+
     def _apply_bg_style(self):
+        border_color = self._accent_color
         if self._is_selected:
-            self.setStyleSheet(f"background-color: {COLORS['surface2']}; border-radius: 6px;")
+            self.setStyleSheet(f"background-color: {COLORS['surface2']}; border-radius: 6px; border: 1px solid {border_color};")
         elif self._is_hovered:
-            self.setStyleSheet(f"background-color: {COLORS['surface1']}; border-radius: 6px;")
+            self.setStyleSheet(f"background-color: {COLORS['surface1']}; border-radius: 6px; border: 1px solid {border_color};")
         else:
-            self.setStyleSheet(f"background-color: {COLORS['surface0']}; border-radius: 6px;")
+            self.setStyleSheet(f"background-color: {COLORS['surface0']}; border-radius: 6px; border: 1px solid {border_color};")
 
     @property
     def is_selected(self):
@@ -188,44 +241,105 @@ class PanelItemWidget(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_start_pos = event.pos()
             self._did_drag = False
-            if self.item.content_type == "image" and self.item.image_data:
-                ImagePreviewPopup.instance().toggle_preview(
-                    self.item.image_data, QCursor.pos()
-                )
-            if not self._is_pinned:
-                self.clicked.emit(self.item_id, event)
             event.accept()
         else:
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """드래그 시작 — 외부 앱으로 드롭 시 텍스트/이미지 전달"""
+        """드래그 시작"""
         if self._drag_start_pos and event.buttons() & Qt.MouseButton.LeftButton:
             distance = (event.pos() - self._drag_start_pos).manhattanLength()
             if distance > 10:
                 self._did_drag = True
+                ImagePreviewPopup.instance().hide_preview()
+                TextPreviewPopup.instance().hide_preview()
+
+                if not self._is_pinned:
+                    # 비고정 항목 → 패널 안: 재정렬 / 패널 밖: 외부 드래그
+                    panel = self.parent()
+                    while panel and not isinstance(panel, ClipboardPanel):
+                        panel = panel.parent()
+                    cursor_pos = QCursor.pos()
+                    inside = self.window().geometry().contains(cursor_pos)
+                    new_shape = (Qt.CursorShape.ClosedHandCursor if inside
+                                 else Qt.CursorShape.DragCopyCursor)
+                    if not self._ext_drag_active:
+                        # 드래그 시작: 커서 스택에 1회만 push
+                        self._ext_drag_active = True
+                        self._apply_drag_source_style()
+                        QApplication.setOverrideCursor(new_shape)
+                        if panel:
+                            panel._ext_drag_active = True
+                            panel._hist_drag_source_id = self.item_id
+                    else:
+                        # 이미 드래그 중: 스택 깊이 유지, 모양만 교체
+                        oc = QApplication.overrideCursor()
+                        if oc and oc.shape() != new_shape:
+                            QApplication.changeOverrideCursor(QCursor(new_shape))
+                    if inside and panel:
+                        panel._update_hist_hover(cursor_pos)
+                    elif not inside and panel:
+                        panel._clear_hist_drag_highlight()
+                        panel._hist_drag_target_id = None
+                    return
+
+                # 고정 항목 → QDrag (pin 재정렬용)
                 drag = QDrag(self)
                 mime = QMimeData()
-
-                # 내부 MIME (패널 내 재정렬/고정용)
-                if self._is_pinned:
-                    mime.setData(MIME_PIN_REORDER, str(self.item_id).encode())
-                else:
-                    mime.setData(MIME_ITEM_TO_PIN, str(self.item_id).encode())
-
-                # 외부 앱용 콘텐츠
+                mime.setData(MIME_PIN_REORDER, str(self.item_id).encode())
+                panel = self.parent()
+                while panel and not isinstance(panel, ClipboardPanel):
+                    panel = panel.parent()
+                if panel:
+                    panel._drag_source_id = self.item_id
+                self._apply_drag_source_style()
                 if self.item.text_content:
                     mime.setText(self.item.text_content)
-
                 drag.setMimeData(mime)
                 drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
                 self._drag_start_pos = None
+                self._apply_bg_style()
+                panel = self.parent()
+                while panel and not isinstance(panel, ClipboardPanel):
+                    panel = panel.parent()
+                if panel:
+                    panel._drag_source_id = None
                 return
         event.accept()
 
+    def _apply_drag_source_style(self):
+        """드래그 소스 위젯 강조 스타일"""
+        self.setStyleSheet(
+            f"background-color: {COLORS['surface2']}; border-radius: 6px;"
+            f"border: 1px solid {COLORS['teal']};"
+        )
+
     def mouseReleaseEvent(self, event):
-        if self._is_pinned and not self._did_drag and event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit(self.item_id, event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._ext_drag_active:
+                self._ext_drag_active = False
+                QApplication.restoreOverrideCursor()
+                panel = self.parent()
+                while panel and not isinstance(panel, ClipboardPanel):
+                    panel = panel.parent()
+                cursor_pos = QCursor.pos()
+                if panel:
+                    if not self.window().geometry().contains(cursor_pos):
+                        # 붙여넣기 완료 후 OS 활성화 이벤트가 changeEvent를 발동하기 전까지 guard 유지
+                        QTimer.singleShot(300, lambda: setattr(panel, '_ext_drag_active', False))
+                    else:
+                        panel._ext_drag_active = False
+                self._apply_bg_style()  # 드래그 소스 강조 해제
+                if not self.window().geometry().contains(cursor_pos):
+                    self.external_drag_paste.emit(self.item_id, cursor_pos)
+                elif not self._is_pinned and panel:
+                    panel._do_hist_reorder(self.item_id, panel._hist_drag_target_id)
+                    panel._clear_hist_drag_highlight()
+                    panel._emit_current_hist_order()
+                    panel._hist_drag_source_id = None
+                    panel._hist_drag_target_id = None
+            elif not self._did_drag:
+                self.clicked.emit(self.item_id, event)
         self._drag_start_pos = None
         self._did_drag = False
         event.accept()
@@ -243,23 +357,25 @@ class PanelItemWidget(QWidget):
     def dragEnterEvent(self, event):
         if event.mimeData().hasFormat(MIME_PIN_REORDER):
             event.acceptProposedAction()
-            self.setStyleSheet(
-                f"background-color: {COLORS['surface2']}; border-radius: 6px;"
-                f"border: 2px solid {COLORS['teal']};"
-            )
+            source_id = int(event.mimeData().data(MIME_PIN_REORDER).data().decode())
+            if source_id != self.item_id:
+                self.setStyleSheet(
+                    f"background-color: {COLORS['surface1']}; border-radius: 6px;"
+                    f"border: 1px dashed {COLORS['teal']};"
+                )
 
     def dragLeaveEvent(self, event):
         self._apply_bg_style()
 
     def dropEvent(self, event):
-        source_id = int(event.mimeData().data(MIME_PIN_REORDER).data().decode())
-        target_id = self.item_id
-        if source_id != target_id:
+        if event.mimeData().hasFormat(MIME_PIN_REORDER):
+            source_id = int(event.mimeData().data(MIME_PIN_REORDER).data().decode())
             panel = self.parent()
             while panel and not isinstance(panel, ClipboardPanel):
                 panel = panel.parent()
-            if panel:
-                panel._on_pin_reorder(source_id, target_id)
+            if panel and source_id != self.item_id:
+                panel._do_pin_reorder(source_id, self.item_id)
+                panel._emit_current_pin_order()
         self._apply_bg_style()
         event.acceptProposedAction()
 
@@ -299,6 +415,79 @@ class PinDropZone(QWidget):
         event.acceptProposedAction()
 
 
+class EditItemDialog(QDialog):
+    """고정 항목 텍스트 수정 다이얼로그"""
+
+    def __init__(self, current_text: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("항목 수정")
+        self.setMinimumSize(360, 200)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {COLORS['base']};
+                color: {COLORS['text']};
+            }}
+            QLabel {{
+                color: {COLORS['subtext0']};
+                font-size: 11px;
+            }}
+            QPlainTextEdit {{
+                background-color: {COLORS['surface0']};
+                color: {COLORS['text']};
+                border: 1px solid {COLORS['surface2']};
+                border-radius: 6px;
+                padding: 6px;
+                font-size: 13px;
+            }}
+            QPlainTextEdit:focus {{
+                border: 1px solid {COLORS['teal']};
+            }}
+            QPushButton {{
+                background-color: {COLORS['surface1']};
+                color: {COLORS['text']};
+                border: none;
+                border-radius: 6px;
+                padding: 6px 16px;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['surface2']};
+            }}
+            QPushButton[text="저장"] {{
+                background-color: {COLORS['teal']};
+                color: {COLORS['base']};
+            }}
+            QPushButton[text="저장"]:hover {{
+                background-color: #7ed5c8;
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        layout.addWidget(QLabel("내용을 수정하세요. 저장 시 원본 서식(HTML/RTF)은 제거됩니다."))
+
+        self._editor = QPlainTextEdit()
+        self._editor.setPlainText(current_text)
+        self._editor.setFocus()
+        layout.addWidget(self._editor, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("취소")
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton("저장")
+        save_btn.setProperty("text", "저장")
+        save_btn.clicked.connect(self.accept)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+    def get_text(self) -> str:
+        return self._editor.toPlainText()
+
+
 class ClipboardPanel(QWidget):
     """전체 클립보드 패널"""
 
@@ -309,6 +498,14 @@ class ClipboardPanel(QWidget):
     unpin_item_requested = pyqtSignal(int)
     delete_item_requested = pyqtSignal(int)
     pin_reorder_requested = pyqtSignal(list)
+    history_reorder_requested = pyqtSignal(list)
+    edit_item_requested = pyqtSignal(int, str)  # (item_id, new_text)
+    preview_image_requested = pyqtSignal(int, QPoint)  # (item_id, global_pos)
+    open_settings_requested = pyqtSignal()
+    quit_requested = pyqtSignal()
+    clear_history_requested = pyqtSignal()
+    drag_to_app_requested = pyqtSignal(int, QPoint)
+    queue_select_requested = pyqtSignal(int)  # item_id — 해당 항목부터 최신까지 큐 설정
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -319,11 +516,20 @@ class ClipboardPanel(QWidget):
         self._selected_ids: set[int] = set()
         self._last_clicked_id: Optional[int] = None
         self._search_text: str = ""
+        self._search_expanded: bool = False
         self._queue_item_ids: list[int] = []
         self._drag_pos = None
+        self._drag_source_id = None       # 드래그 중인 고정 항목 ID
+        self._hist_drag_source_id = None  # 드래그 중인 히스토리 항목 ID
+        self._hist_drag_target_id = None   # 드래그 중 하이라이트된 타겟 항목 ID
+        self._resize_edges: set = set()
+        self._resize_start_pos = None
+        self._resize_start_geometry = None
         self._pinned_collapsed = True
         self._auto_close = True  # F4-9: 외부 클릭 시 자동 닫기
         self._user_activated = False  # 사용자가 직접 열었는지 (vs 복사 팝업)
+        self._paste_in_progress = False  # 패널 붙여넣기 중 자동닫기 방지
+        self._ext_drag_active = False    # 외부 드래그 중 자동닫기 방지
 
         self._setup_window()
         self._setup_ui()
@@ -334,18 +540,21 @@ class ClipboardPanel(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         # 투명 배경 대신 solid 배경 — 리사이즈 가장자리에서 마우스 이벤트 수신 가능
         self.setStyleSheet(f"background-color: {COLORS['base']};")
         self.setMouseTracking(True)
-        self.resize(PANEL_WIDTH, PANEL_HEIGHT)
+        self.resize(PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT)
         self.setMinimumSize(PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT)
+
+        self._cursor_timer = QTimer(self)
+        self._cursor_timer.setInterval(50)
+        self._cursor_timer.timeout.connect(self._sync_resize_cursor)
 
         screen = QApplication.primaryScreen()
         if screen:
             geom = screen.availableGeometry()
-            x = geom.right() - PANEL_WIDTH - 10
-            y = geom.bottom() - PANEL_HEIGHT - 10
+            x = geom.right() - PANEL_MIN_WIDTH - 10
+            y = geom.bottom() - PANEL_MIN_HEIGHT - 10
             self.move(x, y)
 
     def _setup_ui(self):
@@ -369,43 +578,81 @@ class ClipboardPanel(QWidget):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(8)
 
-        # ── 검색 바 + 닫기 버튼 ──
+        # ── 검색 토글 버튼 + 검색 입력창 + 닫기 버튼 ──
+        # 레이아웃: [🔍 or search_input(stretch)] [spacer(stretch)] [×]
+        # 닫기(×)는 항상 우측 고정. 돋보기는 항상 좌측.
         search_row = QHBoxLayout()
         search_row.setSpacing(6)
 
+        # 돋보기 아이콘 버튼 (축소 상태 — 좌측 고정)
+        self._search_btn = QPushButton("\U0001f50d")
+        self._search_btn.setFixedSize(28, 28)
+        self._search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._search_btn.setToolTip("검색 (클릭하여 열기)")
+        self._search_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {COLORS['subtext0']};
+                border: none;
+                font-size: 14px;
+                border-radius: 6px;
+                padding: 0;
+            }}
+            QPushButton:hover {{
+                background: {COLORS['surface0']};
+                color: {COLORS['text']};
+            }}
+        """)
+        self._search_btn.clicked.connect(self._toggle_search)
+        search_row.addWidget(self._search_btn)
+
+        # 검색 입력창 (펼침 상태 — stretch로 우측까지 채움)
         self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("\U0001f50d 검색...")
-        self._search_input.setFixedHeight(36)
+        self._search_input.setPlaceholderText("검색...")
+        self._search_input.setFixedHeight(28)
         self._search_input.setStyleSheet(f"""
             QLineEdit {{
                 background-color: {COLORS['surface0']};
                 color: {COLORS['text']};
                 border: 2px solid transparent;
-                border-radius: 8px;
-                padding: 0 12px;
-                font-size: 13px;
+                border-radius: 6px;
+                padding: 0 8px;
+                font-size: 12px;
             }}
             QLineEdit:focus {{
                 border-color: {COLORS['blue']};
             }}
         """)
         self._search_input.textChanged.connect(self._on_search_changed)
+        self._search_input.installEventFilter(self)
+        self._search_input.hide()
         search_row.addWidget(self._search_input, 1)
 
-        close_btn = QPushButton("\u2715")
-        close_btn.setFixedSize(28, 28)
+        # 스페이서 — 축소 상태에서 돋보기와 닫기 사이 공간 채움
+        self._header_spacer = QWidget()
+        self._header_spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        search_row.addWidget(self._header_spacer, 1)
+
+        # 닫기 버튼 — 항상 빨간 원, 우측 고정
+        close_btn = QPushButton("\u00d7")
+        close_btn.setFixedSize(24, 24)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.setStyleSheet(f"""
             QPushButton {{
-                background: transparent;
-                color: {COLORS['subtext0']};
+                background: {COLORS['red']};
+                color: {COLORS['crust']};
                 border: none;
-                font-size: 14px;
+                font-size: 16px;
+                font-weight: 400;
+                font-family: 'Segoe UI', sans-serif;
+                padding: 0;
+                padding-bottom: 1px;
+                border-radius: 12px;
             }}
             QPushButton:hover {{
-                background: {COLORS['red']};
-                color: {COLORS['base']};
-                border-radius: 6px;
+                background: #e06c75;
             }}
         """)
         close_btn.clicked.connect(self.hide)
@@ -423,17 +670,23 @@ class ClipboardPanel(QWidget):
                 background: transparent;
             }}
             QScrollBar:vertical {{
-                background: {COLORS['surface0']};
-                width: 6px;
-                border-radius: 3px;
+                background: transparent;
+                width: 5px;
+                margin: 2px 0;
             }}
             QScrollBar::handle:vertical {{
+                background: {COLORS['surface2']};
+                border-radius: 2px;
+                min-height: 30px;
+            }}
+            QScrollBar::handle:vertical:hover {{
                 background: {COLORS['overlay0']};
-                border-radius: 3px;
-                min-height: 20px;
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: transparent;
             }}
         """)
 
@@ -446,6 +699,8 @@ class ClipboardPanel(QWidget):
 
         self._scroll.setWidget(self._scroll_content)
         main_layout.addWidget(self._scroll, 1)
+
+        self._scroll_content.installEventFilter(self)
 
     # ── Public API ──
 
@@ -493,8 +748,16 @@ class ClipboardPanel(QWidget):
         arrow = "\u25BC" if not self._pinned_collapsed else "\u25B6"
         pin_header_text = f"{arrow} \U0001f4cc 고정"
 
+        pin_header_row = QHBoxLayout()
+        pin_header_row.setContentsMargins(4, 0, 0, 0)
+        pin_header_row.setSpacing(0)
+
         pin_header_btn = QPushButton(pin_header_text)
-        pin_header_btn.setFixedHeight(28)
+        pin_header_btn.setFixedHeight(24)
+        # 글자 크기에 맞게 폭 축소
+        fm = QFontMetrics(pin_header_btn.font())
+        text_width = fm.horizontalAdvance(pin_header_text) + 16
+        pin_header_btn.setFixedWidth(text_width)
         pin_header_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         pin_header_btn.setStyleSheet(f"""
             QPushButton {{
@@ -504,14 +767,20 @@ class ClipboardPanel(QWidget):
                 font-size: 11px;
                 font-weight: 600;
                 text-align: left;
-                padding-left: 4px;
+                padding: 0 4px;
             }}
             QPushButton:hover {{
                 color: {COLORS['text']};
             }}
         """)
         pin_header_btn.clicked.connect(self._toggle_pinned)
-        self._items_layout.addWidget(pin_header_btn)
+        pin_header_row.addWidget(pin_header_btn)
+        pin_header_row.addStretch()
+
+        pin_header_wrapper = QWidget()
+        pin_header_wrapper.setLayout(pin_header_row)
+        pin_header_wrapper.setStyleSheet("background: transparent;")
+        self._items_layout.addWidget(pin_header_wrapper)
 
         drop_zone = PinDropZone()
         drop_zone.item_dropped.connect(lambda item_id: self.pin_item_requested.emit(item_id))
@@ -533,8 +802,36 @@ class ClipboardPanel(QWidget):
         sep.setStyleSheet(f"background-color: {COLORS['surface1']};")
         self._items_layout.addWidget(sep)
 
-        # ── 히스토리 섹션 ──
+        # ── 히스토리 섹션 헤더 (F2-7: 순차 상태 표시) ──
         filtered_history = self._filter_items(self._history_items, search)
+
+        hist_header_row = QHBoxLayout()
+        hist_header_row.setContentsMargins(4, 0, 0, 0)
+        hist_header_row.setSpacing(0)
+
+        hist_title = QLabel("\U0001f4cb 히스토리")
+        hist_title.setFixedHeight(20)
+        hist_title.setStyleSheet(
+            f"color: {COLORS['subtext0']}; font-size: 11px; "
+            f"background: transparent; padding-left: 2px;"
+        )
+        hist_header_row.addWidget(hist_title)
+        hist_header_row.addStretch()
+
+        if self._total > 0:
+            status_label = QLabel(f"붙여넣기 {self._pointer}/{self._total}")
+            status_label.setFixedHeight(20)
+            status_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+            status_label.setStyleSheet(
+                f"color: {COLORS['overlay0']}; font-size: 11px; "
+                f"background: transparent; padding-right: 4px;"
+            )
+            hist_header_row.addWidget(status_label)
+
+        hist_header_wrapper = QWidget()
+        hist_header_wrapper.setLayout(hist_header_row)
+        hist_header_wrapper.setStyleSheet("background: transparent;")
+        self._items_layout.addWidget(hist_header_wrapper)
 
         for i, item in enumerate(filtered_history, 1):
             # 큐 상태 계산: 큐에 있는 항목이면 포인터 기준으로 current/done 판단
@@ -567,7 +864,8 @@ class ClipboardPanel(QWidget):
             return items
         return [
             item for item in items
-            if item.preview_text and search in item.preview_text.lower()
+            if search in (item.preview_text or "").lower()
+            or search in (item.text_content or "").lower()
         ]
 
     def _connect_item_signals(self, widget: PanelItemWidget):
@@ -575,12 +873,49 @@ class ClipboardPanel(QWidget):
         widget.double_clicked.connect(self._on_item_double_clicked)
         widget.context_menu_requested.connect(self._on_item_context_menu)
         widget.delete_clicked.connect(self._on_item_delete)
+        widget.external_drag_paste.connect(self._on_item_external_drag_paste)
+
+    def _on_item_external_drag_paste(self, item_id: int, cursor_pos: QPoint):
+        self.drag_to_app_requested.emit(item_id, cursor_pos)
 
     # ── 이벤트 핸들러 ──
 
     def _on_search_changed(self, text: str):
         self._search_text = text
         self._rebuild()
+
+    def _toggle_search(self):
+        if self._search_expanded:
+            self._collapse_search()
+        else:
+            self._expand_search()
+
+    def _expand_search(self):
+        self._search_expanded = True
+        self._header_spacer.hide()
+        self._search_input.show()
+        self._search_input.setFocus()
+
+    def _collapse_search(self):
+        self._search_expanded = False
+        self._search_input.clear()
+        self._search_input.hide()
+        self._header_spacer.show()
+
+    def eventFilter(self, obj, event):
+        if (hasattr(self, '_scroll_content') and obj is self._scroll_content):
+            if (event.type() == QEvent.Type.MouseButtonDblClick
+                    and event.button() == Qt.MouseButton.LeftButton):
+                self._reset_to_min_size()
+                return True
+        if obj is self._search_input:
+            if event.type() == QEvent.Type.KeyPress:
+                if event.key() == Qt.Key.Key_Escape:
+                    self._collapse_search()
+                    return True
+            elif event.type() == QEvent.Type.FocusOut:
+                pass  # 포커스 아웃으로는 검색창을 닫지 않음
+        return super().eventFilter(obj, event)
 
     def _on_item_clicked(self, item_id: int, event):
         modifiers = QApplication.keyboardModifiers()
@@ -600,6 +935,8 @@ class ClipboardPanel(QWidget):
             item = self._find_item(item_id)
             if item and item.is_pinned:
                 self.copy_item_requested.emit(item)
+            elif item and not item.is_pinned:
+                self.queue_select_requested.emit(item_id)
 
         self._last_clicked_id = item_id
         self._update_selection_visuals()
@@ -625,9 +962,14 @@ class ClipboardPanel(QWidget):
             self._selected_ids.add(ids[idx])
 
     def _on_item_double_clicked(self, item_id: int):
+        """더블클릭 — 이미지: 미리보기 / 텍스트: 수정 다이얼로그"""
         item = self._find_item(item_id)
-        if item:
-            self.paste_item_requested.emit(item)
+        if not item:
+            return
+        if item.content_type == "image":
+            self.preview_image_requested.emit(item_id, QCursor.pos())
+        else:
+            self._on_edit_item(item)
 
     def _on_item_delete(self, item_id: int):
         for i in range(self._items_layout.count()):
@@ -678,6 +1020,15 @@ class ClipboardPanel(QWidget):
         copy_action = menu.addAction("\U0001f4cb 복사")
         copy_action.triggered.connect(lambda: self._do_copy(item))
 
+        if item.content_type != "image":
+            edit_action = menu.addAction("\u270f\ufe0f 수정")
+            edit_action.triggered.connect(lambda: self._on_edit_item(item))
+        else:
+            preview_action = menu.addAction("\U0001f50d 미리보기")
+            preview_action.triggered.connect(
+                lambda: self.preview_image_requested.emit(item_id, pos)
+            )
+
         menu.addSeparator()
 
         delete_action = menu.addAction("\U0001f5d1 삭제")
@@ -685,13 +1036,19 @@ class ClipboardPanel(QWidget):
 
         menu.exec(pos)
 
+    def _on_edit_item(self, item: ClipboardItem):
+        dialog = EditItemDialog(item.text_content or "", self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_text = dialog.get_text()
+            if new_text != (item.text_content or ""):
+                self.edit_item_requested.emit(item.id, new_text)
+
     def _do_paste(self, item: ClipboardItem):
         self.paste_item_requested.emit(item)
 
     def _do_copy(self, item: ClipboardItem):
-        clipboard = QApplication.clipboard()
-        if item.text_content:
-            clipboard.setText(item.text_content)
+        """우클릭 복사 — copy_item_requested로 전체 포맷 복사 + self_triggered 처리"""
+        self.copy_item_requested.emit(item)
 
     def _find_item(self, item_id: int) -> Optional[ClipboardItem]:
         for item in self._pinned_items + self._history_items:
@@ -727,89 +1084,191 @@ class ClipboardPanel(QWidget):
             text_content=combined_text,
         )
 
-    def _on_pin_reorder(self, source_id: int, target_id: int):
-        ids = [item.id for item in self._pinned_items]
-        if source_id not in ids or target_id not in ids:
+    def _do_pin_reorder(self, source_id: int, target_id: int):
+        """마우스 릴리즈 시 고정 항목 타겟 위치로 이동"""
+        source_w = target_w = None
+        source_idx = target_idx = -1
+        for i in range(self._items_layout.count()):
+            w = self._items_layout.itemAt(i).widget()
+            if isinstance(w, PanelItemWidget) and w._is_pinned:
+                if w.item_id == source_id:
+                    source_w = w
+                    source_idx = i
+                elif w.item_id == target_id:
+                    target_w = w
+                    target_idx = i
+
+        if not source_w or not target_w:
             return
 
-        source_idx = ids.index(source_id)
-        target_idx = ids.index(target_id)
+        moving_down = source_idx < target_idx
+        self._items_layout.removeWidget(source_w)
+        for i in range(self._items_layout.count()):
+            if self._items_layout.itemAt(i).widget() is target_w:
+                insert_idx = i + 1 if moving_down else i
+                self._items_layout.insertWidget(insert_idx, source_w)
+                break
+        source_w._apply_bg_style()
 
-        ids.remove(source_id)
-        new_target_idx = ids.index(target_id)
-
-        if source_idx < target_idx:
-            ids.insert(new_target_idx + 1, source_id)
-        else:
-            ids.insert(new_target_idx, source_id)
-
+    def _emit_current_pin_order(self):
+        """현재 레이아웃의 고정 항목 순서를 시그널로 전달"""
+        ids = []
+        for i in range(self._items_layout.count()):
+            w = self._items_layout.itemAt(i).widget()
+            if isinstance(w, PanelItemWidget) and w._is_pinned:
+                ids.append(w.item_id)
         new_orders = [(item_id, i) for i, item_id in enumerate(ids)]
         self.pin_reorder_requested.emit(new_orders)
 
-    # ── Windows 네이티브 리사이즈 (WM_NCHITTEST) ──
+    def _update_hist_hover(self, cursor_pos: QPoint):
+        """히스토리 드래그 중 커서 아래 항목 탐지 → 타겟 하이라이트"""
+        widget_under = QApplication.widgetAt(cursor_pos)
+        target_w = widget_under
+        while target_w and not isinstance(target_w, PanelItemWidget):
+            target_w = target_w.parent()
 
-    def nativeEvent(self, eventType, message):
-        """WM_NCHITTEST 처리 — OS 네이티브 리사이즈 커서 + 드래그"""
-        try:
-            if eventType == b"windows_generic_MSG":
-                import ctypes.wintypes
-                msg = ctypes.wintypes.MSG.from_address(int(message))
+        if not target_w or target_w._is_pinned:
+            self._clear_hist_drag_highlight()
+            self._hist_drag_target_id = None
+            return
+        if target_w.item_id == self._hist_drag_source_id:
+            return
+        if target_w.item_id == self._hist_drag_target_id:
+            return  # 같은 타겟, 변화 없음
 
-                if msg.message == 0x0084:  # WM_NCHITTEST
-                    # lParam에서 screen 좌표 추출
-                    x = msg.lParam & 0xFFFF
-                    y = (msg.lParam >> 16) & 0xFFFF
-                    # 부호 확장 (음수 좌표 지원)
-                    if x >= 0x8000:
-                        x -= 0x10000
-                    if y >= 0x8000:
-                        y -= 0x10000
+        self._clear_hist_drag_highlight()
+        self._hist_drag_target_id = target_w.item_id
+        target_w.setStyleSheet(
+            f"background-color: {COLORS['surface1']}; border-radius: 6px;"
+            f"border: 1px dashed {COLORS['teal']};"
+        )
 
-                    pos = self.mapFromGlobal(QPoint(x, y))
-                    r = self.rect()
-                    m = RESIZE_MARGIN
+    def _clear_hist_drag_highlight(self):
+        """히스토리 드래그 타겟 하이라이트 해제"""
+        if self._hist_drag_target_id is None:
+            return
+        for i in range(self._items_layout.count()):
+            w = self._items_layout.itemAt(i).widget()
+            if isinstance(w, PanelItemWidget) and w.item_id == self._hist_drag_target_id:
+                w._apply_bg_style()
+                break
 
-                    on_top = pos.y() <= m
-                    on_bottom = pos.y() >= r.height() - m
-                    on_left = pos.x() <= m
-                    on_right = pos.x() >= r.width() - m
+    def _do_hist_reorder(self, source_id: int, target_id):
+        """마우스 릴리즈 시 히스토리 항목 타겟 위치로 이동"""
+        if target_id is None or source_id == target_id:
+            return
+        source_w = target_w = None
+        source_idx = target_idx = -1
+        for i in range(self._items_layout.count()):
+            w = self._items_layout.itemAt(i).widget()
+            if isinstance(w, PanelItemWidget) and not w._is_pinned:
+                if w.item_id == source_id:
+                    source_w = w
+                    source_idx = i
+                elif w.item_id == target_id:
+                    target_w = w
+                    target_idx = i
 
-                    if on_top and on_left:
-                        return True, HTTOPLEFT
-                    if on_top and on_right:
-                        return True, HTTOPRIGHT
-                    if on_bottom and on_left:
-                        return True, HTBOTTOMLEFT
-                    if on_bottom and on_right:
-                        return True, HTBOTTOMRIGHT
-                    if on_top:
-                        return True, HTTOP
-                    if on_bottom:
-                        return True, HTBOTTOM
-                    if on_left:
-                        return True, HTLEFT
-                    if on_right:
-                        return True, HTRIGHT
-        except Exception:
-            pass
+        if not source_w or not target_w:
+            return
 
-        return False, 0
+        moving_down = source_idx < target_idx
+        self._items_layout.removeWidget(source_w)
+        for i in range(self._items_layout.count()):
+            if self._items_layout.itemAt(i).widget() is target_w:
+                insert_idx = i + 1 if moving_down else i
+                self._items_layout.insertWidget(insert_idx, source_w)
+                break
+        source_w._apply_bg_style()
 
-    # ── 드래그 이동 (타이틀바 영역 = 검색바 위쪽) ──
+    def _emit_current_hist_order(self):
+        """현재 레이아웃의 히스토리 항목 순서를 시그널로 전달 + 인메모리 갱신"""
+        ids = []
+        for i in range(self._items_layout.count()):
+            w = self._items_layout.itemAt(i).widget()
+            if isinstance(w, PanelItemWidget) and not w._is_pinned:
+                ids.append(w.item_id)
+        new_orders = [(item_id, i) for i, item_id in enumerate(ids)]
+        self.history_reorder_requested.emit(new_orders)
+        # _rebuild() 시 새 순서가 유지되도록 인메모리 목록도 갱신
+        id_to_item = {item.id: item for item in self._history_items}
+        self._history_items = [id_to_item[item_id] for item_id in ids if item_id in id_to_item]
+
+    # ── Qt 방식 리사이즈 + 드래그 이동 ──
+
+    def _get_resize_edges(self, pos) -> set:
+        """마우스 위치가 어느 가장자리에 있는지 반환"""
+        edges = set()
+        m = RESIZE_MARGIN
+        r = self.rect()
+        if pos.y() <= m:
+            edges.add("top")
+        if pos.y() >= r.height() - m:
+            edges.add("bottom")
+        if pos.x() <= m:
+            edges.add("left")
+        if pos.x() >= r.width() - m:
+            edges.add("right")
+        return edges
+
+    def _cursor_for_edges(self, edges: set):
+        if ("top" in edges and "left" in edges) or ("bottom" in edges and "right" in edges):
+            return Qt.CursorShape.SizeFDiagCursor
+        if ("top" in edges and "right" in edges) or ("bottom" in edges and "left" in edges):
+            return Qt.CursorShape.SizeBDiagCursor
+        if "left" in edges or "right" in edges:
+            return Qt.CursorShape.SizeHorCursor
+        if "top" in edges or "bottom" in edges:
+            return Qt.CursorShape.SizeVerCursor
+        return Qt.CursorShape.ArrowCursor
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            edges = self._get_resize_edges(event.pos())
+            if edges:
+                self._resize_edges = edges
+                self._resize_start_pos = event.globalPosition().toPoint()
+                self._resize_start_geometry = self.geometry()
+                self._drag_pos = None
+            else:
+                self._resize_edges = set()
+                self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._drag_pos and event.buttons() & Qt.MouseButton.LeftButton:
+        if self._resize_edges and self._resize_start_pos and event.buttons() & Qt.MouseButton.LeftButton:
+            delta = event.globalPosition().toPoint() - self._resize_start_pos
+            g = QRect(self._resize_start_geometry)
+            if "right" in self._resize_edges:
+                g.setWidth(max(PANEL_MIN_WIDTH, g.width() + delta.x()))
+            if "left" in self._resize_edges:
+                new_left = min(g.left() + delta.x(), g.right() - PANEL_MIN_WIDTH)
+                g.setLeft(new_left)
+            if "bottom" in self._resize_edges:
+                g.setHeight(max(PANEL_MIN_HEIGHT, g.height() + delta.y()))
+            if "top" in self._resize_edges:
+                new_top = min(g.top() + delta.y(), g.bottom() - PANEL_MIN_HEIGHT)
+                g.setTop(new_top)
+            self.setGeometry(g)
+        elif self._drag_pos and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_pos)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
+        self._resize_edges = set()
+        self._resize_start_pos = None
+        self._resize_start_geometry = None
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._reset_to_min_size()
+        super().mouseDoubleClickEvent(event)
+
+    def _reset_to_min_size(self):
+        """빈공간 더블클릭 시 최소 크기로 복원"""
+        self.resize(PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT)
 
     # ── F10-4: 위치/크기 저장 복원 ──
 
@@ -833,10 +1292,37 @@ class ClipboardPanel(QWidget):
         if (event.type() == QEvent.Type.ActivationChange
                 and self._auto_close
                 and self._user_activated
+                and not self._paste_in_progress
+                and not self._ext_drag_active
                 and not self.isActiveWindow()):
             self._user_activated = False
             self.hide()
         super().changeEvent(event)
+
+    def showEvent(self, event):
+        self._cursor_timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._cursor_timer.stop()
+        self.unsetCursor()
+        if self._search_expanded:
+            self._collapse_search()
+        super().hideEvent(event)
+
+    def _sync_resize_cursor(self):
+        """마우스 위치에 따라 리사이즈 커서를 동기화 (자식 위젯 위에서도 정확히 동작)"""
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            return
+        local_pos = self.mapFromGlobal(QCursor.pos())
+        if self.rect().contains(local_pos):
+            edges = self._get_resize_edges(local_pos)
+            if edges:
+                self.setCursor(self._cursor_for_edges(edges))
+            else:
+                self.unsetCursor()
+        else:
+            self.unsetCursor()
 
     # ── F6: 다중 선택 Ctrl+C 결합 복사 ──
 
@@ -850,3 +1336,46 @@ class ClipboardPanel(QWidget):
                 self.combine_copy_requested.emit(combined)
             return
         super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event):
+        """패널 빈 곳 우클릭 → 패널 닫기 / 설정 / 종료"""
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {COLORS['surface0']};
+                color: {COLORS['text']};
+                border: 1px solid {COLORS['surface1']};
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 16px;
+                border-radius: 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: {COLORS['surface1']};
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: {COLORS['surface1']};
+                margin: 4px 8px;
+            }}
+        """)
+
+        close_action = menu.addAction("패널 닫기")
+        close_action.triggered.connect(self.hide)
+
+        settings_action = menu.addAction("설정")
+        settings_action.triggered.connect(self.open_settings_requested.emit)
+
+        menu.addSeparator()
+
+        clear_action = menu.addAction("히스토리 초기화")
+        clear_action.triggered.connect(self.clear_history_requested.emit)
+
+        menu.addSeparator()
+
+        quit_action = menu.addAction("종료")
+        quit_action.triggered.connect(self.quit_requested.emit)
+
+        menu.exec(event.globalPos())
