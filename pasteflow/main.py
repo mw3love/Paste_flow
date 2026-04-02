@@ -568,7 +568,7 @@ class PasteFlowApp:
     def _on_preview_image(self, item_id: int, pos):
         item = self.db.get_item(item_id)
         if item and item.image_data:
-            ImagePreviewPopup.instance().toggle_preview(item.image_data, pos)
+            ImagePreviewPopup.open_new(item.image_data, pos)
 
     def _on_clear_history(self):
         self.db.clear_history()

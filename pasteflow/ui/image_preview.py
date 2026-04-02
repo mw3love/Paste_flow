@@ -1,4 +1,4 @@
-"""이미지 확대 미리보기 팝업 — 드래그 이동·휠 줌·닫기 버튼 지원"""
+"""이미지 확대 미리보기 팝업 — 드래그 이동·휠 줌·닫기 버튼·다중 창 지원"""
 import io
 
 from PyQt6.QtWidgets import (
@@ -20,15 +20,31 @@ PREVIEW_MAX_H = 480
 
 
 class ImagePreviewPopup(QWidget):
-    """이미지 확대 미리보기 — 싱글톤처럼 사용"""
+    """이미지 확대 미리보기 — 다중 창 동시 표시 지원"""
 
-    _instance = None
+    _instances: list["ImagePreviewPopup"] = []
+
+    # ------------------------------------------------------------------
+    # 클래스 메서드
+    # ------------------------------------------------------------------
 
     @classmethod
-    def instance(cls):
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
+    def open_new(cls, image_data: bytes, global_pos: QPoint) -> "ImagePreviewPopup":
+        """새 미리보기 창을 열고 인스턴스 목록에 등록한다."""
+        popup = cls()
+        cls._instances.append(popup)
+        popup.show_preview(image_data, global_pos)
+        return popup
+
+    @classmethod
+    def close_all(cls):
+        """열려 있는 모든 미리보기 창을 닫는다."""
+        for popup in list(cls._instances):
+            popup.close()
+
+    # ------------------------------------------------------------------
+    # 인스턴스 초기화
+    # ------------------------------------------------------------------
 
     def __init__(self):
         super().__init__(None)
@@ -128,16 +144,6 @@ class ImagePreviewPopup(QWidget):
         self.show()
         self.raise_()
 
-    def toggle_preview(self, image_data: bytes, global_pos: QPoint):
-        """클릭 시 토글 — 보이면 숨기고, 숨겨져 있으면 표시"""
-        if self.isVisible():
-            self.hide()
-        else:
-            self.show_preview(image_data, global_pos)
-
-    def hide_preview(self):
-        self.hide()
-
     # ------------------------------------------------------------------
     # 휠 줌
     # ------------------------------------------------------------------
@@ -146,6 +152,8 @@ class ImagePreviewPopup(QWidget):
         if self._original_pixmap is None:
             return
         delta = event.angleDelta().y()
+        if delta == 0:
+            return
         factor = 1.1 if delta > 0 else (1 / 1.1)
         self._scale_factor = max(0.1, min(8.0, self._scale_factor * factor))
         self._apply_scale()
@@ -212,6 +220,14 @@ class ImagePreviewPopup(QWidget):
             self.close()
         else:
             super().keyPressEvent(event)
+
+    # ------------------------------------------------------------------
+    # 생명주기 — _instances 목록 정리
+    # ------------------------------------------------------------------
+
+    def closeEvent(self, event):
+        type(self)._instances = [p for p in type(self)._instances if p is not self]
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------
     # 유틸

@@ -250,7 +250,7 @@ class PanelItemWidget(QWidget):
             distance = (event.pos() - self._drag_start_pos).manhattanLength()
             if distance > 10:
                 self._did_drag = True
-                ImagePreviewPopup.instance().hide_preview()
+                ImagePreviewPopup.close_all()
                 TextPreviewPopup.instance().hide_preview()
 
                 if not self._is_pinned:
