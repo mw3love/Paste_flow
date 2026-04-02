@@ -114,8 +114,10 @@ class ClipboardMonitor:
 
     def _read_clipboard(self) -> Optional[ClipboardItem]:
         """클립보드에서 데이터 읽기"""
+        _opened = False
         try:
             win32clipboard.OpenClipboard()
+            _opened = True
         except Exception:
             return None
 
@@ -198,7 +200,11 @@ class ClipboardMonitor:
             }
             fmt = 0
             while True:
-                fmt = win32clipboard.EnumClipboardFormats(fmt)
+                try:
+                    fmt = win32clipboard.EnumClipboardFormats(fmt)
+                except Exception:
+                    # 클립보드 소유권 상실(1418) 등 — 이미 읽은 데이터로 계속
+                    break
                 if fmt == 0:
                     break
                 if fmt in known_fmts:
@@ -234,7 +240,11 @@ class ClipboardMonitor:
                 extra_formats=extra_formats or None,
             )
         finally:
-            win32clipboard.CloseClipboard()
+            if _opened:
+                try:
+                    win32clipboard.CloseClipboard()
+                except Exception:
+                    pass
 
     def _create_thumbnail(self, dib_data: bytes) -> Optional[bytes]:
         """DIB 또는 PNG 데이터에서 썸네일 생성
