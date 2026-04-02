@@ -1316,6 +1316,7 @@ class ClipboardPanel(QWidget):
         self.unsetCursor()
         if self._search_expanded:
             self._collapse_search()
+        ImagePreviewPopup.close_all()
         super().hideEvent(event)
 
     def _sync_resize_cursor(self):
