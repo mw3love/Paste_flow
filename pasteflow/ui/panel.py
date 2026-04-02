@@ -107,7 +107,7 @@ class PanelItemWidget(QWidget):
         num_label = QLabel(str(number))
         num_label.setFixedWidth(22)
         num_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        num_label.setStyleSheet("color: #ffffff; font-size: 11px; background: transparent; border: none;")
+        num_label.setStyleSheet("color: #ffffff; font-size: 13px; background: transparent; border: none;")
         layout.addWidget(num_label)
 
         # 미리보기

@@ -1,7 +1,11 @@
-"""Ctrl+V 감지 → 클립보드 교체 실행
+"""Ctrl+Shift+{V,X,Z} 감지 → 순차 붙여넣기 / 큐 관리
 
-핵심 규칙: Ctrl+V 키 이벤트를 절대 차단(block/suppress)하지 않는다.
-키다운 시점에 클립보드 내용만 교체하고, 키 이벤트는 그대로 통과시킨다.
+단축키 체계:
+  Ctrl+Shift+V — 순차 붙여넣기 (suppress + 클립보드 교체 + Ctrl+V 주입)
+  Ctrl+Shift+X — 큐 초기화   (suppress + queue.clear)
+  Ctrl+Shift+Z — 실수 복구   (suppress + queue.undo_last + 클립보드 복원)
+
+일반 Ctrl+C는 모든 복사를 큐에 추가한다. PasteFlow가 Ctrl+C에 개입하지 않는다.
 """
 import ctypes
 import ctypes.wintypes
@@ -10,13 +14,13 @@ import time
 from typing import Optional, Callable
 
 import win32clipboard
-import win32con
 
 from pasteflow.models import ClipboardItem
 from pasteflow.paste_queue import PasteQueue
 
 CF_HTML = win32clipboard.RegisterClipboardFormat("HTML Format")
 CF_RTF = win32clipboard.RegisterClipboardFormat("Rich Text Format")
+CF_PNG = win32clipboard.RegisterClipboardFormat("PNG")
 
 # --- ctypes 클립보드 API (훅 스레드용 — pywin32 C 확장 우회) ---
 _CF_UNICODETEXT = 13
@@ -27,6 +31,9 @@ _GMEM_MOVEABLE = 0x0002
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
 VK_V = 0x56
+VK_C = 0x43
+VK_X = 0x58
+VK_Z = 0x5A
 VK_CONTROL = 0x11
 VK_SHIFT = 0x10
 VK_MENU = 0x12  # Alt
@@ -87,6 +94,8 @@ HOOKPROC = ctypes.CFUNCTYPE(
     ctypes.wintypes.LPARAM,
 )
 
+WM_QUIT = 0x0012
+
 _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
 
@@ -111,6 +120,15 @@ _kernel32.GetModuleHandleW.restype = ctypes.wintypes.HMODULE
 
 _user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
 _user32.SetForegroundWindow.restype = ctypes.wintypes.BOOL
+
+_user32.PostThreadMessageW.argtypes = [
+    ctypes.wintypes.DWORD, ctypes.wintypes.UINT,
+    ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM,
+]
+_user32.PostThreadMessageW.restype = ctypes.wintypes.BOOL
+
+_kernel32.GetCurrentThreadId.argtypes = []
+_kernel32.GetCurrentThreadId.restype = ctypes.wintypes.DWORD
 
 # 클립보드 API (ctypes — 훅 스레드에서 pywin32 우회용)
 _user32.OpenClipboard.argtypes = [ctypes.wintypes.HWND]
@@ -149,10 +167,10 @@ def _send_inputs(input_list):
 
 
 class PasteInterceptor:
-    """Ctrl+V 키다운 → 클립보드 교체 (저수준 키보드 훅)
+    """Ctrl+Shift+{V,C,X,Z} 감지 → 순차 붙여넣기 / 큐 관리 (저수준 키보드 훅)
 
     keyboard 라이브러리 대신 Win32 SetWindowsHookEx를 직접 사용.
-    훅 프로시저 안에서 동기적으로 클립보드를 교체한 뒤 키를 통과시킨다.
+    전용 단축키만 suppress하고, 일반 Ctrl+V/C 에는 개입하지 않는다.
     """
 
     def __init__(
@@ -160,12 +178,17 @@ class PasteInterceptor:
         paste_queue: PasteQueue,
         clipboard_monitor=None,
         on_paste: Optional[Callable[[ClipboardItem], None]] = None,
+        on_queue_clear: Optional[Callable[[], None]] = None,
+        on_undo: Optional[Callable[[ClipboardItem], None]] = None,
     ):
         self.queue = paste_queue
         self.monitor = clipboard_monitor
         self.on_paste = on_paste
+        self.on_queue_clear = on_queue_clear
+        self.on_undo = on_undo
         self._hook = None
         self._thread: Optional[threading.Thread] = None
+        self._hook_thread_id: int = 0
         self._running = False
         self._last_paste_time = 0.0
         self._direct_paste_active = False  # direct_paste 중 훅 무시 플래그
@@ -186,9 +209,14 @@ class PasteInterceptor:
         if self._hook:
             _user32.UnhookWindowsHookEx(self._hook)
             self._hook = None
+        # GetMessageW 블로킹 중인 훅 스레드를 깨운다
+        if self._hook_thread_id:
+            _user32.PostThreadMessageW(self._hook_thread_id, WM_QUIT, 0, 0)
+            self._hook_thread_id = 0
 
     def _hook_thread(self):
         """훅 메시지 루프 스레드"""
+        self._hook_thread_id = _kernel32.GetCurrentThreadId()
         h_mod = _kernel32.GetModuleHandleW(None)
         self._hook = _user32.SetWindowsHookExW(
             WH_KEYBOARD_LL,
@@ -216,61 +244,124 @@ class PasteInterceptor:
     def _low_level_keyboard_proc(self, nCode, wParam, lParam):
         """저수준 키보드 훅 프로시저
 
-        Ctrl+V 키다운 시 클립보드 교체 후 키 이벤트를 그대로 통과시킨다.
-        절대 키를 차단하지 않는다.
+        Ctrl+Shift+{V,C,X,Z} 만 가로채고 suppress(return 1)한다.
+        일반 Ctrl+C / Ctrl+V 에는 개입하지 않는다.
 
         중요: ctypes 콜백 안에서 예외가 C 레벨로 전파되면 프로세스 크래시.
         반드시 모든 예외를 잡아야 한다.
         """
         try:
             if nCode >= 0 and wParam == WM_KEYDOWN:
-                # KBDLLHOOKSTRUCT에서 vkCode 추출 (첫 4바이트)
                 vk_code = ctypes.cast(
                     lParam, ctypes.POINTER(ctypes.c_ulong)
                 ).contents.value
 
-                if vk_code == VK_V:
-                    # Ctrl 키 눌림 확인
-                    ctrl_pressed = _user32.GetAsyncKeyState(VK_CONTROL) & 0x8000
-                    shift_pressed = _user32.GetAsyncKeyState(VK_SHIFT) & 0x8000
-                    alt_pressed = _user32.GetAsyncKeyState(VK_MENU) & 0x8000
+                ctrl_pressed = bool(_user32.GetAsyncKeyState(VK_CONTROL) & 0x8000)
+                shift_pressed = bool(_user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
+                alt_pressed = bool(_user32.GetAsyncKeyState(VK_MENU) & 0x8000)
 
-                    # Ctrl+V만 처리 (Ctrl+Shift+V 등은 무시)
-                    if ctrl_pressed and not shift_pressed and not alt_pressed:
-                        # direct_paste가 보낸 Ctrl+V는 무시
-                        if not self._direct_paste_active:
-                            # 키 반복 디바운스 (100ms)
-                            now = time.monotonic()
-                            if now - self._last_paste_time > 0.1:
-                                self._last_paste_time = now
-                                self._on_ctrl_v()
+                if ctrl_pressed and shift_pressed and not alt_pressed:
+                    now = time.monotonic()
+                    debounce_ok = (now - self._last_paste_time) > 0.1
+
+                    if vk_code == VK_V and debounce_ok:
+                        self._last_paste_time = now
+                        self._on_ctrl_shift_v()
+                        return 1  # suppress — Ctrl+Shift+V를 앱에 전달하지 않음
+                    elif vk_code == VK_X and debounce_ok:
+                        self._last_paste_time = now
+                        self._on_ctrl_shift_x()
+                        return 1  # suppress
+                    elif vk_code == VK_Z and debounce_ok:
+                        self._last_paste_time = now
+                        self._on_ctrl_shift_z()
+                        return 1  # suppress
         except Exception as e:
             print(f"[Hook] 훅 프로시저 예외 (무시): {e}")
 
-        # 키 이벤트를 절대 차단하지 않음 — 항상 CallNextHookEx
-        return _user32.CallNextHookEx(
-            self._hook, nCode, wParam, lParam
-        )
+        return _user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
 
-    def _on_ctrl_v(self):
-        """Ctrl+V 키다운 시 클립보드 교체 (훅 콜백 내부 — 빠르게 완료해야 함)"""
+    # --- 단축키 핸들러 ---
+
+    def _on_ctrl_shift_v(self):
+        """Ctrl+Shift+V: 순차 붙여넣기 — 큐에서 다음 항목을 클립보드에 설정 후 Ctrl+V 주입"""
+        if self._direct_paste_active:
+            return
         next_item = self.queue.get_next()
         if next_item is None:
-            print("[Interceptor] 큐 소진 — 기본 동작")
-            return  # 큐 소진 → 개입 안 함 → OS 기본 동작
+            print("[Interceptor] 큐 소진 — 순차 붙여넣기 없음")
+            return
 
         preview = (next_item.preview_text or "")[:30]
         print(f"[Interceptor] 순차 붙여넣기: '{preview}'")
 
-        # fast=True: 훅 콜백이므로 재시도/sleep 없이 단일 시도
-        self._set_clipboard(next_item, fast=True)
+        self._set_clipboard(next_item)
+        self._send_clean_key(VK_V)  # Shift 해제 후 Ctrl+V 주입
 
-        # 붙여넣기 콜백 (UI 업데이트 등)
         if self.on_paste:
             try:
                 self.on_paste(next_item)
             except Exception:
                 pass
+
+    def _on_ctrl_shift_x(self):
+        """Ctrl+Shift+X: 큐 초기화"""
+        print("[Interceptor] Ctrl+Shift+X — 큐 초기화")
+        self.queue.clear()
+        if self.on_queue_clear:
+            try:
+                self.on_queue_clear()
+            except Exception:
+                pass
+
+    def _on_ctrl_shift_z(self):
+        """Ctrl+Shift+Z: 실수 복구 — 포인터 1칸 되돌리기 + 클립보드 복원"""
+        item = self.queue.undo_last()
+        if item is None:
+            print("[Interceptor] undo_last — 되돌릴 항목 없음")
+            return
+
+        preview = (item.preview_text or "")[:30]
+        print(f"[Interceptor] 실수 복구: 포인터 후퇴, 클립보드를 '{preview}'로 복원")
+        self._set_clipboard(item)
+
+        if self.on_undo:
+            try:
+                self.on_undo(item)
+            except Exception:
+                pass
+
+    def _send_clean_key(self, vk_key: int):
+        """수정키를 해제하고 Ctrl+{vk_key}를 SendInput으로 주입한 뒤 수정키 복원
+
+        Ctrl+Shift+V → Ctrl+V 주입, Ctrl+Shift+C → Ctrl+C 주입에 사용.
+
+        수정키를 복원하지 않으면 SendInput의 가상 key-up 이벤트가 남아
+        사용자가 Ctrl+Shift를 계속 누른 채 V를 반복할 때 두 번째 입력부터
+        GetAsyncKeyState가 수정키 미입력으로 반환해 훅이 가로채지 못한다.
+        """
+        # 현재 눌려 있는 수정키 확인 (Ctrl 포함 — Ctrl+V 전송 후 Ctrl-up 때문에 복원 필요)
+        held_ctrl  = bool(_user32.GetAsyncKeyState(VK_CONTROL) & 0x8000)
+        held_shift = bool(_user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
+        held_alt   = bool(_user32.GetAsyncKeyState(VK_MENU) & 0x8000)
+
+        inputs = []
+        # 1) 모든 수정키 해제 (순수 Ctrl+key만 앱에 전달하기 위해)
+        if held_alt:   inputs.append(_make_key_input(VK_MENU,    KEYEVENTF_KEYUP))
+        if held_shift: inputs.append(_make_key_input(VK_SHIFT,   KEYEVENTF_KEYUP))
+        if held_ctrl:  inputs.append(_make_key_input(VK_CONTROL, KEYEVENTF_KEYUP))
+        # 2) Ctrl+key 전송
+        inputs += [
+            _make_key_input(VK_CONTROL),
+            _make_key_input(vk_key),
+            _make_key_input(vk_key, KEYEVENTF_KEYUP),
+            _make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+        ]
+        # 3) 수정키 복원 — 사용자가 물리적으로 누른 채 반복 입력할 때 가상 상태 동기화
+        if held_ctrl:  inputs.append(_make_key_input(VK_CONTROL))
+        if held_shift: inputs.append(_make_key_input(VK_SHIFT))
+        if held_alt:   inputs.append(_make_key_input(VK_MENU))
+        _send_inputs(inputs)
 
     def direct_paste(self, item: ClipboardItem, target_hwnd=None):
         """항목을 클립보드에 설정 후 SendInput으로 Ctrl+V 전송 (F5)
@@ -327,8 +418,10 @@ class PasteInterceptor:
             _send_inputs([_make_key_input(VK_MENU)])
 
     def send_ctrl_v_to(self, target_hwnd):
-        """대상 윈도우에 포커스 후 Ctrl+V 전송 (메인 스레드에서 포커스 이동 후 호출)"""
-        time.sleep(0.1)
+        """대상 윈도우에 포커스 이동 후 Ctrl+V 전송"""
+        if target_hwnd:
+            _user32.SetForegroundWindow(target_hwnd)
+            time.sleep(0.05)
         self._direct_paste_active = True
         try:
             _send_inputs([
@@ -341,20 +434,18 @@ class PasteInterceptor:
             time.sleep(0.05)
             self._direct_paste_active = False
 
-    def _set_clipboard(self, item: ClipboardItem, *, fast: bool = False):
-        """클립보드에 항목 설정 — 모든 형식 보존
-
-        fast=True: 훅 콜백에서 호출 — raw ctypes로 pywin32 C 확장 우회.
-        fast=False: direct_paste 등 일반 경로 — pywin32 사용, 최대 3회 재시도.
-        """
-        if fast:
-            self._set_clipboard_ctypes(item)
-        else:
-            self._set_clipboard_pywin32(item)
+    def _set_clipboard(self, item: ClipboardItem):
+        """클립보드에 항목 설정 — ctypes 기반 (pywin32 ACCESS VIOLATION 방지)"""
+        self._set_clipboard_ctypes(item)
 
     def _set_clipboard_ctypes(self, item: ClipboardItem):
-        """ctypes 기반 클립보드 설정 (훅 스레드 전용 — pywin32 우회)"""
-        if not _user32.OpenClipboard(None):
+        """ctypes 기반 클립보드 설정 (재시도 포함 — pywin32 우회)"""
+        for attempt in range(3):
+            if _user32.OpenClipboard(None):
+                break
+            if attempt < 2:
+                time.sleep(0.01)
+        else:
             print("[Interceptor] ctypes 클립보드 열기 실패")
             return
 
@@ -409,8 +500,10 @@ class PasteInterceptor:
                 except Exception:
                     pass
 
-            # 이미지 (DIB)
+            # 이미지 (PNG 또는 DIB — 원본 포맷 복원)
             if item.image_data:
+                is_png = item.image_data[:4] == b'\x89PNG'
+                cf = CF_PNG if is_png else _CF_DIB
                 try:
                     h = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(item.image_data))
                     if h:
@@ -418,60 +511,27 @@ class PasteInterceptor:
                         if p:
                             ctypes.memmove(p, item.image_data, len(item.image_data))
                             _kernel32.GlobalUnlock(h)
-                            _user32.SetClipboardData(_CF_DIB, h)
+                            _user32.SetClipboardData(cf, h)
                         else:
                             _kernel32.GlobalFree(h)
                 except Exception:
                     pass
+
+            # 기타 포맷 복원 (노션 등 앱 전용)
+            if item.extra_formats:
+                for fmt, data in item.extra_formats.items():
+                    try:
+                        h = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(data))
+                        if h:
+                            p = _kernel32.GlobalLock(h)
+                            if p:
+                                ctypes.memmove(p, data, len(data))
+                                _kernel32.GlobalUnlock(h)
+                                _user32.SetClipboardData(fmt, h)
+                            else:
+                                _kernel32.GlobalFree(h)
+                    except Exception:
+                        pass
         finally:
             _user32.CloseClipboard()
 
-    def _set_clipboard_pywin32(self, item: ClipboardItem):
-        """pywin32 기반 클립보드 설정 (메인/일반 스레드용)"""
-        for attempt in range(3):
-            try:
-                win32clipboard.OpenClipboard()
-                break
-            except Exception:
-                if attempt < 2:
-                    time.sleep(0.01)
-                else:
-                    print("[Interceptor] 클립보드 열기 실패")
-                    return
-
-        if self.monitor:
-            self.monitor.set_self_triggered(0.5)
-
-        try:
-            win32clipboard.EmptyClipboard()
-
-            if item.text_content:
-                win32clipboard.SetClipboardData(
-                    win32con.CF_UNICODETEXT, item.text_content
-                )
-
-            if item.html_content:
-                try:
-                    win32clipboard.SetClipboardData(
-                        CF_HTML, item.html_content.encode("utf-8")
-                    )
-                except Exception:
-                    pass
-
-            if item.rtf_content:
-                try:
-                    win32clipboard.SetClipboardData(
-                        CF_RTF, item.rtf_content.encode("utf-8")
-                    )
-                except Exception:
-                    pass
-
-            if item.image_data:
-                try:
-                    win32clipboard.SetClipboardData(
-                        win32con.CF_DIB, item.image_data
-                    )
-                except Exception:
-                    pass
-        finally:
-            win32clipboard.CloseClipboard()

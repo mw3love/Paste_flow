@@ -19,8 +19,9 @@ class PasteQueue:
     def add_item(self, item: ClipboardItem):
         """새 항목 추가
 
-        - 아직 붙여넣기 안 했으면(pointer==0): 누적 (연속 복사 모드)
-        - 붙여넣기 시작했으면(pointer>0): 큐 초기화 후 새 항목만 (새 세션)
+        PRD F2-6: 붙여넣기 진행 전(pointer==0)이면 누적,
+        붙여넣기 진행 중(pointer>0)이면 큐 리셋 후 새 항목부터 시작.
+        히스토리(DB)에는 모든 항목이 유지됨.
         """
         with self._lock:
             if self.pointer > 0:
@@ -51,3 +52,27 @@ class PasteQueue:
         """큐의 모든 항목 반환"""
         with self._lock:
             return list(self._items)
+
+    def undo_last(self) -> Optional[ClipboardItem]:
+        """순차 붙여넣기 1단계 되돌리기
+
+        pointer를 1 감소시키고 해당 항목을 반환한다.
+        pointer가 0이면 (되돌릴 것 없음) None 반환.
+        """
+        with self._lock:
+            if self.pointer > 0:
+                self.pointer -= 1
+                return self._items[self.pointer]
+            return None
+
+    def set_queue(self, items: list[ClipboardItem], pointer: int = 0):
+        """큐를 직접 설정 (패널에서 특정 항목부터 시작할 때 사용)"""
+        with self._lock:
+            self._items = list(items)
+            self.pointer = pointer
+
+    def clear(self):
+        """큐 및 포인터 초기화"""
+        with self._lock:
+            self._items.clear()
+            self.pointer = 0

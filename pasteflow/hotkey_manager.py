@@ -25,6 +25,34 @@ _MODIFIER_MAP = {
     "shift": MOD_SHIFT,
 }
 
+# 일반 ord() 매핑이 안 되는 특수 키 → Windows VK 코드
+_SPECIAL_KEY_MAP = {
+    "space": 0x20,   # VK_SPACE
+    "return": 0x0D,  # VK_RETURN
+    "tab": 0x09,     # VK_TAB
+    "backspace": 0x08, # VK_BACK
+    "delete": 0x2E,  # VK_DELETE
+    "home": 0x24,    # VK_HOME
+    "end": 0x23,     # VK_END
+    "pageup": 0x21,  # VK_PRIOR
+    "pagedown": 0x22, # VK_NEXT
+    "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73,
+    "f5": 0x74, "f6": 0x75, "f7": 0x76, "f8": 0x77,
+    "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
+    "`": 0xC0,   # VK_OEM_3  (backtick/tilde)
+    "~": 0xC0,
+    "-": 0xBD,   # VK_OEM_MINUS
+    "=": 0xBB,   # VK_OEM_PLUS
+    "[": 0xDB,   # VK_OEM_4
+    "]": 0xDD,   # VK_OEM_6
+    "\\": 0xDC,  # VK_OEM_5
+    ";": 0xBA,   # VK_OEM_1
+    "'": 0xDE,   # VK_OEM_7
+    ",": 0xBC,   # VK_OEM_COMMA
+    ".": 0xBE,   # VK_OEM_PERIOD
+    "/": 0xBF,   # VK_OEM_2
+}
+
 _user32 = ctypes.windll.user32
 
 
@@ -33,6 +61,7 @@ class HotkeyManager:
 
     def __init__(self):
         self._hotkeys: dict[int, Callable] = {}  # hotkey_id → callback
+        self._hotkey_ids: dict[str, int] = {}    # hotkey_str → hotkey_id (역방향)
         self._next_id = 1
         self._hwnd = None
         self._wnd_proc_map = None  # GC 방지
@@ -81,10 +110,14 @@ class HotkeyManager:
         )
         if result:
             self._hotkeys[hotkey_id] = callback
+            self._hotkey_ids[hotkey] = hotkey_id
 
     def unregister(self, hotkey: str):
         """단축키 해제 (이름 기반)"""
-        pass
+        hotkey_id = self._hotkey_ids.pop(hotkey, None)
+        if hotkey_id is not None and self._hwnd:
+            _user32.UnregisterHotKey(self._hwnd, hotkey_id)
+            self._hotkeys.pop(hotkey_id, None)
 
     def unregister_all(self):
         """모든 단축키 해제"""
@@ -92,6 +125,7 @@ class HotkeyManager:
             for hotkey_id in list(self._hotkeys.keys()):
                 _user32.UnregisterHotKey(self._hwnd, hotkey_id)
         self._hotkeys.clear()
+        self._hotkey_ids.clear()
 
     def destroy(self):
         """윈도우 파괴"""
@@ -109,6 +143,8 @@ class HotkeyManager:
         for part in parts:
             if part in _MODIFIER_MAP:
                 modifiers |= _MODIFIER_MAP[part]
+            elif part in _SPECIAL_KEY_MAP:
+                vk = _SPECIAL_KEY_MAP[part]
             elif len(part) == 1:
                 vk = ord(part.upper())
 

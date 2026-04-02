@@ -21,6 +21,7 @@ class ClipboardItem:
     created_at: datetime = field(default_factory=datetime.now)
     is_pinned: bool = False
     pin_order: int = 0
+    extra_formats: Optional[dict] = None  # {format_id: bytes} — 앱 전용 포맷 보존
 
     def __post_init__(self):
         if self.content_type not in VALID_CONTENT_TYPES:

@@ -12,7 +12,6 @@ def _create_default_icon() -> QIcon:
     painter.setBrush(QColor("#94e2d5"))
     painter.setPen(QColor("#1e1e2e"))
     painter.drawRoundedRect(1, 1, 14, 14, 3, 3)
-    painter.setPen(QColor("#1e1e2e"))
     painter.drawText(3, 12, "P")
     painter.end()
     return QIcon(pixmap)
