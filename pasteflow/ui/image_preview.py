@@ -1,21 +1,25 @@
-"""이미지 확대 미리보기 팝업 — 마우스 오버 시 최대 320×240px"""
+"""이미지 확대 미리보기 팝업 — 드래그 이동·닫기 버튼 지원"""
 import io
 
-from PyQt6.QtWidgets import QLabel, QApplication
+from PyQt6.QtWidgets import (
+    QWidget, QLabel, QToolButton,
+    QVBoxLayout, QHBoxLayout, QApplication,
+)
 from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QPixmap
-from PIL import Image
 
 
 # Catppuccin Mocha
 _BG = "#1e1e2e"
 _BORDER = "#45475a"
+_TEXT = "#cdd6f4"
+_SURFACE1 = "#313244"
 
-PREVIEW_MAX_W = 320
-PREVIEW_MAX_H = 240
+PREVIEW_MAX_W = 640
+PREVIEW_MAX_H = 480
 
 
-class ImagePreviewPopup(QLabel):
+class ImagePreviewPopup(QWidget):
     """이미지 확대 미리보기 — 싱글톤처럼 사용"""
 
     _instance = None
@@ -29,18 +33,67 @@ class ImagePreviewPopup(QLabel):
     def __init__(self):
         super().__init__(None)
         self.setWindowFlags(
-            Qt.WindowType.ToolTip
+            Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
         )
+        # 패널 포커스 보호 — 팝업이 열려도 패널이 비활성화되지 않음
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        self._drag_pos: QPoint | None = None
+
         self.setStyleSheet(f"""
-            background-color: {_BG};
-            border: 1px solid {_BORDER};
-            border-radius: 6px;
-            padding: 4px;
+            QWidget {{
+                background-color: {_BG};
+                border: 1px solid {_BORDER};
+                border-radius: 6px;
+            }}
+            QToolButton#close_btn {{
+                color: {_TEXT};
+                background: transparent;
+                border: none;
+                font-size: 14px;
+                font-weight: bold;
+                border-radius: 3px;
+            }}
+            QToolButton#close_btn:hover {{
+                background-color: {_SURFACE1};
+            }}
+            QLabel#image_label {{
+                background: transparent;
+                border: none;
+            }}
         """)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 4, 6, 6)
+        root.setSpacing(2)
+
+        # 상단 바: × 닫기 버튼
+        top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(0, 0, 0, 0)
+        top_bar.addStretch()
+
+        close_btn = QToolButton()
+        close_btn.setObjectName("close_btn")
+        close_btn.setText("×")
+        close_btn.setFixedSize(18, 18)
+        close_btn.clicked.connect(self.close)
+        top_bar.addWidget(close_btn)
+        root.addLayout(top_bar)
+
+        # 이미지 표시 레이블
+        self._image_label = QLabel()
+        self._image_label.setObjectName("image_label")
+        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self._image_label)
+
         self.hide()
+
+    # ------------------------------------------------------------------
+    # 미리보기 표시
+    # ------------------------------------------------------------------
 
     def show_preview(self, image_data: bytes, global_pos: QPoint):
         """이미지 데이터(DIB 또는 PNG)로 미리보기 표시"""
@@ -57,7 +110,8 @@ class ImagePreviewPopup(QLabel):
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        self.setPixmap(scaled)
+        self._image_label.setPixmap(scaled)
+        self._image_label.adjustSize()
         self.adjustSize()
 
         # 커서 우측 하단에 배치, 화면 밖으로 나가지 않도록 조정
@@ -85,10 +139,45 @@ class ImagePreviewPopup(QLabel):
     def hide_preview(self):
         self.hide()
 
+    # ------------------------------------------------------------------
+    # 드래그 이동
+    # ------------------------------------------------------------------
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = (
+                event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            )
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_pos and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        super().mouseReleaseEvent(event)
+
+    # ------------------------------------------------------------------
+    # 키보드 (ESC — 창 클릭 후 포커스 획득 시 동작)
+    # ------------------------------------------------------------------
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+    # ------------------------------------------------------------------
+    # 유틸
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _to_png(data: bytes) -> bytes | None:
         """DIB 또는 기타 이미지 데이터를 PNG로 변환"""
         try:
+            from PIL import Image
             img = Image.open(io.BytesIO(data))
             buf = io.BytesIO()
             img.save(buf, format="PNG")
