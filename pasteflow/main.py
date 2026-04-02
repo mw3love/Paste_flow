@@ -110,36 +110,30 @@ def _activate_and_send_ctrl_v(hwnd):
 
 
 def _get_explorer_folder(hwnd: int):
-    """CabinetWClass HWND → 현재 폴더 경로 반환. 실패 시 None."""
+    """CabinetWClass HWND → 현재 폴더 경로 반환. 실패 시 None.
+    Qt 메인 스레드 전용 (COM이 MTA로 이미 초기화된 환경에서 호출).
+    """
     try:
-        import pythoncom
         import win32com.client
-        pythoncom.CoInitialize()
-        try:
-            shell = win32com.client.Dispatch("Shell.Application")
-            for window in shell.Windows():
-                try:
-                    if int(window.HWND) == hwnd:
-                        return window.Document.Folder.Self.Path
-                except Exception:
-                    continue
-        finally:
-            pythoncom.CoUninitialize()
+        shell = win32com.client.Dispatch("Shell.Application")
+        for window in shell.Windows():
+            try:
+                if int(window.HWND) == hwnd:
+                    return window.Document.Folder.Self.Path
+            except Exception:
+                continue
     except Exception:
         pass
     return None
 
 
 def _get_desktop_path() -> str:
-    """사용자 바탕화면 경로 반환."""
+    """사용자 바탕화면 경로 반환.
+    Qt 메인 스레드 전용 (COM이 MTA로 이미 초기화된 환경에서 호출).
+    """
     try:
-        import pythoncom
         import win32com.client
-        pythoncom.CoInitialize()
-        try:
-            return win32com.client.Dispatch("WScript.Shell").SpecialFolders("Desktop")
-        finally:
-            pythoncom.CoUninitialize()
+        return win32com.client.Dispatch("WScript.Shell").SpecialFolders("Desktop")
     except Exception:
         return os.path.expanduser("~/Desktop")
 
