@@ -241,10 +241,13 @@ def _get_explorer_folder(hwnd: int, screen_pt: tuple = None):
             import win32gui as _wg
             title = _wg.GetWindowText(hwnd)
             print(f"[DBG] explorer window title: {title!r}")
+            # 창 제목은 '{활성탭명} 및 추가 탭 N - 파일 탐색기' 형태이므로 startswith + 최장 매칭
+            best_path, best_len = None, 0
             for loc_name, path in candidates:
-                if loc_name == title:
-                    current_folder = path
-                    break
+                if title.startswith(loc_name) and len(loc_name) > best_len:
+                    best_path, best_len = path, len(loc_name)
+            if best_path:
+                current_folder = best_path
         except Exception:
             pass
 
