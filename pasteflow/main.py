@@ -138,8 +138,18 @@ def _get_desktop_path() -> str:
         return os.path.expanduser("~/Desktop")
 
 
+_DIRECT_OPEN_SIGNATURES = (
+    b'\xff\xd8\xff',      # JPEG
+    b'GIF8',              # GIF
+    b'RIFF',              # WebP (RIFF....WEBP)
+    b'\x89PNG',           # PNG
+    b'BM',                # BMP 파일 헤더 있는 경우
+    b'\x00\x00\x01\x00',  # ICO
+)
+
+
 def _save_image_to_folder(image_data: bytes, folder: str) -> str:
-    """image_data(PNG 또는 CF_DIB)를 folder에 PNG 파일로 저장. 저장 경로 반환."""
+    """image_data(PNG/JPEG/GIF/WebP/CF_DIB)를 folder에 PNG 파일로 저장. 저장 경로 반환."""
     import io
     import struct
     from PIL import Image
@@ -153,9 +163,10 @@ def _save_image_to_folder(image_data: bytes, folder: str) -> str:
         suffix += 1
         path = os.path.join(folder, f"clip_{ts}_{suffix}.png")
 
-    if image_data[:4] == b'\x89PNG':
-        with open(path, 'wb') as f:
-            f.write(image_data)
+    if any(image_data.startswith(sig) for sig in _DIRECT_OPEN_SIGNATURES):
+        # PIL이 직접 인식 가능한 포맷 (PNG/JPEG/GIF/WebP/BMP 파일 등)
+        img = Image.open(io.BytesIO(image_data))
+        img.save(path, 'PNG')
     else:
         # CF_DIB raw → BMP 파일 헤더 조립 → Pillow로 PNG 변환
         bih_size = struct.unpack_from('<I', image_data, 0)[0]
@@ -440,15 +451,25 @@ class PasteFlowApp:
             pass
 
         # 이미지 항목 + Explorer/바탕화면 → PNG 파일 저장
+        print(f"[DBG] content_type={full_item.content_type!r} has_image={bool(full_item.image_data)} root_class={root_class!r} hwnd={root_hwnd}")
         if full_item.image_data and full_item.content_type == "image":
             folder = None
             if root_class in _EXPLORER_CLASSES:
                 folder = _get_explorer_folder(root_hwnd)
+                print(f"[DBG] Explorer folder={folder!r}")
             elif root_class in _DESKTOP_CLASSES:
                 folder = _get_desktop_path()
+                print(f"[DBG] Desktop folder={folder!r}")
+            else:
+                print(f"[DBG] root_class not in Explorer/Desktop sets")
             if folder:
-                _save_image_to_folder(full_item.image_data, folder)
-                return
+                try:
+                    path = _save_image_to_folder(full_item.image_data, folder)
+                    print(f"[DBG] 저장 완료: {path}")
+                except Exception as e:
+                    print(f"[DBG] _save_image_to_folder 실패: {e}")
+                else:
+                    return  # 저장 성공 시에만 반환; 실패 시 클립보드 경로로 fall-through
 
         # 기존 붙여넣기 경로 (텍스트/기타 항목, 또는 이미지→일반 앱)
         self.interceptor._set_clipboard(full_item)
