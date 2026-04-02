@@ -451,23 +451,17 @@ class PasteFlowApp:
             pass
 
         # 이미지 항목 + Explorer/바탕화면 → PNG 파일 저장
-        print(f"[DBG] content_type={full_item.content_type!r} has_image={bool(full_item.image_data)} root_class={root_class!r} hwnd={root_hwnd}")
         if full_item.image_data and full_item.content_type == "image":
             folder = None
             if root_class in _EXPLORER_CLASSES:
                 folder = _get_explorer_folder(root_hwnd)
-                print(f"[DBG] Explorer folder={folder!r}")
             elif root_class in _DESKTOP_CLASSES:
                 folder = _get_desktop_path()
-                print(f"[DBG] Desktop folder={folder!r}")
-            else:
-                print(f"[DBG] root_class not in Explorer/Desktop sets")
             if folder:
                 try:
-                    path = _save_image_to_folder(full_item.image_data, folder)
-                    print(f"[DBG] 저장 완료: {path}")
-                except Exception as e:
-                    print(f"[DBG] _save_image_to_folder 실패: {e}")
+                    _save_image_to_folder(full_item.image_data, folder)
+                except Exception:
+                    pass
                 else:
                     return  # 저장 성공 시에만 반환; 실패 시 클립보드 경로로 fall-through
 
