@@ -210,19 +210,35 @@ def _get_explorer_folder(hwnd: int, screen_pt: tuple = None):
     빈 공간이면 현재 탐색 중인 폴더 경로.
     Qt 메인 스레드 전용 (COM이 MTA로 이미 초기화된 환경에서 호출).
     """
-    current_folder = None
+    candidates = []  # [(location_name, path), ...]
     try:
         import win32com.client
         shell = win32com.client.Dispatch("Shell.Application")
         for window in shell.Windows():
             try:
                 if int(window.HWND) == hwnd:
-                    current_folder = window.Document.Folder.Self.Path
-                    break
+                    candidates.append((window.LocationName, window.Document.Folder.Self.Path))
             except Exception:
                 continue
     except Exception:
         pass
+
+    if not candidates:
+        return None
+
+    current_folder = candidates[0][1]  # 단일 창 또는 폴백
+
+    if len(candidates) > 1:
+        # 탭 여러 개: 창 제목 == 활성 탭 LocationName 으로 매칭
+        try:
+            import win32gui as _wg
+            title = _wg.GetWindowText(hwnd)
+            for loc_name, path in candidates:
+                if loc_name == title:
+                    current_folder = path
+                    break
+        except Exception:
+            pass
 
     if not current_folder or not screen_pt:
         return current_folder
