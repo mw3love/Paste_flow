@@ -219,6 +219,8 @@ def _get_explorer_folder(hwnd: int, screen_pt: tuple = None):
         for window in shell.Windows():
             try:
                 w_hwnd = int(window.HWND)
+                if w_hwnd == 0:
+                    continue  # 유효하지 않은 HWND (IE 잔재 COM 항목 등) 건너뜀
                 # 직접 HWND 일치 OR 탭 자체 HWND의 root ancestor가 일치 (탭 여러 개 케이스)
                 w_root = _wg.GetAncestor(w_hwnd, _wc.GA_ROOT)
                 if w_hwnd == hwnd or w_root == hwnd:
@@ -228,26 +230,22 @@ def _get_explorer_folder(hwnd: int, screen_pt: tuple = None):
     except Exception:
         pass
 
-    print(f"[DBG] explorer candidates ({len(candidates)}): {[n for n, _ in candidates]}")
-
     if not candidates:
         return None
 
-    current_folder = candidates[0][1]  # 단일 창 또는 폴백
-
-    if len(candidates) > 1:
-        # 탭 여러 개: 창 제목 == 활성 탭 LocationName 으로 매칭
+    if len(candidates) == 1:
+        current_folder = candidates[0][1]
+    else:
+        # 탭 여러 개: 창 제목 startswith + 최장 매칭으로 활성 탭 선택
+        # 창 제목 형태: '{활성탭명} 및 추가 탭 N - 파일 탐색기'
+        current_folder = None
         try:
-            import win32gui as _wg
             title = _wg.GetWindowText(hwnd)
-            print(f"[DBG] explorer window title: {title!r}")
-            # 창 제목은 '{활성탭명} 및 추가 탭 N - 파일 탐색기' 형태이므로 startswith + 최장 매칭
             best_path, best_len = None, 0
             for loc_name, path in candidates:
                 if title.startswith(loc_name) and len(loc_name) > best_len:
                     best_path, best_len = path, len(loc_name)
-            if best_path:
-                current_folder = best_path
+            current_folder = best_path  # 매칭 실패 시 None → 잘못된 폴더에 저장 방지
         except Exception:
             pass
 
@@ -625,6 +623,8 @@ class PasteFlowApp:
                     return  # 저장 성공 시에만 반환; 실패 시 클립보드 경로로 fall-through
 
         # 기존 붙여넣기 경로 (텍스트/기타 항목, 또는 이미지→일반 앱)
+        self.interceptor._set_clipboard(full_item)
+
         target = _find_deepest_child(hwnd, screen_pt)
         class_name = ""
         try:
@@ -632,7 +632,6 @@ class PasteFlowApp:
         except Exception:
             pass
 
-        self.interceptor._set_clipboard(full_item)
         # 이미지 fallthrough + Win32 경로: 2.0초로 연장 (0.5초 덮어쓰기 방지)
         # Chromium 경로 제외: SendInput 이후 사용자 복사가 억제되는 것 방지
         if full_item.content_type == "image" and self.interceptor.monitor and not _is_chromium_window(class_name):
