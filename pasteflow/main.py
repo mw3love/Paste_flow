@@ -598,17 +598,18 @@ class PasteFlowApp:
                     return  # 저장 성공 시에만 반환; 실패 시 클립보드 경로로 fall-through
 
         # 기존 붙여넣기 경로 (텍스트/기타 항목, 또는 이미지→일반 앱)
-        self.interceptor._set_clipboard(full_item)
-        # 이미지 fallthrough 경우 클립보드 쓰기 완료 후 2.0초로 연장 (0.5초 덮어쓰기 방지)
-        if full_item.content_type == "image" and self.interceptor.monitor:
-            self.interceptor.monitor.set_self_triggered(2.0)
-
         target = _find_deepest_child(hwnd, screen_pt)
         class_name = ""
         try:
             class_name = win32gui.GetClassName(target)
         except Exception:
             pass
+
+        self.interceptor._set_clipboard(full_item)
+        # 이미지 fallthrough + Win32 경로: 2.0초로 연장 (0.5초 덮어쓰기 방지)
+        # Chromium 경로 제외: SendInput 이후 사용자 복사가 억제되는 것 방지
+        if full_item.content_type == "image" and self.interceptor.monitor and not _is_chromium_window(class_name):
+            self.interceptor.monitor.set_self_triggered(2.0)
 
         if _is_chromium_window(class_name):
             # Electron/Chromium: 포그라운드 활성화 후 SendInput(Ctrl+V)
