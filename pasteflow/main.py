@@ -213,15 +213,22 @@ def _get_explorer_folder(hwnd: int, screen_pt: tuple = None):
     candidates = []  # [(location_name, path), ...]
     try:
         import win32com.client
+        import win32gui as _wg
+        import win32con as _wc
         shell = win32com.client.Dispatch("Shell.Application")
         for window in shell.Windows():
             try:
-                if int(window.HWND) == hwnd:
+                w_hwnd = int(window.HWND)
+                # 직접 HWND 일치 OR 탭 자체 HWND의 root ancestor가 일치 (탭 여러 개 케이스)
+                w_root = _wg.GetAncestor(w_hwnd, _wc.GA_ROOT)
+                if w_hwnd == hwnd or w_root == hwnd:
                     candidates.append((window.LocationName, window.Document.Folder.Self.Path))
             except Exception:
                 continue
     except Exception:
         pass
+
+    print(f"[DBG] explorer candidates ({len(candidates)}): {[n for n, _ in candidates]}")
 
     if not candidates:
         return None
@@ -233,6 +240,7 @@ def _get_explorer_folder(hwnd: int, screen_pt: tuple = None):
         try:
             import win32gui as _wg
             title = _wg.GetWindowText(hwnd)
+            print(f"[DBG] explorer window title: {title!r}")
             for loc_name, path in candidates:
                 if loc_name == title:
                     current_folder = path
