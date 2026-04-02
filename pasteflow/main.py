@@ -32,6 +32,9 @@ _CHROMIUM_CLASS_PREFIXES = (
     "Intermediate D3D Window",
 )
 
+_EXPLORER_CLASSES = {"CabinetWClass"}
+_DESKTOP_CLASSES = {"Progman", "WorkerW"}
+
 
 def _find_deepest_child(hwnd, screen_pt, visited=None, depth=0):
     """커서 위치의 가장 깊은 자식 HWND를 재귀 탐색.
@@ -104,6 +107,66 @@ def _activate_and_send_ctrl_v(hwnd):
         ])
 
     QTimer.singleShot(80, _send)
+
+
+def _get_explorer_folder(hwnd: int):
+    """CabinetWClass HWND → 현재 폴더 경로 반환. 실패 시 None."""
+    try:
+        import win32com.client
+        shell = win32com.client.Dispatch("Shell.Application")
+        for window in shell.Windows():
+            try:
+                if int(window.HWND) == hwnd:
+                    return window.Document.Folder.Self.Path
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _get_desktop_path() -> str:
+    """사용자 바탕화면 경로 반환."""
+    try:
+        import win32com.client
+        return win32com.client.Dispatch("WScript.Shell").SpecialFolders("Desktop")
+    except Exception:
+        return os.path.expanduser("~/Desktop")
+
+
+def _save_image_to_folder(image_data: bytes, folder: str) -> str:
+    """image_data(PNG 또는 CF_DIB)를 folder에 PNG 파일로 저장. 저장 경로 반환."""
+    import io
+    import struct
+    from PIL import Image
+    from datetime import datetime
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_path = os.path.join(folder, f"clip_{ts}.png")
+    path = base_path
+    suffix = 0
+    while os.path.exists(path):
+        suffix += 1
+        path = os.path.join(folder, f"clip_{ts}_{suffix}.png")
+
+    if image_data[:4] == b'\x89PNG':
+        with open(path, 'wb') as f:
+            f.write(image_data)
+    else:
+        # CF_DIB raw → BMP 파일 헤더 조립 → Pillow로 PNG 변환
+        bih_size = struct.unpack_from('<I', image_data, 0)[0]
+        bit_count = struct.unpack_from('<H', image_data, 14)[0]
+        colors_used = struct.unpack_from('<I', image_data, 32)[0]
+        n_colors = colors_used if (colors_used > 0 or bit_count > 8) else (1 << bit_count)
+        if bit_count > 8:
+            n_colors = colors_used  # 보통 0
+        pixel_offset = 14 + bih_size + n_colors * 4
+        file_size = 14 + len(image_data)
+        file_header = struct.pack('<2sIHHI', b'BM', file_size, 0, 0, pixel_offset)
+        img = Image.open(io.BytesIO(file_header + image_data))
+        img.save(path, 'PNG')
+
+    return path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -348,14 +411,13 @@ class PasteFlowApp:
 
     def _on_drag_to_app(self, item_id: int, cursor_pos):
         """패널 항목 드래그 → 외부 앱 붙여넣기.
+        - 이미지 + Explorer/바탕화면: PNG 파일로 저장
         - Win32/WinUI3: 재귀 탐색으로 찾은 최하위 컨트롤에 WM_PASTE
         - Electron/Chromium: AttachThreadInput + SetForegroundWindow + SendInput(Ctrl+V)
         """
         full_item = self.db.get_item(item_id)
         if not full_item:
             return
-
-        self.interceptor._set_clipboard(full_item)
 
         import win32gui
         import win32con
@@ -364,6 +426,28 @@ class PasteFlowApp:
         hwnd = win32gui.WindowFromPoint(screen_pt)
         if not hwnd:
             return
+
+        # 최상위 창 클래스 확인
+        root_hwnd = win32gui.GetAncestor(hwnd, win32con.GA_ROOT)
+        root_class = ""
+        try:
+            root_class = win32gui.GetClassName(root_hwnd)
+        except Exception:
+            pass
+
+        # 이미지 항목 + Explorer/바탕화면 → PNG 파일 저장
+        if full_item.image_data and full_item.content_type == "image":
+            folder = None
+            if root_class in _EXPLORER_CLASSES:
+                folder = _get_explorer_folder(root_hwnd)
+            elif root_class in _DESKTOP_CLASSES:
+                folder = _get_desktop_path()
+            if folder:
+                _save_image_to_folder(full_item.image_data, folder)
+                return
+
+        # 기존 붙여넣기 경로 (텍스트/기타 항목, 또는 이미지→일반 앱)
+        self.interceptor._set_clipboard(full_item)
 
         target = _find_deepest_child(hwnd, screen_pt)
         class_name = ""
