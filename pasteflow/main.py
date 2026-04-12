@@ -342,8 +342,7 @@ class _SignalBridge(QObject):
     """훅 스레드 → 메인 스레드 시그널 전달"""
     paste_happened = pyqtSignal()
     new_item_saved = pyqtSignal(object)  # 모든 복사 경로: DB + 큐 추가
-    queue_cleared = pyqtSignal()         # Ctrl+Shift+X: 큐 초기화
-    undo_happened = pyqtSignal()         # Ctrl+Shift+Z: 실수 복구
+    panel_toggle   = pyqtSignal()        # 패널 토글 단축키 (훅 스레드 → 메인)
 
 
 class PasteFlowApp:
@@ -357,8 +356,7 @@ class PasteFlowApp:
         self._bridge = _SignalBridge()
         self._bridge.paste_happened.connect(self._update_paste_ui)
         self._bridge.new_item_saved.connect(self._on_new_item_ui)
-        self._bridge.queue_cleared.connect(self._on_queue_clear_ui)
-        self._bridge.undo_happened.connect(self._update_paste_ui)
+        self._bridge.panel_toggle.connect(self._toggle_panel)
 
         # 코어 모듈
         db_path = os.path.join(os.path.dirname(__file__), "..", "pasteflow.db")
@@ -372,8 +370,8 @@ class PasteFlowApp:
             paste_queue=self.queue,
             clipboard_monitor=self.monitor,
             on_paste=self._on_paste_from_hook,
-            on_queue_clear=self._on_queue_clear_from_hook,
-            on_undo=self._on_undo_from_hook,
+            get_full_item=self.db.get_item,
+            on_toggle_panel=self._bridge.panel_toggle.emit,
         )
         self.hotkey_manager = HotkeyManager()
 
@@ -416,10 +414,7 @@ class PasteFlowApp:
         self.panel.queue_select_requested.connect(self._on_queue_select)
 
         panel_hotkey = self.db.get_setting("hotkey_panel_toggle", "ctrl+space")
-        self.hotkey_manager.register(panel_hotkey, self._toggle_panel)
-
-        for n in range(1, 10):
-            self.hotkey_manager.register(f"alt+{n}", lambda idx=n: self._on_direct_paste(idx))
+        self.interceptor.set_panel_hotkey(panel_hotkey)
 
     def _on_new_clipboard_item(self, item: ClipboardItem):
         """Ctrl+Shift+C 경로: DB 저장 + 큐 추가 — 백그라운드 스레드에서 호출됨."""
@@ -431,21 +426,8 @@ class PasteFlowApp:
         """중복 클립보드 콜백 — 무시 (중복은 큐/DB에 추가하지 않음)."""
         pass
 
-    def _on_queue_clear_from_hook(self):
-        """Ctrl+Shift+X 콜백 — 훅 스레드에서 호출됨."""
-        self._bridge.queue_cleared.emit()
-
-    def _on_undo_from_hook(self, item: ClipboardItem):
-        """Ctrl+Shift+Z 콜백 — 훅 스레드에서 호출됨."""
-        self._bridge.undo_happened.emit()
-
     def _on_new_item_ui(self, saved: ClipboardItem):
         """메인 스레드에서 UI 갱신 — 패널이 열려 있을 때만 갱신"""
-        if self.panel.isVisible():
-            self._refresh_panel()
-
-    def _on_queue_clear_ui(self):
-        """메인 스레드: Ctrl+Shift+X — 큐 초기화 후 패널 갱신"""
         if self.panel.isVisible():
             self._refresh_panel()
 
@@ -456,6 +438,7 @@ class PasteFlowApp:
     def _update_paste_ui(self):
         """메인 스레드에서 붙여넣기 UI 업데이트"""
         pointer, total = self.queue.get_status()
+        self.tray.update_queue_status(pointer, total)
         if self.panel.isVisible():
             self.panel.update_queue_status(pointer, total)
 
@@ -478,16 +461,6 @@ class PasteFlowApp:
         pointer, total = self.queue.get_status()
         queue_item_ids = [item.id for item in self.queue.get_items()]
         self.panel.refresh(pinned, history, pointer, total, queue_item_ids)
-
-    def _on_direct_paste(self, n: int):
-        """Alt+N 직접 붙여넣기"""
-        history = self.db.get_recent_items()
-        if n > len(history):
-            return
-        item = history[n - 1]
-        threading.Thread(
-            target=self.interceptor.direct_paste, args=(item,), daemon=True
-        ).start()
 
     def _on_panel_paste(self, item: ClipboardItem):
         """패널에서 더블클릭 붙여넣기 — 패널 유지, 대상 앱에 붙여넣기"""
@@ -523,16 +496,30 @@ class PasteFlowApp:
         self._refresh_panel()
 
     def _on_queue_select(self, item_id: int):
-        """패널 히스토리 항목 클릭 → 해당 항목부터 최신까지 큐로 설정"""
-        history = self.db.get_recent_items()  # newest-first (id DESC)
-        ids = [item.id for item in history]
-        if item_id not in ids:
-            return
-        i = ids.index(item_id)
-        # history[0:i+1] = [newest, ..., selected] → reverse → [selected, ..., newest]
-        queue_items = list(reversed(history[0 : i + 1]))
-        self.queue.set_queue(queue_items)
-        self._refresh_panel()
+        """패널 항목 클릭 → 큐 설정.
+        - 히스토리 항목: 선택한 항목~최신까지 큐로 설정
+        - 고정 항목: 선택한 항목~pin1까지 역순 큐로 설정 (히스토리와 동일 패턴)
+        """
+        history = self.panel.history_items
+        hist_ids = [item.id for item in history]
+        if item_id in hist_ids:
+            i = hist_ids.index(item_id)
+            # history[0:i+1] = [newest, ..., selected] → reverse → [selected, ..., newest]
+            queue_items = list(reversed(history[0 : i + 1]))
+            self.queue.set_queue(queue_items)
+        else:
+            pinned = self.panel.pinned_items
+            pin_ids = [item.id for item in pinned]
+            if item_id not in pin_ids:
+                return
+            i = pin_ids.index(item_id)
+            # pinned[0:i+1] = [pin1, ..., pinN] → reverse → [pinN, ..., pin1]
+            queue_items = list(reversed(pinned[0 : i + 1]))
+            self.queue.set_queue(queue_items)
+        pointer, total = self.queue.get_status()
+        queue_item_ids = [item.id for item in self.queue.get_items()]
+        self.tray.update_queue_status(pointer, total)
+        self.panel.update_queue_highlight(pointer, total, queue_item_ids)
 
     def _on_combine_copy(self, item: ClipboardItem):
         """F6: 다중 선택 결합 복사 → DB 저장 + 클립보드 + 큐"""
@@ -573,6 +560,7 @@ class PasteFlowApp:
     def _on_clear_history(self):
         self.db.clear_history()
         self.queue.clear()
+        self.tray.update_queue_status(0, 0)
         self._refresh_panel()
 
     def _on_drag_to_app(self, item_id: int, cursor_pos):
@@ -680,15 +668,10 @@ class PasteFlowApp:
         # 패널 자동 닫기
         self.panel._auto_close = new_settings.get("panel_auto_close", "1") == "1"
 
-        # 단축키 재등록
+        # 단축키 재설정
         new_hotkey = new_settings.get("hotkey_panel_toggle", "ctrl+space")
         if old_hotkey != new_hotkey:
-            self.hotkey_manager.unregister_all()
-            self.hotkey_manager.register(new_hotkey, self._toggle_panel)
-            for n in range(1, 10):
-                self.hotkey_manager.register(
-                    f"alt+{n}", lambda idx=n: self._on_direct_paste(idx)
-                )
+            self.interceptor.set_panel_hotkey(new_hotkey)
 
         # 자동 시작
         auto_start = new_settings.get("auto_start", "0") == "1"
@@ -727,14 +710,43 @@ class PasteFlowApp:
         self.db.close()
         self.app.quit()
 
+    def _start_ipc_server(self):
+        """Named pipe 서버 — 두 번째 인스턴스 실행 시 패널 토글 신호 수신."""
+        threading.Thread(target=self._ipc_loop, name="ipc-server", daemon=True).start()
+
+    def _ipc_loop(self):
+        import win32pipe, win32file, pywintypes
+        pipe_name = r"\\.\pipe\PasteFlow_IPC"
+        while True:
+            try:
+                h = win32pipe.CreateNamedPipe(
+                    pipe_name,
+                    win32pipe.PIPE_ACCESS_INBOUND,
+                    win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_WAIT,
+                    1, 64, 64, 0, None,
+                )
+                win32pipe.ConnectNamedPipe(h, None)
+                win32file.CloseHandle(h)
+                self._bridge.panel_toggle.emit()
+            except pywintypes.error:
+                time.sleep(0.1)
+
     def run(self):
         self.monitor.start()
         self.interceptor.start()
+        self._start_ipc_server()
         self.tray.show()
 
         self._msg_timer = QTimer()
         self._msg_timer.timeout.connect(self._pump_messages)
         self._msg_timer.start(1)
+
+        # 시작 알림 토스트
+        def _show_startup_toast():
+            from pasteflow.ui.toast import ToastNotification
+            self._startup_toast = ToastNotification("PasteFlow 시작됨")
+
+        QTimer.singleShot(500, _show_startup_toast)
 
         return self.app.exec()
 
@@ -748,7 +760,25 @@ class PasteFlowApp:
 
 
 def main():
+    # 단일 인스턴스 보장 — Windows 뮤텍스
+    _mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "PasteFlow_SingleInstance")
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        ctypes.windll.kernel32.CloseHandle(_mutex)
+        # 실행 중인 인스턴스에 패널 토글 신호 전송
+        try:
+            import win32file
+            h = win32file.CreateFile(
+                r"\\.\pipe\PasteFlow_IPC",
+                win32file.GENERIC_WRITE, 0, None,
+                win32file.OPEN_EXISTING, 0, None,
+            )
+            win32file.CloseHandle(h)
+        except Exception:
+            pass
+        sys.exit(0)
+
     app = PasteFlowApp()
+    app._single_instance_mutex = _mutex  # GC 방지 — 프로세스 종료 시까지 유지
     sys.exit(app.run())
 
 

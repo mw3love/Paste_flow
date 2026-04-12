@@ -1,9 +1,9 @@
-"""Ctrl+Shift+{V,X,Z} 감지 → 순차 붙여넣기 / 큐 관리
+"""Ctrl+Shift+V / 패널 토글 감지 → 순차 붙여넣기 / 패널 열닫기
 
 단축키 체계:
   Ctrl+Shift+V — 순차 붙여넣기 (suppress + 클립보드 교체 + Ctrl+V 주입)
-  Ctrl+Shift+X — 큐 초기화   (suppress + queue.clear)
-  Ctrl+Shift+Z — 실수 복구   (suppress + queue.undo_last + 클립보드 복원)
+  패널 토글    — 설정 가능 (기본 Ctrl+Space). RegisterHotKey 대신 WH_KEYBOARD_LL로
+                 감지하여 Windows 탐색기 등 모든 포그라운드 앱에서 동작 보장.
 
 일반 Ctrl+C는 모든 복사를 큐에 추가한다. PasteFlow가 Ctrl+C에 개입하지 않는다.
 """
@@ -17,6 +17,7 @@ import win32clipboard
 
 from pasteflow.models import ClipboardItem
 from pasteflow.paste_queue import PasteQueue
+from pasteflow.hotkey_manager import _SPECIAL_KEY_MAP
 
 CF_HTML = win32clipboard.RegisterClipboardFormat("HTML Format")
 CF_RTF = win32clipboard.RegisterClipboardFormat("Rich Text Format")
@@ -32,8 +33,6 @@ WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
 VK_V = 0x56
 VK_C = 0x43
-VK_X = 0x58
-VK_Z = 0x5A
 VK_CONTROL = 0x11
 VK_SHIFT = 0x10
 VK_MENU = 0x12  # Alt
@@ -178,22 +177,40 @@ class PasteInterceptor:
         paste_queue: PasteQueue,
         clipboard_monitor=None,
         on_paste: Optional[Callable[[ClipboardItem], None]] = None,
-        on_queue_clear: Optional[Callable[[], None]] = None,
-        on_undo: Optional[Callable[[ClipboardItem], None]] = None,
+        get_full_item: Optional[Callable[[int], Optional[ClipboardItem]]] = None,
+        on_toggle_panel: Optional[Callable[[], None]] = None,
     ):
         self.queue = paste_queue
         self.monitor = clipboard_monitor
         self.on_paste = on_paste
-        self.on_queue_clear = on_queue_clear
-        self.on_undo = on_undo
+        self.get_full_item = get_full_item
+        self.on_toggle_panel = on_toggle_panel
         self._hook = None
         self._thread: Optional[threading.Thread] = None
         self._hook_thread_id: int = 0
         self._running = False
         self._last_paste_time = 0.0
         self._direct_paste_active = False  # direct_paste 중 훅 무시 플래그
+        # 패널 토글 단축키 (파싱된 상태로 저장)
+        self._panel_vk: int = 0
+        self._panel_need_ctrl: bool = False
+        self._panel_need_shift: bool = False
+        self._panel_need_alt: bool = False
         # 콜백 참조 유지 (GC 방지)
         self._hook_proc = HOOKPROC(self._low_level_keyboard_proc)
+
+    def set_panel_hotkey(self, hotkey_str: str):
+        """패널 토글 단축키 설정 — WH_KEYBOARD_LL에서 감지할 키 조합을 파싱"""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._panel_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._panel_need_shift = "shift" in parts
+        self._panel_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._panel_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._panel_vk = 0
 
     def start(self):
         """저수준 키보드 훅 시작 (별도 스레드)"""
@@ -268,14 +285,18 @@ class PasteInterceptor:
                         self._last_paste_time = now
                         self._on_ctrl_shift_v()
                         return 1  # suppress — Ctrl+Shift+V를 앱에 전달하지 않음
-                    elif vk_code == VK_X and debounce_ok:
-                        self._last_paste_time = now
-                        self._on_ctrl_shift_x()
-                        return 1  # suppress
-                    elif vk_code == VK_Z and debounce_ok:
-                        self._last_paste_time = now
-                        self._on_ctrl_shift_z()
-                        return 1  # suppress
+
+                # 패널 토글 단축키 감지 (RegisterHotKey 대체 — 탐색기 등 모든 앱에서 동작)
+                if (self._panel_vk and vk_code == self._panel_vk
+                        and ctrl_pressed  == self._panel_need_ctrl
+                        and shift_pressed == self._panel_need_shift
+                        and alt_pressed   == self._panel_need_alt):
+                    if self.on_toggle_panel:
+                        try:
+                            self.on_toggle_panel()
+                        except Exception:
+                            pass
+                    return 1  # suppress
         except Exception as e:
             print(f"[Hook] 훅 프로시저 예외 (무시): {e}")
 
@@ -295,39 +316,18 @@ class PasteInterceptor:
         preview = (next_item.preview_text or "")[:30]
         print(f"[Interceptor] 순차 붙여넣기: '{preview}'")
 
+        # 큐에 summary 항목이 들어있을 수 있으므로 실제 붙여넣기 시점에 전체 데이터 로드
+        if self.get_full_item and not next_item.image_data and not next_item.extra_formats:
+            full = self.get_full_item(next_item.id)
+            if full:
+                next_item = full
+
         self._set_clipboard(next_item)
         self._send_clean_key(VK_V)  # Shift 해제 후 Ctrl+V 주입
 
         if self.on_paste:
             try:
                 self.on_paste(next_item)
-            except Exception:
-                pass
-
-    def _on_ctrl_shift_x(self):
-        """Ctrl+Shift+X: 큐 초기화"""
-        print("[Interceptor] Ctrl+Shift+X — 큐 초기화")
-        self.queue.clear()
-        if self.on_queue_clear:
-            try:
-                self.on_queue_clear()
-            except Exception:
-                pass
-
-    def _on_ctrl_shift_z(self):
-        """Ctrl+Shift+Z: 실수 복구 — 포인터 1칸 되돌리기 + 클립보드 복원"""
-        item = self.queue.undo_last()
-        if item is None:
-            print("[Interceptor] undo_last — 되돌릴 항목 없음")
-            return
-
-        preview = (item.preview_text or "")[:30]
-        print(f"[Interceptor] 실수 복구: 포인터 후퇴, 클립보드를 '{preview}'로 복원")
-        self._set_clipboard(item)
-
-        if self.on_undo:
-            try:
-                self.on_undo(item)
             except Exception:
                 pass
 

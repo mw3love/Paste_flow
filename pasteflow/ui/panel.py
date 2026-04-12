@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QDialog, QPlainTextEdit, QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QMimeData, QRect
-from PyQt6.QtGui import QPixmap, QDrag, QCursor, QFontMetrics, QFont
+from PyQt6.QtGui import QPixmap, QCursor, QFontMetrics, QFont
 
 from pasteflow.models import ClipboardItem
 from pasteflow.ui.image_preview import ImagePreviewPopup
@@ -42,9 +42,7 @@ PANEL_MIN_HEIGHT = 325
 RESIZE_MARGIN = 6
 
 # 드래그 MIME 타입
-MIME_PIN_REORDER = "application/x-pasteflow-pin-id"
 MIME_ITEM_TO_PIN = "application/x-pasteflow-item-id"
-MIME_HIST_REORDER = "application/x-pasteflow-hist-id"
 
 
 class PanelItemWidget(QWidget):
@@ -82,8 +80,6 @@ class PanelItemWidget(QWidget):
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        if is_pinned:
-            self.setAcceptDrops(True)
 
     def _setup_ui(
         self, item: ClipboardItem, number: int,
@@ -93,10 +89,8 @@ class PanelItemWidget(QWidget):
         layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(6)
 
-        # 좌측 번호 레이블 — 고정=빨간, 현재 큐 항목=청록, 완료=회색, 일반=주황
-        if is_pinned:
-            accent_color = "#ff0000"
-        elif is_current:
+        # 좌측 번호 레이블 — 현재 큐 항목=청록, 완료=회색, 고정=주황, 일반=주황
+        if is_current:
             accent_color = COLORS['teal']
         elif is_done:
             accent_color = COLORS['surface2']
@@ -217,6 +211,21 @@ class PanelItemWidget(QWidget):
         else:
             self.setStyleSheet(f"background-color: {COLORS['surface0']}; border-radius: 6px; border: 1px solid {border_color};")
 
+    def set_queue_state(self, is_current: bool, is_done: bool, in_queue: bool = True):
+        """위젯 재생성 없이 큐 상태(색상)만 업데이트.
+        in_queue=False → 큐에서 제거됨, 기본 색상으로 복원.
+        """
+        if is_current:
+            self._accent_color = COLORS['teal']
+        elif is_done:
+            self._accent_color = COLORS['surface2']
+        else:
+            self._accent_color = COLORS['peach']
+        if self._text_label:
+            text_color = COLORS['subtext0'] if is_done else "#ffffff"
+            self._text_label.setStyleSheet(f"color: {text_color}; font-size: 12px;")
+        self._apply_bg_style()
+
     @property
     def is_selected(self):
         return self._is_selected
@@ -282,27 +291,30 @@ class PanelItemWidget(QWidget):
                         panel._hist_drag_target_id = None
                     return
 
-                # 고정 항목 → QDrag (pin 재정렬용)
-                drag = QDrag(self)
-                mime = QMimeData()
-                mime.setData(MIME_PIN_REORDER, str(self.item_id).encode())
+                # 고정 항목 → 비고정 항목과 동일한 fake drag 방식
                 panel = self.parent()
                 while panel and not isinstance(panel, ClipboardPanel):
                     panel = panel.parent()
-                if panel:
-                    panel._drag_source_id = self.item_id
-                self._apply_drag_source_style()
-                if self.item.text_content:
-                    mime.setText(self.item.text_content)
-                drag.setMimeData(mime)
-                drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
-                self._drag_start_pos = None
-                self._apply_bg_style()
-                panel = self.parent()
-                while panel and not isinstance(panel, ClipboardPanel):
-                    panel = panel.parent()
-                if panel:
-                    panel._drag_source_id = None
+                cursor_pos = QCursor.pos()
+                inside = self.window().geometry().contains(cursor_pos)
+                new_shape = (Qt.CursorShape.ClosedHandCursor if inside
+                             else Qt.CursorShape.DragCopyCursor)
+                if not self._ext_drag_active:
+                    self._ext_drag_active = True
+                    self._apply_drag_source_style()
+                    QApplication.setOverrideCursor(new_shape)
+                    if panel:
+                        panel._ext_drag_active = True
+                        panel._pin_drag_source_id = self.item_id
+                else:
+                    oc = QApplication.overrideCursor()
+                    if oc and oc.shape() != new_shape:
+                        QApplication.changeOverrideCursor(QCursor(new_shape))
+                if inside and panel:
+                    panel._update_pin_hover(cursor_pos)
+                elif not inside and panel:
+                    panel._clear_pin_drag_highlight()
+                    panel._pin_drag_target_id = None
                 return
         event.accept()
 
@@ -331,6 +343,12 @@ class PanelItemWidget(QWidget):
                 self._apply_bg_style()  # 드래그 소스 강조 해제
                 if not self.window().geometry().contains(cursor_pos):
                     self.external_drag_paste.emit(self.item_id, cursor_pos)
+                elif self._is_pinned and panel:
+                    panel._do_pin_reorder(self.item_id, panel._pin_drag_target_id)
+                    panel._clear_pin_drag_highlight()
+                    panel._emit_current_pin_order()
+                    panel._pin_drag_source_id = None
+                    panel._pin_drag_target_id = None
                 elif not self._is_pinned and panel:
                     panel._do_hist_reorder(self.item_id, panel._hist_drag_target_id)
                     panel._clear_hist_drag_highlight()
@@ -351,32 +369,6 @@ class PanelItemWidget(QWidget):
     def contextMenuEvent(self, event):
         self.context_menu_requested.emit(self.item_id, event.globalPos())
 
-    # ── 드롭 수신 (고정 항목끼리 순서 교환) ──
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat(MIME_PIN_REORDER):
-            event.acceptProposedAction()
-            source_id = int(event.mimeData().data(MIME_PIN_REORDER).data().decode())
-            if source_id != self.item_id:
-                self.setStyleSheet(
-                    f"background-color: {COLORS['surface1']}; border-radius: 6px;"
-                    f"border: 1px dashed {COLORS['teal']};"
-                )
-
-    def dragLeaveEvent(self, event):
-        self._apply_bg_style()
-
-    def dropEvent(self, event):
-        if event.mimeData().hasFormat(MIME_PIN_REORDER):
-            source_id = int(event.mimeData().data(MIME_PIN_REORDER).data().decode())
-            panel = self.parent()
-            while panel and not isinstance(panel, ClipboardPanel):
-                panel = panel.parent()
-            if panel and source_id != self.item_id:
-                panel._do_pin_reorder(source_id, self.item_id)
-                panel._emit_current_pin_order()
-        self._apply_bg_style()
-        event.acceptProposedAction()
 
 
 class PinDropZone(QWidget):
@@ -517,10 +509,13 @@ class ClipboardPanel(QWidget):
         self._search_text: str = ""
         self._search_expanded: bool = False
         self._queue_item_ids: list[int] = []
+        self._status_label: Optional[QLabel] = None
         self._drag_pos = None
-        self._drag_source_id = None       # 드래그 중인 고정 항목 ID
+        self._drag_source_id = None       # 드래그 중인 고정 항목 ID (QDrag 잔재, 미사용)
+        self._pin_drag_source_id = None   # 드래그 중인 고정 항목 ID (fake drag)
+        self._pin_drag_target_id = None   # 드래그 중 하이라이트된 고정 타겟 ID
         self._hist_drag_source_id = None  # 드래그 중인 히스토리 항목 ID
-        self._hist_drag_target_id = None   # 드래그 중 하이라이트된 타겟 항목 ID
+        self._hist_drag_target_id = None  # 드래그 중 하이라이트된 타겟 항목 ID
         self._resize_edges: set = set()
         self._resize_start_pos = None
         self._resize_start_geometry = None
@@ -529,6 +524,7 @@ class ClipboardPanel(QWidget):
         self._user_activated = False  # 사용자가 직접 열었는지 (vs 복사 팝업)
         self._paste_in_progress = False  # 패널 붙여넣기 중 자동닫기 방지
         self._ext_drag_active = False    # 외부 드래그 중 자동닫기 방지
+        self._kbd_focus_id: Optional[int] = None  # 키보드 포커스된 항목 ID
 
         self._setup_window()
         self._setup_ui()
@@ -541,6 +537,7 @@ class ClipboardPanel(QWidget):
         )
         # 투명 배경 대신 solid 배경 — 리사이즈 가장자리에서 마우스 이벤트 수신 가능
         self.setStyleSheet(f"background-color: {COLORS['base']};")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
         self.resize(PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT)
         self.setMinimumSize(PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT)
@@ -662,6 +659,7 @@ class ClipboardPanel(QWidget):
         # ── 스크롤 영역 ──
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
+        self._scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet(f"""
             QScrollArea {{
@@ -718,10 +716,46 @@ class ClipboardPanel(QWidget):
         self._queue_item_ids = queue_item_ids or []
         self._rebuild()
 
+    @property
+    def history_items(self) -> list:
+        return self._history_items
+
+    @property
+    def pinned_items(self) -> list:
+        return self._pinned_items
+
     def update_queue_status(self, pointer: int, total: int):
         self._pointer = pointer
         self._total = total
         self._rebuild()
+
+    def update_queue_highlight(self, pointer: int, total: int, queue_item_ids: list):
+        """큐 상태 시각 업데이트 — 위젯 재생성 없이 색상만 변경 (빠름)"""
+        self._pointer = pointer
+        self._total = total
+        self._queue_item_ids = queue_item_ids
+
+        if self._status_label:
+            if total > 0:
+                self._status_label.setText(f"붙여넣기 {pointer}/{total}")
+                self._status_label.show()
+            else:
+                self._status_label.hide()
+
+        q_index = {qid: idx for idx, qid in enumerate(queue_item_ids)}
+        for i in range(self._items_layout.count()):
+            widget = self._items_layout.itemAt(i).widget()
+            if not isinstance(widget, PanelItemWidget):
+                continue
+            q_idx = q_index.get(widget.item_id)
+            if q_idx is not None and q_idx < pointer:
+                widget.set_queue_state(is_current=False, is_done=True)
+            elif q_idx is not None and q_idx == pointer:
+                widget.set_queue_state(is_current=True, is_done=False)
+            elif q_idx is not None:
+                widget.set_queue_state(is_current=False, is_done=False, in_queue=True)
+            else:
+                widget.set_queue_state(is_current=False, is_done=False, in_queue=False)
 
     def toggle(self):
         if self.isVisible():
@@ -761,7 +795,7 @@ class ClipboardPanel(QWidget):
         pin_header_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent;
-                color: {COLORS['overlay0']};
+                color: {COLORS['peach']};
                 border: none;
                 font-size: 11px;
                 font-weight: 600;
@@ -769,12 +803,26 @@ class ClipboardPanel(QWidget):
                 padding: 0 4px;
             }}
             QPushButton:hover {{
-                color: {COLORS['text']};
+                color: {COLORS['peach']};
             }}
         """)
         pin_header_btn.clicked.connect(self._toggle_pinned)
         pin_header_row.addWidget(pin_header_btn)
         pin_header_row.addStretch()
+
+        self._status_label = QLabel()
+        self._status_label.setFixedHeight(20)
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._status_label.setStyleSheet(
+            f"color: {COLORS['peach']}; font-size: 11px; font-weight: 600; "
+            f"background: transparent; padding-right: 4px;"
+        )
+        if self._total > 0:
+            self._status_label.setText(f"붙여넣기 {self._pointer}/{self._total}")
+            self._status_label.show()
+        else:
+            self._status_label.hide()
+        pin_header_row.addWidget(self._status_label)
 
         pin_header_wrapper = QWidget()
         pin_header_wrapper.setLayout(pin_header_row)
@@ -787,9 +835,19 @@ class ClipboardPanel(QWidget):
 
         if not self._pinned_collapsed and filtered_pinned:
             for i, item in enumerate(filtered_pinned, 1):
+                is_current_pin = False
+                is_done_pin = False
+                if item.id in self._queue_item_ids:
+                    q_idx = self._queue_item_ids.index(item.id)
+                    if q_idx < self._pointer:
+                        is_done_pin = True
+                    elif q_idx == self._pointer:
+                        is_current_pin = True
                 widget = PanelItemWidget(
                     item, i,
                     is_pinned=True,
+                    is_current=is_current_pin,
+                    is_done=is_done_pin,
                     is_selected=item.id in self._selected_ids,
                 )
                 self._connect_item_signals(widget)
@@ -811,21 +869,11 @@ class ClipboardPanel(QWidget):
         hist_title = QLabel("\U0001f4cb 히스토리")
         hist_title.setFixedHeight(20)
         hist_title.setStyleSheet(
-            f"color: {COLORS['subtext0']}; font-size: 11px; "
+            f"color: {COLORS['peach']}; font-size: 11px; font-weight: 600; "
             f"background: transparent; padding-left: 2px;"
         )
         hist_header_row.addWidget(hist_title)
         hist_header_row.addStretch()
-
-        if self._total > 0:
-            status_label = QLabel(f"붙여넣기 {self._pointer}/{self._total}")
-            status_label.setFixedHeight(20)
-            status_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-            status_label.setStyleSheet(
-                f"color: {COLORS['overlay0']}; font-size: 11px; "
-                f"background: transparent; padding-right: 4px;"
-            )
-            hist_header_row.addWidget(status_label)
 
         hist_header_wrapper = QWidget()
         hist_header_wrapper.setLayout(hist_header_row)
@@ -932,12 +980,11 @@ class ClipboardPanel(QWidget):
             self._selected_ids.add(item_id)
 
             item = self._find_item(item_id)
-            if item and item.is_pinned:
-                self.copy_item_requested.emit(item)
-            elif item and not item.is_pinned:
+            if item:
                 self.queue_select_requested.emit(item_id)
 
         self._last_clicked_id = item_id
+        self._kbd_focus_id = item_id
         self._update_selection_visuals()
 
     def _update_selection_visuals(self):
@@ -961,14 +1008,15 @@ class ClipboardPanel(QWidget):
             self._selected_ids.add(ids[idx])
 
     def _on_item_double_clicked(self, item_id: int):
-        """더블클릭 — 이미지: 미리보기 / 텍스트: 수정 다이얼로그"""
+        """더블클릭 — 이미지: 미리보기 팝업 / 텍스트: 텍스트 미리보기 팝업 토글"""
         item = self._find_item(item_id)
         if not item:
             return
         if item.content_type == "image":
             self.preview_image_requested.emit(item_id, QCursor.pos())
         else:
-            self._on_edit_item(item)
+            text = item.text_content or item.preview_text or ""
+            TextPreviewPopup.instance().toggle_preview(text, QCursor.pos())
 
     def _on_item_delete(self, item_id: int):
         for i in range(self._items_layout.count()):
@@ -1118,6 +1166,39 @@ class ClipboardPanel(QWidget):
                 ids.append(w.item_id)
         new_orders = [(item_id, i) for i, item_id in enumerate(ids)]
         self.pin_reorder_requested.emit(new_orders)
+
+    def _update_pin_hover(self, cursor_pos: QPoint):
+        """고정 항목 드래그 중 커서 아래 고정 항목 탐지 → 타겟 하이라이트"""
+        widget_under = QApplication.widgetAt(cursor_pos)
+        target_w = widget_under
+        while target_w and not isinstance(target_w, PanelItemWidget):
+            target_w = target_w.parent()
+
+        if not target_w or not target_w._is_pinned:
+            self._clear_pin_drag_highlight()
+            self._pin_drag_target_id = None
+            return
+        if target_w.item_id == self._pin_drag_source_id:
+            return
+        if target_w.item_id == self._pin_drag_target_id:
+            return  # 같은 타겟, 변화 없음
+
+        self._clear_pin_drag_highlight()
+        self._pin_drag_target_id = target_w.item_id
+        target_w.setStyleSheet(
+            f"background-color: {COLORS['surface1']}; border-radius: 6px;"
+            f"border: 1px dashed {COLORS['peach']};"
+        )
+
+    def _clear_pin_drag_highlight(self):
+        """고정 드래그 타겟 하이라이트 해제"""
+        if self._pin_drag_target_id is None:
+            return
+        for i in range(self._items_layout.count()):
+            w = self._items_layout.itemAt(i).widget()
+            if isinstance(w, PanelItemWidget) and w.item_id == self._pin_drag_target_id:
+                w._apply_bg_style()
+                break
 
     def _update_hist_hover(self, cursor_pos: QPoint):
         """히스토리 드래그 중 커서 아래 항목 탐지 → 타겟 하이라이트"""
@@ -1310,6 +1391,7 @@ class ClipboardPanel(QWidget):
     def showEvent(self, event):
         self._cursor_timer.start()
         super().showEvent(event)
+        QTimer.singleShot(0, self.setFocus)
 
     def hideEvent(self, event):
         self._cursor_timer.stop()
@@ -1336,15 +1418,106 @@ class ClipboardPanel(QWidget):
     # ── F6: 다중 선택 Ctrl+C 결합 복사 ──
 
     def keyPressEvent(self, event):
-        """Ctrl+C: 선택된 항목들을 결합하여 새 클립보드 항목 생성"""
-        if (event.key() == Qt.Key.Key_C
-                and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        key = event.key()
+        mods = event.modifiers()
+
+        # ── 방향키: 항목 이동 ──
+        if key == Qt.Key.Key_Up:
+            self._kbd_move(-1)
+            event.accept()
+            return
+        if key == Qt.Key.Key_Down:
+            self._kbd_move(1)
+            event.accept()
+            return
+
+        # ── Enter: 더블클릭 동작 (미리보기 / 붙여넣기) ──
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._kbd_activate()
+            event.accept()
+            return
+
+        # ── Delete: 항목 삭제 ──
+        if key == Qt.Key.Key_Delete:
+            self._kbd_delete()
+            event.accept()
+            return
+
+        # ── Escape: 패널 닫기 ──
+        if key == Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+            return
+
+        # ── Ctrl+C: 다중 선택 결합 복사 ──
+        if (key == Qt.Key.Key_C
+                and mods & Qt.KeyboardModifier.ControlModifier
                 and len(self._selected_ids) > 1):
             combined = self._combine_selected_items()
             if combined:
                 self.combine_copy_requested.emit(combined)
+            event.accept()
             return
+
         super().keyPressEvent(event)
+
+    def _kbd_get_ordered_items(self) -> list:
+        """레이아웃 순서대로 표시된 PanelItemWidget 목록 반환 [(item_id, widget), ...]"""
+        result = []
+        for i in range(self._items_layout.count()):
+            w = self._items_layout.itemAt(i).widget()
+            if isinstance(w, PanelItemWidget) and w.isVisible():
+                result.append((w.item_id, w))
+        return result
+
+    def _kbd_move(self, delta: int):
+        """키보드 포커스를 delta 방향으로 이동 (단일 선택 + 큐 선택)"""
+        items = self._kbd_get_ordered_items()
+        if not items:
+            return
+        ids = [item_id for item_id, _ in items]
+
+        if self._kbd_focus_id is None or self._kbd_focus_id not in ids:
+            new_id = ids[0] if delta > 0 else ids[-1]
+        else:
+            cur_idx = ids.index(self._kbd_focus_id)
+            new_idx = max(0, min(len(ids) - 1, cur_idx + delta))
+            new_id = ids[new_idx]
+
+        self._kbd_focus_id = new_id
+        self._selected_ids = {new_id}
+        self._last_clicked_id = new_id
+        self._update_selection_visuals()
+
+        # 선택 항목이 스크롤 뷰에 보이도록
+        for item_id, w in items:
+            if item_id == new_id:
+                self._scroll.ensureWidgetVisible(w)
+                break
+
+        self.queue_select_requested.emit(new_id)
+
+    def _kbd_activate(self):
+        """Enter: 포커스 항목에 더블클릭 동작 실행"""
+        if self._kbd_focus_id is not None:
+            self._on_item_double_clicked(self._kbd_focus_id)
+
+    def _kbd_delete(self):
+        """Delete: 포커스 항목 삭제 후 포커스를 다음 항목으로 이동"""
+        if self._kbd_focus_id is None:
+            return
+        del_id = self._kbd_focus_id
+        items = self._kbd_get_ordered_items()
+        ids = [item_id for item_id, _ in items]
+        if del_id in ids:
+            idx = ids.index(del_id)
+            if idx + 1 < len(ids):
+                self._kbd_focus_id = ids[idx + 1]
+            elif idx - 1 >= 0:
+                self._kbd_focus_id = ids[idx - 1]
+            else:
+                self._kbd_focus_id = None
+        self._on_item_delete(del_id)
 
     def contextMenuEvent(self, event):
         """패널 빈 곳 우클릭 → 패널 닫기 / 설정 / 종료"""

@@ -80,7 +80,7 @@ class ImagePreviewPopup(QWidget):
             }}
             QLabel#image_label {{
                 background: transparent;
-                border: none;
+                border: 2px solid #fab387;
             }}
         """)
 
@@ -130,7 +130,7 @@ class ImagePreviewPopup(QWidget):
         self._apply_scale()
 
         # 커서 우측 하단에 배치, 화면 밖으로 나가지 않도록 조정
-        screen = QApplication.primaryScreen()
+        screen = QApplication.screenAt(global_pos) or QApplication.primaryScreen()
         if screen:
             geom = screen.availableGeometry()
             x = global_pos.x() + 16
@@ -181,16 +181,6 @@ class ImagePreviewPopup(QWidget):
         self._image_label.adjustSize()
         self.adjustSize()
 
-        # 화면 경계 클램핑 (드래그·줌 후 창이 화면 밖으로 벗어나지 않도록)
-        screen = QApplication.primaryScreen()
-        if screen:
-            geom = screen.availableGeometry()
-            pos = self.pos()
-            x = max(geom.left(), min(pos.x(), geom.right() - self.width()))
-            y = max(geom.top(), min(pos.y(), geom.bottom() - self.height()))
-            if (x, y) != (pos.x(), pos.y()):
-                self.move(x, y)
-
     # ------------------------------------------------------------------
     # 드래그 이동
     # ------------------------------------------------------------------
@@ -210,6 +200,12 @@ class ImagePreviewPopup(QWidget):
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.close()
+        else:
+            super().mouseDoubleClickEvent(event)
 
     # ------------------------------------------------------------------
     # 키보드 (ESC — 창 클릭 후 포커스 획득 시 동작)

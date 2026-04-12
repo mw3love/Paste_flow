@@ -279,12 +279,9 @@ class SettingsDialog(QDialog):
         info_layout.setColumnStretch(0, 1)
 
         _SHORTCUTS = [
-            ("일반 복사",           "Ctrl + C"),
-            ("일반 붙여넣기",       "Ctrl + V"),
-            ("큐에 추가 (순차복사)", "Ctrl + Shift + C"),
-            ("순서대로 붙여넣기",   "Ctrl + Shift + V"),
-            ("큐 초기화",           "Ctrl + Shift + X"),
-            ("실수 복구",           "Ctrl + Shift + Z"),
+            ("일반 복사",         "Ctrl + C"),
+            ("일반 붙여넣기",     "Ctrl + V"),
+            ("순서대로 붙여넣기", "Ctrl + Shift + V"),
         ]
         for row, (action, keys) in enumerate(_SHORTCUTS):
             action_lbl = QLabel(action)

@@ -29,6 +29,7 @@ _MODIFIER_MAP = {
 _SPECIAL_KEY_MAP = {
     "space": 0x20,   # VK_SPACE
     "return": 0x0D,  # VK_RETURN
+    "enter": 0x0D,
     "tab": 0x09,     # VK_TAB
     "backspace": 0x08, # VK_BACK
     "delete": 0x2E,  # VK_DELETE
