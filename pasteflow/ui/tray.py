@@ -2,6 +2,7 @@
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor
 from PyQt6.QtCore import pyqtSignal, QObject
+from pasteflow.__version__ import __version__
 
 
 def _create_default_icon() -> QIcon:
@@ -27,7 +28,7 @@ class TrayIcon(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._tray = QSystemTrayIcon(_create_default_icon())
-        self._tray.setToolTip("PasteFlow")
+        self._tray.setToolTip(f"PasteFlow v{__version__}")
         self._setup_menu()
         self._tray.activated.connect(self._on_activated)
 
@@ -54,6 +55,14 @@ class TrayIcon(QObject):
         """좌클릭 → 패널 토글"""
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.panel_toggle_requested.emit()
+
+    def update_queue_status(self, pointer: int, total: int):
+        """트레이 툴팁에 큐 상태 표시"""
+        if total > 0:
+            remaining = total - pointer
+            self._tray.setToolTip(f"PasteFlow  |  큐 {pointer}/{total}  ({remaining}개 남음)")
+        else:
+            self._tray.setToolTip(f"PasteFlow v{__version__}")
 
     def show(self):
         self._tray.show()
