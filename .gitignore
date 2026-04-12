@@ -9,3 +9,4 @@ build/
 !PasteFlow.spec
 desktop.ini
 .env
+.claude/
