@@ -690,9 +690,16 @@ class PasteFlowApp:
                     # PyInstaller .exe 빌드: 실행 파일 자체가 엔트리포인트
                     cmd = f'"{sys.executable}"'
                 else:
-                    # 스크립트 모드: pythonw.exe로 콘솔 창 없이 실행
+                    # 스크립트 모드: run.pyw 전체 경로로 등록
+                    # (-m pasteflow.main은 작업 디렉터리 미보장으로 ModuleNotFoundError 위험)
                     interpreter = sys.executable.replace("python.exe", "pythonw.exe")
-                    cmd = f'"{interpreter}" -m pasteflow.main'
+                    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    run_pyw = os.path.join(project_dir, "run.pyw")
+                    if os.path.exists(run_pyw):
+                        cmd = f'"{interpreter}" "{run_pyw}"'
+                    else:
+                        # run.pyw 없으면 startupdir 지정해서 -m 방식으로 fallback
+                        cmd = f'"{interpreter}" -c "import os,sys; os.chdir(r\'{project_dir}\'); sys.path.insert(0,r\'{project_dir}\'); from pasteflow.main import main; main()"'
                 winreg.SetValueEx(reg_key, "PasteFlow", 0, winreg.REG_SZ, cmd)
             else:
                 try:
