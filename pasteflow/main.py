@@ -686,8 +686,14 @@ class PasteFlowApp:
                 winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE
             )
             if enable:
-                exe_path = os.path.abspath(sys.argv[0])
-                winreg.SetValueEx(reg_key, "PasteFlow", 0, winreg.REG_SZ, exe_path)
+                if getattr(sys, "frozen", False):
+                    # PyInstaller .exe 빌드: 실행 파일 자체가 엔트리포인트
+                    cmd = f'"{sys.executable}"'
+                else:
+                    # 스크립트 모드: pythonw.exe로 콘솔 창 없이 실행
+                    interpreter = sys.executable.replace("python.exe", "pythonw.exe")
+                    cmd = f'"{interpreter}" -m pasteflow.main'
+                winreg.SetValueEx(reg_key, "PasteFlow", 0, winreg.REG_SZ, cmd)
             else:
                 try:
                     winreg.DeleteValue(reg_key, "PasteFlow")
