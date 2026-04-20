@@ -810,8 +810,13 @@ class ClipboardPanel(QWidget):
         x = max(avail.left(), x)
         y = max(avail.top(), y)
 
-        self.move(x, y)
-        self.show()
+        # SetWindowPos로 이동+표시를 한 번에 — move()→show() 두 단계 사이 깜빡임 방지
+        hwnd = ctypes.wintypes.HWND(int(self.winId()))
+        SWP_SHOWWINDOW = 0x0040
+        ctypes.windll.user32.SetWindowPos(
+            hwnd, _HWND_TOPMOST, x, y, 0, 0,
+            _SWP_NOSIZE | SWP_SHOWWINDOW,
+        )
         self.raise_()
         self.activateWindow()
 
