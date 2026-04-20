@@ -902,6 +902,7 @@ class ClipboardPanel(QWidget):
                         is_current=is_current_pin,
                         is_done=is_done_pin,
                         is_selected=item.id in self._selected_ids,
+                        parent=sc,
                     )
                     self._connect_item_signals(widget)
                     self._items_layout.addWidget(widget)
@@ -949,6 +950,7 @@ class ClipboardPanel(QWidget):
                     is_current=is_current,
                     is_done=is_done,
                     is_selected=item.id in self._selected_ids,
+                    parent=sc,
                 )
                 self._connect_item_signals(widget)
                 self._items_layout.addWidget(widget)
