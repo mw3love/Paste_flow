@@ -567,12 +567,8 @@ class ClipboardPanel(QWidget):
         self._cursor_timer.setInterval(50)
         self._cursor_timer.timeout.connect(self._sync_resize_cursor)
 
-        screen = QApplication.primaryScreen()
-        if screen:
-            geom = screen.availableGeometry()
-            x = geom.right() - PANEL_MIN_WIDTH - 10
-            y = geom.bottom() - PANEL_MIN_HEIGHT - 10
-            self.move(x, y)
+        # 화면 밖에 대기 — show() 전에 위치가 확정되지 않은 채 렌더링되는 깜빡임 방지
+        self.move(-10000, -10000)
 
     def _setup_ui(self):
         self._container = QWidget(self)
@@ -810,11 +806,8 @@ class ClipboardPanel(QWidget):
         x = max(avail.left(), x)
         y = max(avail.top(), y)
 
-        # 투명하게 show → 올바른 위치로 이동 → 불투명 복원 (위치 확정 전 깜빡임 방지)
-        self.setWindowOpacity(0.0)
-        self.show()
         self.move(x, y)
-        self.setWindowOpacity(1.0)
+        self.show()
         self.raise_()
         self.activateWindow()
 

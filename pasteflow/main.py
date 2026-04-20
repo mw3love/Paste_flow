@@ -455,6 +455,7 @@ class PasteFlowApp:
         """첫 순차 붙여넣기 발생 — 패널이 닫혀 있으면 마우스 근처에 팝업"""
         if not self.panel.isVisible():
             self._panel_opened_by_paste = True
+            self._apply_saved_panel_size()
             self.panel.show_near_cursor()
             self._refresh_panel()
 
@@ -495,6 +496,7 @@ class PasteFlowApp:
             self._prev_foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
             self.panel._user_activated = True
             self._panel_opened_by_paste = False
+            self._apply_saved_panel_size()
             self.panel.show_near_cursor()
             self._refresh_panel()
 
@@ -671,6 +673,16 @@ class PasteFlowApp:
             # Win32 / WinUI3: WM_PASTE 직접 전송
             win32gui.SendMessage(target, win32con.WM_PASTE, 0, 0)
 
+    def _apply_saved_panel_size(self):
+        """저장된 크기만 복원 (위치는 show_near_cursor가 결정)"""
+        if self._saved_panel_geometry:
+            try:
+                w = int(self._saved_panel_geometry["w"])
+                h = int(self._saved_panel_geometry["h"])
+                self.panel.resize(w, h)
+            except (KeyError, ValueError):
+                pass
+
     # ── 설정 ──
 
     def _apply_settings_from_db(self):
@@ -684,14 +696,16 @@ class PasteFlowApp:
         always_on_top = self.db.get_setting("panel_always_on_top", "1")
         self.panel.set_always_on_top(always_on_top == "1")
 
-        # 패널 위치/크기 복원
+        # 패널 위치/크기 — show_near_cursor() 시 적용하도록 저장만 해둠
         import json
         geo_json = self.db.get_setting("panel_geometry")
         if geo_json:
             try:
-                self.panel.restore_geometry_dict(json.loads(geo_json))
+                self._saved_panel_geometry = json.loads(geo_json)
             except Exception:
-                pass
+                self._saved_panel_geometry = None
+        else:
+            self._saved_panel_geometry = None
 
     def _open_settings(self):
         """설정 다이얼로그 열기"""
