@@ -8,6 +8,7 @@ import ctypes
 import ctypes.wintypes
 import threading
 import time
+import json
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer, QObject, pyqtSignal
 
@@ -17,7 +18,7 @@ from pasteflow.paste_queue import PasteQueue
 from pasteflow.clipboard_monitor import ClipboardMonitor
 from pasteflow.paste_interceptor import PasteInterceptor
 from pasteflow.hotkey_manager import HotkeyManager
-from pasteflow.ui.panel import ClipboardPanel
+from pasteflow.ui.panel import ClipboardPanel, PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT
 from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.tray import TrayIcon
 from pasteflow.ui.settings_dialog import SettingsDialog
@@ -367,6 +368,7 @@ class PasteFlowApp:
         self._auto_hide_timer.setInterval(1000)
         self._auto_hide_timer.timeout.connect(self._auto_hide_panel)
         self._panel_opened_by_paste = False  # 순차 붙여넣기로 열린 패널인지 추적
+        self._saved_panel_geometry = None
 
         # 코어 모듈
         db_path = os.path.join(os.path.dirname(__file__), "..", "pasteflow.db")
@@ -674,12 +676,12 @@ class PasteFlowApp:
             win32gui.SendMessage(target, win32con.WM_PASTE, 0, 0)
 
     def _apply_saved_panel_size(self):
-        """저장된 크기만 복원 (위치는 show_near_cursor가 결정)"""
         if self._saved_panel_geometry:
             try:
-                w = int(self._saved_panel_geometry["w"])
-                h = int(self._saved_panel_geometry["h"])
-                self.panel.resize(w, h)
+                w = max(PANEL_MIN_WIDTH, int(self._saved_panel_geometry["w"]))
+                h = max(PANEL_MIN_HEIGHT, int(self._saved_panel_geometry["h"]))
+                if self.panel.width() != w or self.panel.height() != h:
+                    self.panel.resize(w, h)
             except (KeyError, ValueError):
                 pass
 
@@ -697,7 +699,6 @@ class PasteFlowApp:
         self.panel.set_always_on_top(always_on_top == "1")
 
         # 패널 위치/크기 — show_near_cursor() 시 적용하도록 저장만 해둠
-        import json
         geo_json = self.db.get_setting("panel_geometry")
         if geo_json:
             try:
@@ -793,7 +794,6 @@ class PasteFlowApp:
 
     def _quit(self):
         # 패널 위치/크기 저장
-        import json
         geo = self.panel.get_geometry_dict()
         self.db.set_setting("panel_geometry", json.dumps(geo))
 
