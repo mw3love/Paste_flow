@@ -454,9 +454,9 @@ class PasteFlowApp:
     def _on_paste_queue_popped(self):
         """첫 순차 붙여넣기 발생 — 패널이 닫혀 있으면 마우스 근처에 팝업"""
         if not self.panel.isVisible():
-            self._refresh_panel()
             self._panel_opened_by_paste = True
             self.panel.show_near_cursor()
+            self._refresh_panel()
 
     def _on_paste_queue_done(self):
         """큐 소진 — 순차 붙여넣기로 열린 패널이면 1초 후 숨기기"""
@@ -493,10 +493,10 @@ class PasteFlowApp:
             self.panel.hide()
         else:
             self._prev_foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
-            self._refresh_panel()
             self.panel._user_activated = True
             self._panel_opened_by_paste = False
             self.panel.show_near_cursor()
+            self._refresh_panel()
 
     def _refresh_panel(self):
         """패널 데이터 갱신"""
