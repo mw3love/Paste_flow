@@ -546,8 +546,16 @@ class ClipboardPanel(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
         )
+        # WS_EX_TOOLWINDOW: 작업표시줄 제외, QWindowToolSaveBits 창 생성 없이
+        hwnd = int(self.winId())
+        import ctypes
+        GWL_EXSTYLE = -20
+        WS_EX_TOOLWINDOW = 0x00000080
+        WS_EX_APPWINDOW  = 0x00040000
+        ex = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        ex = (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex)
         # 투명 배경 대신 solid 배경 — 리사이즈 가장자리에서 마우스 이벤트 수신 가능
         self.setStyleSheet(f"background-color: {COLORS['base']};")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
