@@ -825,7 +825,7 @@ class ClipboardPanel(QWidget):
                 if w:
                     w.hide()
                     w.setParent(None)
-                    w.deleteLater()
+                    del w
 
             search = self._search_text.lower().strip()
 
