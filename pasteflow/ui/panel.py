@@ -816,142 +816,146 @@ class ClipboardPanel(QWidget):
     # ── Internal ──
 
     def _rebuild(self):
-        while self._items_layout.count():
-            child = self._items_layout.takeAt(0)
-            w = child.widget()
-            if w:
-                w.hide()
-                w.setParent(None)
-                w.deleteLater()
+        sc = self._scroll_content
+        sc.setUpdatesEnabled(False)
+        try:
+            while self._items_layout.count():
+                child = self._items_layout.takeAt(0)
+                w = child.widget()
+                if w:
+                    w.hide()
+                    w.setParent(None)
+                    w.deleteLater()
 
-        search = self._search_text.lower().strip()
+            search = self._search_text.lower().strip()
 
-        # ── 고정 섹션 ──
-        filtered_pinned = self._filter_items(self._pinned_items, search)
+            # ── 고정 섹션 ──
+            filtered_pinned = self._filter_items(self._pinned_items, search)
 
-        arrow = "\u25BC" if not self._pinned_collapsed else "\u25B6"
-        pin_header_text = f"{arrow} 고정메모"
+            arrow = "\u25BC" if not self._pinned_collapsed else "\u25B6"
+            pin_header_text = f"{arrow} 고정메모"
 
-        pin_header_row = QHBoxLayout()
-        pin_header_row.setContentsMargins(4, 0, 0, 0)
-        pin_header_row.setSpacing(0)
+            pin_header_row = QHBoxLayout()
+            pin_header_row.setContentsMargins(4, 0, 0, 0)
+            pin_header_row.setSpacing(0)
 
-        pin_header_btn = QPushButton(pin_header_text)
-        pin_header_btn.setFixedHeight(24)
-        # 글자 크기에 맞게 폭 축소
-        fm = QFontMetrics(pin_header_btn.font())
-        text_width = fm.horizontalAdvance(pin_header_text) + 16
-        pin_header_btn.setFixedWidth(text_width)
-        pin_header_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        pin_header_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent;
-                color: {COLORS['peach']};
-                border: none;
-                font-size: 11px;
-                font-weight: 600;
-                text-align: left;
-                padding: 0 4px;
-            }}
-            QPushButton:hover {{
-                color: {COLORS['peach']};
-            }}
-        """)
-        pin_header_btn.clicked.connect(self._toggle_pinned)
-        pin_header_row.addWidget(pin_header_btn)
-        pin_header_row.addStretch()
+            pin_header_btn = QPushButton(pin_header_text)
+            pin_header_btn.setFixedHeight(24)
+            fm = QFontMetrics(pin_header_btn.font())
+            text_width = fm.horizontalAdvance(pin_header_text) + 16
+            pin_header_btn.setFixedWidth(text_width)
+            pin_header_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            pin_header_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent;
+                    color: {COLORS['peach']};
+                    border: none;
+                    font-size: 11px;
+                    font-weight: 600;
+                    text-align: left;
+                    padding: 0 4px;
+                }}
+                QPushButton:hover {{
+                    color: {COLORS['peach']};
+                }}
+            """)
+            pin_header_btn.clicked.connect(self._toggle_pinned)
+            pin_header_row.addWidget(pin_header_btn)
+            pin_header_row.addStretch()
 
-        self._status_label = QLabel()
-        self._status_label.setFixedHeight(20)
-        self._status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._status_label.setStyleSheet(
-            f"color: {COLORS['peach']}; font-size: 11px; font-weight: 600; "
-            f"background: transparent; padding-right: 4px;"
-        )
-        if self._total > 0:
-            self._status_label.setText(f"붙여넣기 {self._pointer}/{self._total}")
-            self._status_label.show()
-        else:
-            self._status_label.hide()
-        pin_header_row.addWidget(self._status_label)
+            self._status_label = QLabel()
+            self._status_label.setFixedHeight(20)
+            self._status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self._status_label.setStyleSheet(
+                f"color: {COLORS['peach']}; font-size: 11px; font-weight: 600; "
+                f"background: transparent; padding-right: 4px;"
+            )
+            if self._total > 0:
+                self._status_label.setText(f"붙여넣기 {self._pointer}/{self._total}")
+                self._status_label.show()
+            else:
+                self._status_label.hide()
+            pin_header_row.addWidget(self._status_label)
 
-        pin_header_wrapper = QWidget()
-        pin_header_wrapper.setLayout(pin_header_row)
-        pin_header_wrapper.setStyleSheet("background: transparent;")
-        self._items_layout.addWidget(pin_header_wrapper)
+            pin_header_wrapper = QWidget(sc)
+            pin_header_wrapper.setLayout(pin_header_row)
+            pin_header_wrapper.setStyleSheet("background: transparent;")
+            self._items_layout.addWidget(pin_header_wrapper)
 
-        drop_zone = PinDropZone()
-        drop_zone.item_dropped.connect(lambda item_id: self.pin_item_requested.emit(item_id))
-        self._items_layout.addWidget(drop_zone)
+            drop_zone = PinDropZone(sc)
+            drop_zone.item_dropped.connect(lambda item_id: self.pin_item_requested.emit(item_id))
+            self._items_layout.addWidget(drop_zone)
 
-        if not self._pinned_collapsed and filtered_pinned:
-            for i, item in enumerate(filtered_pinned, 1):
-                is_current_pin = False
-                is_done_pin = False
+            if not self._pinned_collapsed and filtered_pinned:
+                for i, item in enumerate(filtered_pinned, 1):
+                    is_current_pin = False
+                    is_done_pin = False
+                    if item.id in self._queue_item_ids:
+                        q_idx = self._queue_item_ids.index(item.id)
+                        if q_idx < self._pointer:
+                            is_done_pin = True
+                        elif q_idx == self._pointer:
+                            is_current_pin = True
+                    widget = PanelItemWidget(
+                        item, i,
+                        is_pinned=True,
+                        is_current=is_current_pin,
+                        is_done=is_done_pin,
+                        is_selected=item.id in self._selected_ids,
+                    )
+                    self._connect_item_signals(widget)
+                    self._items_layout.addWidget(widget)
+
+            # 구분선
+            sep = QWidget(sc)
+            sep.setFixedHeight(1)
+            sep.setStyleSheet(f"background-color: {COLORS['surface1']};")
+            self._items_layout.addWidget(sep)
+
+            # ── 히스토리 섹션 헤더 ──
+            filtered_history = self._filter_items(self._history_items, search)
+
+            hist_header_row = QHBoxLayout()
+            hist_header_row.setContentsMargins(4, 0, 0, 0)
+            hist_header_row.setSpacing(0)
+
+            hist_title = QLabel("\U0001f4cb 히스토리")
+            hist_title.setFixedHeight(20)
+            hist_title.setStyleSheet(
+                f"color: {COLORS['peach']}; font-size: 11px; font-weight: 600; "
+                f"background: transparent; padding-left: 2px;"
+            )
+            hist_header_row.addWidget(hist_title)
+            hist_header_row.addStretch()
+
+            hist_header_wrapper = QWidget(sc)
+            hist_header_wrapper.setLayout(hist_header_row)
+            hist_header_wrapper.setStyleSheet("background: transparent;")
+            self._items_layout.addWidget(hist_header_wrapper)
+
+            for i, item in enumerate(filtered_history, 1):
+                # 큐 상태 계산: 큐에 있는 항목이면 포인터 기준으로 current/done 판단
+                is_current = False
+                is_done = False
                 if item.id in self._queue_item_ids:
                     q_idx = self._queue_item_ids.index(item.id)
                     if q_idx < self._pointer:
-                        is_done_pin = True
+                        is_done = True
                     elif q_idx == self._pointer:
-                        is_current_pin = True
+                        is_current = True
+
                 widget = PanelItemWidget(
                     item, i,
-                    is_pinned=True,
-                    is_current=is_current_pin,
-                    is_done=is_done_pin,
+                    is_current=is_current,
+                    is_done=is_done,
                     is_selected=item.id in self._selected_ids,
                 )
                 self._connect_item_signals(widget)
                 self._items_layout.addWidget(widget)
 
-        # 구분선
-        sep = QWidget()
-        sep.setFixedHeight(1)
-        sep.setStyleSheet(f"background-color: {COLORS['surface1']};")
-        self._items_layout.addWidget(sep)
-
-        # ── 히스토리 섹션 헤더 (F2-7: 순차 상태 표시) ──
-        filtered_history = self._filter_items(self._history_items, search)
-
-        hist_header_row = QHBoxLayout()
-        hist_header_row.setContentsMargins(4, 0, 0, 0)
-        hist_header_row.setSpacing(0)
-
-        hist_title = QLabel("\U0001f4cb 히스토리")
-        hist_title.setFixedHeight(20)
-        hist_title.setStyleSheet(
-            f"color: {COLORS['peach']}; font-size: 11px; font-weight: 600; "
-            f"background: transparent; padding-left: 2px;"
-        )
-        hist_header_row.addWidget(hist_title)
-        hist_header_row.addStretch()
-
-        hist_header_wrapper = QWidget()
-        hist_header_wrapper.setLayout(hist_header_row)
-        hist_header_wrapper.setStyleSheet("background: transparent;")
-        self._items_layout.addWidget(hist_header_wrapper)
-
-        for i, item in enumerate(filtered_history, 1):
-            # 큐 상태 계산: 큐에 있는 항목이면 포인터 기준으로 current/done 판단
-            is_current = False
-            is_done = False
-            if item.id in self._queue_item_ids:
-                q_idx = self._queue_item_ids.index(item.id)
-                if q_idx < self._pointer:
-                    is_done = True
-                elif q_idx == self._pointer:
-                    is_current = True
-
-            widget = PanelItemWidget(
-                item, i,
-                is_current=is_current,
-                is_done=is_done,
-                is_selected=item.id in self._selected_ids,
-            )
-            self._connect_item_signals(widget)
-            self._items_layout.addWidget(widget)
-
-        self._items_layout.addStretch()
+            self._items_layout.addStretch()
+        finally:
+            sc.setUpdatesEnabled(True)
 
     def _toggle_pinned(self):
         self._pinned_collapsed = not self._pinned_collapsed
