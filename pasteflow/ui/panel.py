@@ -818,8 +818,11 @@ class ClipboardPanel(QWidget):
     def _rebuild(self):
         while self._items_layout.count():
             child = self._items_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+            w = child.widget()
+            if w:
+                w.hide()
+                w.setParent(None)
+                w.deleteLater()
 
         search = self._search_text.lower().strip()
 
