@@ -340,9 +340,11 @@ def _save_image_to_folder(image_data: bytes, folder: str) -> str:
 
 class _SignalBridge(QObject):
     """훅 스레드 → 메인 스레드 시그널 전달"""
-    paste_happened = pyqtSignal()
-    new_item_saved = pyqtSignal(object)  # 모든 복사 경로: DB + 큐 추가
-    panel_toggle   = pyqtSignal()        # 패널 토글 단축키 (훅 스레드 → 메인)
+    paste_happened     = pyqtSignal()
+    new_item_saved     = pyqtSignal(object)  # 모든 복사 경로: DB + 큐 추가
+    panel_toggle       = pyqtSignal()        # 패널 토글 단축키 (훅 스레드 → 메인)
+    paste_queue_popped = pyqtSignal()        # 첫 순차 붙여넣기 발생 (패널 팝업용)
+    paste_queue_done   = pyqtSignal()        # 큐 소진 (패널 자동 숨기기용)
 
 
 class PasteFlowApp:
@@ -357,6 +359,14 @@ class PasteFlowApp:
         self._bridge.paste_happened.connect(self._update_paste_ui)
         self._bridge.new_item_saved.connect(self._on_new_item_ui)
         self._bridge.panel_toggle.connect(self._toggle_panel)
+        self._bridge.paste_queue_popped.connect(self._on_paste_queue_popped)
+        self._bridge.paste_queue_done.connect(self._on_paste_queue_done)
+
+        self._auto_hide_timer = QTimer()
+        self._auto_hide_timer.setSingleShot(True)
+        self._auto_hide_timer.setInterval(1000)
+        self._auto_hide_timer.timeout.connect(self._auto_hide_panel)
+        self._panel_opened_by_paste = False  # 순차 붙여넣기로 열린 패널인지 추적
 
         # 코어 모듈
         db_path = os.path.join(os.path.dirname(__file__), "..", "pasteflow.db")
@@ -397,6 +407,7 @@ class PasteFlowApp:
         self.tray.panel_toggle_requested.connect(self._toggle_panel)
         self.tray.settings_requested.connect(self._open_settings)
 
+        self.panel.panel_hidden.connect(self._on_panel_hidden)
         self.panel.paste_item_requested.connect(self._on_panel_paste)
         self.panel.copy_item_requested.connect(self._on_copy_item)
         self.panel.combine_copy_requested.connect(self._on_combine_copy)
@@ -412,6 +423,7 @@ class PasteFlowApp:
         self.panel.clear_history_requested.connect(self._on_clear_history)
         self.panel.drag_to_app_requested.connect(self._on_drag_to_app)
         self.panel.queue_select_requested.connect(self._on_queue_select)
+        self.panel.always_on_top_changed.connect(self._on_always_on_top_changed)
 
         panel_hotkey = self.db.get_setting("hotkey_panel_toggle", "ctrl+space")
         self.interceptor.set_panel_hotkey(panel_hotkey)
@@ -434,6 +446,38 @@ class PasteFlowApp:
     def _on_paste_from_hook(self, item: ClipboardItem):
         """붙여넣기 콜백 — 훅 스레드에서 호출됨 → 시그널로 메인 스레드 전달"""
         self._bridge.paste_happened.emit()
+        pointer, total = self.queue.get_status()
+        if pointer == 1:
+            self._bridge.paste_queue_popped.emit()
+        if pointer >= total and total > 0:
+            self._bridge.paste_queue_done.emit()
+
+    def _on_paste_queue_popped(self):
+        """첫 순차 붙여넣기 발생 — 패널이 닫혀 있으면 마우스 근처에 팝업"""
+        if not self.panel.isVisible():
+            self._refresh_panel()
+            self._panel_opened_by_paste = True
+            self.panel.show_near_cursor()
+
+    def _on_paste_queue_done(self):
+        """큐 소진 — 순차 붙여넣기로 열린 패널이면 1초 후 숨기기"""
+        if self._panel_opened_by_paste and self.panel.isVisible():
+            self._auto_hide_timer.start()
+
+    def _auto_hide_panel(self):
+        """자동 숨기기 타이머 만료 — 패널 숨기기"""
+        if self._panel_opened_by_paste:
+            self._panel_opened_by_paste = False
+            if self.panel.isVisible():
+                self.panel.hide()
+
+    def _on_panel_hidden(self):
+        """패널이 닫힐 때 자동 숨기기 타이머 취소 및 플래그 초기화"""
+        self._auto_hide_timer.stop()
+        self._panel_opened_by_paste = False
+
+    def _on_always_on_top_changed(self, value: bool):
+        self.db.set_setting("panel_always_on_top", "1" if value else "0")
 
     def _update_paste_ui(self):
         """메인 스레드에서 붙여넣기 UI 업데이트"""
@@ -443,16 +487,17 @@ class PasteFlowApp:
             self.panel.update_queue_status(pointer, total)
 
     def _toggle_panel(self):
-        """패널 토글"""
+        """패널 토글 — 단축키/트레이로 열 때 마우스 근처에 표시"""
         if self.panel.isVisible():
+            self._panel_opened_by_paste = False
+            self._auto_hide_timer.stop()
             self.panel.hide()
         else:
             self._prev_foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
             self._refresh_panel()
             self.panel._user_activated = True
-            self.panel.show()
-            self.panel.raise_()
-            self.panel.activateWindow()
+            self._panel_opened_by_paste = False
+            self.panel.show_near_cursor()
 
     def _refresh_panel(self):
         """패널 데이터 갱신"""
@@ -631,8 +676,14 @@ class PasteFlowApp:
 
     def _apply_settings_from_db(self):
         """DB에서 설정 로드 → UI/동작에 적용"""
+        # 레지스트리 실제 상태로 auto_start DB 동기화
+        self._sync_auto_start_from_registry()
+
         auto_close = self.db.get_setting("panel_auto_close", "1")
         self.panel._auto_close = auto_close == "1"
+
+        always_on_top = self.db.get_setting("panel_always_on_top", "1")
+        self.panel.set_always_on_top(always_on_top == "1")
 
         # 패널 위치/크기 복원
         import json
@@ -709,6 +760,23 @@ class PasteFlowApp:
             winreg.CloseKey(reg_key)
         except Exception as e:
             print(f"[Settings] 자동 시작 설정 실패: {e}")
+
+    def _sync_auto_start_from_registry(self):
+        """레지스트리 실제 등록 여부를 DB auto_start 값에 반영"""
+        import winreg
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        registered = False
+        try:
+            reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ)
+            try:
+                winreg.QueryValueEx(reg_key, "PasteFlow")
+                registered = True
+            except FileNotFoundError:
+                registered = False
+            winreg.CloseKey(reg_key)
+        except OSError:
+            registered = False
+        self.db.set_setting("auto_start", "1" if registered else "0")
 
     def _quit(self):
         # 패널 위치/크기 저장

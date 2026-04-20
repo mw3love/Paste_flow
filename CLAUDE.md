@@ -55,8 +55,8 @@ tests/
 
 ### 모듈 역할
 
-- **`main.py`** — 오케스트레이션 레이어. 모든 모듈을 연결하고 클립보드 모니터 → DB → 큐 → UI 간 이벤트 흐름 관리. 단일 인스턴스 보장(Windows 뮤텍스), 시작 알림 토스트 표시.
-- **`models.py`** — `ClipboardItem` 데이터클래스 (id, content_type, text_content, image_data, html_content, rtf_content, preview_text, thumbnail, created_at, is_pinned, pin_order).
+- **`main.py`** — 오케스트레이션 레이어. 모든 모듈을 연결하고 클립보드 모니터 → DB → 큐 → UI 간 이벤트 흐름 관리. 단일 인스턴스 보장(Windows 뮤텍스), 시작 알림 토스트 표시. 순차 붙여넣기 첫 발생 시 패널 자동 팝업(`_on_paste_queue_popped`), 큐 소진 시 1초 후 자동 숨기기(`_auto_hide_timer`). 시작 시 레지스트리 실제 등록 상태를 DB `auto_start`에 동기화(`_sync_auto_start_from_registry`).
+- **`models.py`** — `ClipboardItem` 데이터클래스 (id, content_type, text_content, image_data, html_content, rtf_content, preview_text, thumbnail, created_at, is_pinned, pin_order, extra_formats, history_order). `extra_formats`는 노션 등 앱 전용 포맷 JSON, `history_order`는 비고정 항목 표시 순서.
 - **`database.py`** — SQLite(`pasteflow.db`). `clipboard_items`(50개 FIFO 히스토리)와 `settings` 두 테이블. 고정(pin) 항목은 50개 제한에서 제외.
 - **`clipboard_monitor.py`** — `WM_CLIPBOARDUPDATE` Windows 이벤트 기반 백그라운드 감시. 텍스트, 이미지, HTML, RTF 캡처. `_self_triggered` 플래그로 자체 트리거 방지.
 - **`paste_queue.py`** — 순차 붙여넣기 큐 관리. 붙여넣기 진행 중(pointer>0) 새 복사 → 큐 리셋 후 새 항목부터 시작. 붙여넣기 전 연속 복사 → 누적. 소진 시 None 반환.
@@ -74,7 +74,11 @@ tests/
   - 항목 **드래그 → 외부 앱**: fake drag(DragCopyCursor) 방식으로 붙여넣기 (Win32 앱 `WM_PASTE`, Electron/Chromium 앱 `AttachThreadInput+SendInput`).
   - 고정 항목 **드래그 → 재정렬**: fake drag 방식 (QDrag 미사용). 커서 아래 고정 항목 하이라이트 후 마우스 업 시 순서 교환.
   - **`update_queue_highlight()`**: 위젯 재생성 없이 색상만 업데이트하는 빠른 경로 (항목 클릭 시 사용).
-  - **각 항목(PanelItemWidget)은 최대 2줄까지만 표시**하며, 좌측 컬러 바(bar)의 높이는 항목 위젯 높이와 완전히 동일해야 한다(`setFixedHeight`로 명시적 설정).
+  - **`show_near_cursor()`**: 마우스 커서 우하단 +16px에 패널 표시. 화면 경계 초과 시 반전. 단축키/트레이/순차 붙여넣기 자동 팝업 모두 이 메서드 사용.
+  - **항상 위에 토글 버튼(📌)**: 헤더 우측에 배치. ctypes `SetWindowPos(HWND_TOPMOST/NOTOPMOST)`로 TOPMOST 플래그만 변경(창 재생성·깜빡임 없음). 기본값 True. DB `panel_always_on_top`에 영속화. `_always_on_top`이 True이면 포커스를 잃어도 자동 닫히지 않음.
+  - **`panel_hidden` 시그널**: `hideEvent`에서 emit → main이 자동 숨기기 타이머 취소 및 `_panel_opened_by_paste` 플래그 초기화.
+  - **`always_on_top_changed(bool)` 시그널**: 버튼 클릭 시 emit → main이 DB 저장.
+  - **각 항목(PanelItemWidget)은 최대 3줄까지만 표시**하며, 좌측 컬러 바(bar)의 높이는 항목 위젯 높이와 완전히 동일해야 한다(`setFixedHeight`로 명시적 설정).
 - **`image_preview.py`** — 이미지 미리보기 팝업. 다중 창 동시 표시 지원(`open_new()`로 생성). 휠 줌, 드래그 이동, 닫기 버튼, 더블클릭 닫기. 커서가 있는 모니터에 배치(`screenAt()`).
 - **`text_preview.py`** — 텍스트 미리보기 팝업. 싱글턴(`instance()`). 동일 항목 재클릭 시 토글.
 - **`toast.py`** — 토스트 알림. 시작 시 "PasteFlow 시작됨" 표시.
@@ -104,6 +108,11 @@ tests/
   → 큐 소진이면 → 아무것도 안 함 (suppress만, OS 기본 동작 없음)
   → 항목 있으면 → (필요 시 DB에서 전체 데이터 로드) → win32clipboard로 클립보드 교체
                 → Ctrl+V SendInput 주입 → OS 기본 Ctrl+V가 교체된 내용 붙여넣기
+  → _on_paste_from_hook() → pointer==1이면 paste_queue_popped 시그널 emit
+                           → pointer>=total이면 paste_queue_done 시그널 emit
+
+paste_queue_popped → 패널이 닫혀 있으면 show_near_cursor()로 팝업, _panel_opened_by_paste=True
+paste_queue_done  → _panel_opened_by_paste이면 _auto_hide_timer(1초) 시작 → 패널 자동 숨기기
 ```
 
 ### 설계 규칙
@@ -113,8 +122,9 @@ tests/
 - **Windows 전용**: 클립보드 접근에 `pywin32`와 `WM_CLIPBOARDUPDATE` 사용.
 - **설정값**은 SQLite `settings` 테이블(키/값 형태)에 저장.
 - **단일 인스턴스**: `main()`에서 Windows 뮤텍스(`PasteFlow_SingleInstance`)로 보장. 핸들은 `app._single_instance_mutex`에 저장(GC 방지).
+- **항상 위에(Always On Top)**: 기본값 True. `Qt.WindowType.WindowStaysOnTopHint`를 재설정하지 않고 ctypes `SetWindowPos(HWND_TOPMOST/NOTOPMOST)`로 TOPMOST 플래그만 조작하여 깜빡임 방지. `_always_on_top`이 True이면 `changeEvent` 자동 닫기 조건에서 제외됨.
 - **PanelItemWidget 표시 규칙**:
-  - 각 항목은 최대 2줄까지만 표시한다. 3줄 이상 word-wrap되는 경우 상단 2줄을 보이고 나머지는 하단 클립.
+  - 각 항목은 최대 3줄까지만 표시한다. 4줄 이상 word-wrap되는 경우 상단 3줄을 보이고 나머지는 하단 클립.
   - 좌측 컬러 바(bar)의 높이는 항목 위젯 높이(`setFixedHeight`)와 항상 동일하게 유지한다. layout의 Expanding 정책에 의존하지 말고 `self._bar.setFixedHeight(new_h)`로 명시적으로 설정한다.
 
 ---

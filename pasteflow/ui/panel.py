@@ -10,8 +10,17 @@ from PyQt6.QtWidgets import (
     QLineEdit, QScrollArea, QMenu, QApplication, QGraphicsOpacityEffect,
     QSizePolicy, QDialog, QPlainTextEdit, QDialogButtonBox,
 )
+import ctypes
+import ctypes.wintypes
+
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QMimeData, QRect
 from PyQt6.QtGui import QPixmap, QCursor, QFontMetrics, QFont
+
+_HWND_TOPMOST = ctypes.wintypes.HWND(-1)
+_HWND_NOTOPMOST = ctypes.wintypes.HWND(-2)
+_SWP_NOMOVE = 0x0002
+_SWP_NOSIZE = 0x0001
+_SWP_NOACTIVATE = 0x0010
 
 from pasteflow.models import ClipboardItem
 from pasteflow.ui.image_preview import ImagePreviewPopup
@@ -120,7 +129,7 @@ class PanelItemWidget(QWidget):
         else:
             preview = item.text_content or item.preview_text or ""
             all_lines = preview.strip().split("\n")
-            lines = all_lines[:2]
+            lines = all_lines[:3]
             display_text = "\n".join(line[:80] for line in lines)
             line_count = len(lines)
 
@@ -128,7 +137,7 @@ class PanelItemWidget(QWidget):
             text_label.setWordWrap(True)
             text_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
             text_label.setMinimumWidth(0)
-            text_label.setMaximumHeight(30)  # 최대 2줄
+            text_label.setMaximumHeight(45)  # 최대 3줄
             text_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             text_label.setStyleSheet(f"color: {text_color}; font-size: 12px;")
             # AlignVCenter 명시: label이 행 내 상단/하단 쏠림 방지
@@ -145,7 +154,7 @@ class PanelItemWidget(QWidget):
                 display_text,
             )
             _vl = max(1, (_rect.height() + _fm.height() - 1) // _fm.height())
-            _init_h = 26 if _vl == 1 else 38
+            _init_h = 26 if _vl == 1 else (38 if _vl == 2 else 50)
             self.setFixedHeight(_init_h)
 
         # 바는 레이아웃이 행 높이에 맞춰 자동 조정 (타이머 불필요)
@@ -192,11 +201,11 @@ class PanelItemWidget(QWidget):
             self._text_label.text(),
         )
         actual_lines = max(1, (rect.height() + fm.height() - 1) // fm.height())
-        visual_lines = min(2, actual_lines)
-        new_h = 26 if visual_lines == 1 else 38
-        # 3줄 이상: AlignTop(1·2번째 줄 표시, 나머지 하단 클립)
-        # 1~2줄: AlignVCenter(균등 여백)
-        align = (Qt.AlignmentFlag.AlignTop if actual_lines > 2
+        visual_lines = min(3, actual_lines)
+        new_h = 26 if visual_lines == 1 else (38 if visual_lines == 2 else 50)
+        # 4줄 이상: AlignTop(1·2·3번째 줄 표시, 나머지 하단 클립)
+        # 1~3줄: AlignVCenter(균등 여백)
+        align = (Qt.AlignmentFlag.AlignTop if actual_lines > 3
                  else Qt.AlignmentFlag.AlignVCenter) | Qt.AlignmentFlag.AlignLeft
         self._text_label.setAlignment(align)
         if self.height() != new_h:
@@ -497,6 +506,8 @@ class ClipboardPanel(QWidget):
     clear_history_requested = pyqtSignal()
     drag_to_app_requested = pyqtSignal(int, QPoint)
     queue_select_requested = pyqtSignal(int)  # item_id — 해당 항목부터 최신까지 큐 설정
+    panel_hidden = pyqtSignal()  # 패널 숨겨질 때 emit
+    always_on_top_changed = pyqtSignal(bool)  # 항상 위에 상태 변경 → main이 DB 저장
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -525,6 +536,8 @@ class ClipboardPanel(QWidget):
         self._paste_in_progress = False  # 패널 붙여넣기 중 자동닫기 방지
         self._ext_drag_active = False    # 외부 드래그 중 자동닫기 방지
         self._kbd_focus_id: Optional[int] = None  # 키보드 포커스된 항목 ID
+        self._always_on_top = True       # 항상 위에 토글 상태
+        self._pin_btn: Optional[QPushButton] = None
 
         self._setup_window()
         self._setup_ui()
@@ -630,6 +643,17 @@ class ClipboardPanel(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         search_row.addWidget(self._header_spacer, 1)
+
+        # 항상 위에 토글 버튼 — 닫기 버튼 왼쪽
+        self._pin_btn = QPushButton("📌")
+        self._pin_btn.setFixedSize(24, 24)
+        self._pin_btn.setCheckable(True)
+        self._pin_btn.setChecked(True)
+        self._pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pin_btn.setToolTip("항상 위에 고정")
+        self._pin_btn.setStyleSheet(self._pin_btn_style(active=True))
+        self._pin_btn.clicked.connect(self._toggle_always_on_top)
+        search_row.addWidget(self._pin_btn)
 
         # 닫기 버튼 — 항상 빨간 원, 우측 고정
         close_btn = QPushButton("\u00d7")
@@ -757,13 +781,37 @@ class ClipboardPanel(QWidget):
             else:
                 widget.set_queue_state(is_current=False, is_done=False, in_queue=False)
 
+    def show_near_cursor(self):
+        """마우스 커서 근처(우하단 +16px)에 패널 표시. 화면 경계 초과 시 반전."""
+        cursor_pos = QCursor.pos()
+        screen = QApplication.screenAt(cursor_pos) or QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+
+        w = self.width()
+        h = self.height()
+        offset = 16
+
+        x = cursor_pos.x() + offset
+        y = cursor_pos.y() + offset
+
+        if x + w > avail.right():
+            x = cursor_pos.x() - w - offset
+        if y + h > avail.bottom():
+            y = cursor_pos.y() - h - offset
+
+        x = max(avail.left(), x)
+        y = max(avail.top(), y)
+
+        self.move(x, y)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
     def toggle(self):
         if self.isVisible():
             self.hide()
         else:
-            self.show()
-            self.raise_()
-            self.activateWindow()
+            self.show_near_cursor()
 
     # ── Internal ──
 
@@ -779,7 +827,7 @@ class ClipboardPanel(QWidget):
         filtered_pinned = self._filter_items(self._pinned_items, search)
 
         arrow = "\u25BC" if not self._pinned_collapsed else "\u25B6"
-        pin_header_text = f"{arrow} \U0001f4cc 고정"
+        pin_header_text = f"{arrow} 고정메모"
 
         pin_header_row = QHBoxLayout()
         pin_header_row.setContentsMargins(4, 0, 0, 0)
@@ -905,6 +953,60 @@ class ClipboardPanel(QWidget):
     def _toggle_pinned(self):
         self._pinned_collapsed = not self._pinned_collapsed
         self._rebuild()
+
+    def _pin_btn_style(self, active: bool) -> str:
+        if active:
+            return f"""
+                QPushButton {{
+                    background: {COLORS['surface1']};
+                    color: {COLORS['peach']};
+                    border: none;
+                    font-size: 13px;
+                    border-radius: 6px;
+                    padding: 0;
+                }}
+                QPushButton:hover {{
+                    background: {COLORS['surface2']};
+                }}
+            """
+        else:
+            return f"""
+                QPushButton {{
+                    background: transparent;
+                    color: {COLORS['overlay0']};
+                    border: none;
+                    font-size: 13px;
+                    border-radius: 6px;
+                    padding: 0;
+                }}
+                QPushButton:hover {{
+                    background: {COLORS['surface0']};
+                }}
+            """
+
+    def _apply_always_on_top(self, value: bool):
+        """SetWindowPos로 TOPMOST 플래그만 변경 — 창 재생성 없이 깜빡임 방지"""
+        hwnd = ctypes.wintypes.HWND(int(self.winId()))
+        insert_after = _HWND_TOPMOST if value else _HWND_NOTOPMOST
+        ctypes.windll.user32.SetWindowPos(
+            hwnd, insert_after, 0, 0, 0, 0,
+            _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE,
+        )
+
+    def _toggle_always_on_top(self, checked: bool):
+        self._always_on_top = checked
+        if self._pin_btn:
+            self._pin_btn.setStyleSheet(self._pin_btn_style(active=checked))
+        self._apply_always_on_top(checked)
+        self.always_on_top_changed.emit(checked)
+
+    def set_always_on_top(self, value: bool):
+        """외부(main.py)에서 DB 설정값 적용 시 호출. 창 가시성은 변경하지 않음."""
+        self._always_on_top = value
+        if self._pin_btn:
+            self._pin_btn.setChecked(value)
+            self._pin_btn.setStyleSheet(self._pin_btn_style(active=value))
+        self._apply_always_on_top(value)
 
     def _filter_items(self, items: list[ClipboardItem], search: str) -> list[ClipboardItem]:
         if not search:
@@ -1058,10 +1160,10 @@ class ClipboardPanel(QWidget):
         paste_action.triggered.connect(lambda: self._do_paste(item))
 
         if item.is_pinned:
-            unpin_action = menu.addAction("\U0001f4cc 고정 해제")
+            unpin_action = menu.addAction("고정메모 해제")
             unpin_action.triggered.connect(lambda: self.unpin_item_requested.emit(item_id))
         else:
-            pin_action = menu.addAction("\U0001f4cc 고정")
+            pin_action = menu.addAction("고정메모")
             pin_action.triggered.connect(lambda: self.pin_item_requested.emit(item_id))
 
         copy_action = menu.addAction("\U0001f4cb 복사")
@@ -1377,9 +1479,10 @@ class ClipboardPanel(QWidget):
     # ── F4-9: 외부 클릭 시 자동 닫기 ──
 
     def changeEvent(self, event):
-        """창 비활성화 시 자동 닫기 (사용자가 직접 연 경우만)"""
+        """창 비활성화 시 자동 닫기 (사용자가 직접 연 경우만, 항상 위에 활성 시 닫지 않음)"""
         if (event.type() == QEvent.Type.ActivationChange
                 and self._auto_close
+                and not self._always_on_top
                 and self._user_activated
                 and not self._paste_in_progress
                 and not self._ext_drag_active
@@ -1400,6 +1503,7 @@ class ClipboardPanel(QWidget):
             self._collapse_search()
         ImagePreviewPopup.close_all()
         super().hideEvent(event)
+        self.panel_hidden.emit()
 
     def _sync_resize_cursor(self):
         """마우스 위치에 따라 리사이즈 커서를 동기화 (자식 위젯 위에서도 정확히 동작)"""
