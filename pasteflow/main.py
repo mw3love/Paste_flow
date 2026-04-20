@@ -387,9 +387,8 @@ class PasteFlowApp:
 
         # UI (패널이 기본 UI — 미니창 없음)
         self.panel = ClipboardPanel()
-        # 첫 표시 지연 제거: 네이티브 윈도우 핸들을 미리 생성해 둠
-        self.panel.show()
-        self.panel.hide()
+        # 네이티브 윈도우 핸들을 미리 생성 (show/hide 없이, 깜빡임 방지)
+        self.panel.winId()
         self.tray = TrayIcon()
 
         # 패널 열기 전 포커스된 윈도우 추적
