@@ -966,6 +966,7 @@ class ClipboardPanel(QWidget):
     def _toggle_pinned(self):
         self._pinned_collapsed = not self._pinned_collapsed
         self._rebuild()
+        self._scroll.verticalScrollBar().setValue(0)
 
     def _pin_btn_style(self, active: bool) -> str:
         if active:
@@ -1091,12 +1092,12 @@ class ClipboardPanel(QWidget):
             if self._last_clicked_id is not None:
                 self._select_range(self._last_clicked_id, item_id)
         else:
+            # 단순 클릭 → 즉시 붙여넣기
             self._selected_ids.clear()
             self._selected_ids.add(item_id)
-
             item = self._find_item(item_id)
             if item:
-                self.queue_select_requested.emit(item_id)
+                self.paste_item_requested.emit(item)
 
         self._last_clicked_id = item_id
         self._kbd_focus_id = item_id
@@ -1169,8 +1170,10 @@ class ClipboardPanel(QWidget):
             }}
         """)
 
-        paste_action = menu.addAction("\U0001f4cb 붙여넣기")
-        paste_action.triggered.connect(lambda: self._do_paste(item))
+        queue_action = menu.addAction("🔢 큐에 추가")
+        queue_action.triggered.connect(lambda: self.queue_select_requested.emit(item_id))
+
+        menu.addSeparator()
 
         if item.is_pinned:
             unpin_action = menu.addAction("고정메모 해제")
@@ -1204,9 +1207,6 @@ class ClipboardPanel(QWidget):
             new_text = dialog.get_text()
             if new_text != (item.text_content or ""):
                 self.edit_item_requested.emit(item.id, new_text)
-
-    def _do_paste(self, item: ClipboardItem):
-        self.paste_item_requested.emit(item)
 
     def _do_copy(self, item: ClipboardItem):
         """우클릭 복사 — copy_item_requested로 전체 포맷 복사 + self_triggered 처리"""
@@ -1611,8 +1611,6 @@ class ClipboardPanel(QWidget):
             if item_id == new_id:
                 self._scroll.ensureWidgetVisible(w)
                 break
-
-        self.queue_select_requested.emit(new_id)
 
     def _kbd_activate(self):
         """Enter: 포커스 항목에 더블클릭 동작 실행"""

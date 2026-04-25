@@ -511,30 +511,35 @@ class PasteFlowApp:
         self.panel.refresh(pinned, history, pointer, total, queue_item_ids)
 
     def _on_panel_paste(self, item: ClipboardItem):
-        """패널에서 더블클릭 붙여넣기 — 패널 유지, 대상 앱에 붙여넣기"""
-        # 패널 표시용 항목은 image_data/extra_formats 없음 → DB에서 전체 로드
+        """패널 항목 클릭 붙여넣기 — auto_close 설정에 따라 패널 닫기 여부 결정"""
         full_item = self.db.get_item(item.id) or item
         target_hwnd = self._prev_foreground_hwnd
 
-        # 붙여넣기 중 포커스 이동으로 패널이 자동닫기되지 않도록 플래그 설정
-        self.panel._paste_in_progress = True
-
-        def _do_paste():
-            try:
-                self.interceptor.direct_paste(full_item, target_hwnd)
-            except Exception as e:
-                print(f"[PanelPaste] Error: {e}")
-            finally:
-                QTimer.singleShot(0, self._reactivate_panel)
+        if self.panel._auto_close:
+            # 자동 닫기 ON: 패널 먼저 닫고 붙여넣기
+            self.panel.hide()
+            def _do_paste():
+                try:
+                    self.interceptor.direct_paste(full_item, target_hwnd)
+                except Exception as e:
+                    print(f"[PanelPaste] Error: {e}")
+        else:
+            # 자동 닫기 OFF: 패널 유지
+            # _paste_in_progress 먼저 → SetForegroundWindow 순서 보장 (changeEvent 선행 방지)
+            self.panel._paste_in_progress = True
+            # 메인 스레드에서 포커스 이동 (포그라운드 잠금 우회)
+            if target_hwnd:
+                ctypes.windll.user32.SetForegroundWindow(target_hwnd)
+            def _do_paste():
+                try:
+                    # 포커스 이미 이동됐으므로 target_hwnd=None
+                    self.interceptor.direct_paste(full_item, None)
+                except Exception as e:
+                    print(f"[PanelPaste] Error: {e}")
+                finally:
+                    QTimer.singleShot(0, lambda: setattr(self.panel, '_paste_in_progress', False))
 
         threading.Thread(target=_do_paste, daemon=True).start()
-
-    def _reactivate_panel(self):
-        """붙여넣기 완료 → 플래그 해제 (포커스는 대상 앱 유지)"""
-        try:
-            self.panel._paste_in_progress = False
-        except Exception:
-            pass
 
     def _on_copy_item(self, item: ClipboardItem):
         """고정 항목 클릭 → 클립보드 복사 + 큐 추가"""
