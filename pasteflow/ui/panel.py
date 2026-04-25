@@ -7,7 +7,7 @@ from typing import Optional
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QScrollArea, QMenu, QApplication, QGraphicsOpacityEffect,
+    QScrollArea, QMenu, QApplication, QGraphicsOpacityEffect,
     QSizePolicy, QDialog, QPlainTextEdit, QDialogButtonBox,
 )
 import ctypes
@@ -517,8 +517,6 @@ class ClipboardPanel(QWidget):
         self._total: int = 0
         self._selected_ids: set[int] = set()
         self._last_clicked_id: Optional[int] = None
-        self._search_text: str = ""
-        self._search_expanded: bool = False
         self._queue_item_ids: list[int] = []
         self._status_label: Optional[QLabel] = None
         self._drag_pos = None
@@ -591,64 +589,15 @@ class ClipboardPanel(QWidget):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(8)
 
-        # ── 검색 토글 버튼 + 검색 입력창 + 닫기 버튼 ──
-        # 레이아웃: [🔍 or search_input(stretch)] [spacer(stretch)] [×]
-        # 닫기(×)는 항상 우측 고정. 돋보기는 항상 좌측.
-        search_row = QHBoxLayout()
-        search_row.setSpacing(6)
+        # ── 헤더: 📌 + ✕ ──
+        header_row = QHBoxLayout()
+        header_row.setSpacing(6)
 
-        # 돋보기 아이콘 버튼 (축소 상태 — 좌측 고정)
-        self._search_btn = QPushButton("\U0001f50d")
-        self._search_btn.setFixedSize(28, 28)
-        self._search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._search_btn.setToolTip("검색 (클릭하여 열기)")
-        self._search_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent;
-                color: {COLORS['subtext0']};
-                border: none;
-                font-size: 14px;
-                border-radius: 6px;
-                padding: 0;
-            }}
-            QPushButton:hover {{
-                background: {COLORS['surface0']};
-                color: {COLORS['text']};
-            }}
-        """)
-        self._search_btn.clicked.connect(self._toggle_search)
-        search_row.addWidget(self._search_btn)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        header_row.addWidget(spacer)
 
-        # 검색 입력창 (펼침 상태 — stretch로 우측까지 채움)
-        self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("검색...")
-        self._search_input.setFixedHeight(28)
-        self._search_input.setStyleSheet(f"""
-            QLineEdit {{
-                background-color: {COLORS['surface0']};
-                color: {COLORS['text']};
-                border: 2px solid transparent;
-                border-radius: 6px;
-                padding: 0 8px;
-                font-size: 12px;
-            }}
-            QLineEdit:focus {{
-                border-color: {COLORS['blue']};
-            }}
-        """)
-        self._search_input.textChanged.connect(self._on_search_changed)
-        self._search_input.installEventFilter(self)
-        self._search_input.hide()
-        search_row.addWidget(self._search_input, 1)
-
-        # 스페이서 — 축소 상태에서 돋보기와 닫기 사이 공간 채움
-        self._header_spacer = QWidget()
-        self._header_spacer.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        search_row.addWidget(self._header_spacer, 1)
-
-        # 항상 위에 토글 버튼 — 닫기 버튼 왼쪽
+        # 항상 위에 토글 버튼
         self._pin_btn = QPushButton("📌")
         self._pin_btn.setFixedSize(24, 24)
         self._pin_btn.setCheckable(True)
@@ -657,10 +606,10 @@ class ClipboardPanel(QWidget):
         self._pin_btn.setToolTip("항상 위에 고정")
         self._pin_btn.setStyleSheet(self._pin_btn_style(active=True))
         self._pin_btn.clicked.connect(self._toggle_always_on_top)
-        search_row.addWidget(self._pin_btn)
+        header_row.addWidget(self._pin_btn)
 
-        # 닫기 버튼 — 항상 빨간 원, 우측 고정
-        close_btn = QPushButton("\u00d7")
+        # 닫기 버튼
+        close_btn = QPushButton("×")
         close_btn.setFixedSize(24, 24)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.setStyleSheet(f"""
@@ -680,9 +629,9 @@ class ClipboardPanel(QWidget):
             }}
         """)
         close_btn.clicked.connect(self.hide)
-        search_row.addWidget(close_btn)
+        header_row.addWidget(close_btn)
 
-        main_layout.addLayout(search_row)
+        main_layout.addLayout(header_row)
 
         # ── 스크롤 영역 ──
         self._scroll = QScrollArea()
@@ -831,10 +780,8 @@ class ClipboardPanel(QWidget):
                     w.setParent(None)
                     del w
 
-            search = self._search_text.lower().strip()
-
             # ── 고정 섹션 ──
-            filtered_pinned = self._filter_items(self._pinned_items, search)
+            filtered_pinned = self._pinned_items
 
             arrow = "\u25BC" if not self._pinned_collapsed else "\u25B6"
             pin_header_text = f"{arrow} 고정메모"
@@ -918,7 +865,7 @@ class ClipboardPanel(QWidget):
             self._items_layout.addWidget(sep)
 
             # ── 히스토리 섹션 헤더 ──
-            filtered_history = self._filter_items(self._history_items, search)
+            filtered_history = self._history_items
 
             hist_header_row = QHBoxLayout()
             hist_header_row.setContentsMargins(4, 0, 0, 0)
@@ -1022,15 +969,6 @@ class ClipboardPanel(QWidget):
             self._pin_btn.setStyleSheet(self._pin_btn_style(active=value))
         self._apply_always_on_top(value)
 
-    def _filter_items(self, items: list[ClipboardItem], search: str) -> list[ClipboardItem]:
-        if not search:
-            return items
-        return [
-            item for item in items
-            if search in (item.preview_text or "").lower()
-            or search in (item.text_content or "").lower()
-        ]
-
     def _connect_item_signals(self, widget: PanelItemWidget):
         widget.clicked.connect(self._on_item_clicked)
         widget.double_clicked.connect(self._on_item_double_clicked)
@@ -1043,41 +981,12 @@ class ClipboardPanel(QWidget):
 
     # ── 이벤트 핸들러 ──
 
-    def _on_search_changed(self, text: str):
-        self._search_text = text
-        self._rebuild()
-
-    def _toggle_search(self):
-        if self._search_expanded:
-            self._collapse_search()
-        else:
-            self._expand_search()
-
-    def _expand_search(self):
-        self._search_expanded = True
-        self._header_spacer.hide()
-        self._search_input.show()
-        self._search_input.setFocus()
-
-    def _collapse_search(self):
-        self._search_expanded = False
-        self._search_input.clear()
-        self._search_input.hide()
-        self._header_spacer.show()
-
     def eventFilter(self, obj, event):
         if (hasattr(self, '_scroll_content') and obj is self._scroll_content):
             if (event.type() == QEvent.Type.MouseButtonDblClick
                     and event.button() == Qt.MouseButton.LeftButton):
                 self._reset_to_min_size()
                 return True
-        if obj is self._search_input:
-            if event.type() == QEvent.Type.KeyPress:
-                if event.key() == Qt.Key.Key_Escape:
-                    self._collapse_search()
-                    return True
-            elif event.type() == QEvent.Type.FocusOut:
-                pass  # 포커스 아웃으로는 검색창을 닫지 않음
         return super().eventFilter(obj, event)
 
     def _on_item_clicked(self, item_id: int, event):
@@ -1512,8 +1421,6 @@ class ClipboardPanel(QWidget):
     def hideEvent(self, event):
         self._cursor_timer.stop()
         self.unsetCursor()
-        if self._search_expanded:
-            self._collapse_search()
         ImagePreviewPopup.close_all()
         super().hideEvent(event)
         self.panel_hidden.emit()
