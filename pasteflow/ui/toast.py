@@ -3,11 +3,7 @@ from PyQt6.QtWidgets import QWidget, QLabel, QHBoxLayout
 from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QRect
 from PyQt6.QtGui import QGuiApplication, QPainter, QColor, QPen
 
-COLORS = {
-    "base": "#1e1e2e",
-    "peach": "#fab387",
-    "text": "#cdd6f4",
-}
+from pasteflow.ui.theme import COLORS
 
 
 class ToastNotification(QWidget):
@@ -20,15 +16,15 @@ class ToastNotification(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(24, 18, 24, 18)
+        layout.setSpacing(12)
 
         icon = QLabel("✓")
-        icon.setStyleSheet(f"color: {COLORS['peach']}; font-size: 14px; background: transparent;")
+        icon.setStyleSheet(f"color: {COLORS['peach']}; font-size: 22px; background: transparent;")
         layout.addWidget(icon)
 
         label = QLabel(message)
-        label.setStyleSheet(f"color: {COLORS['text']}; font-size: 13px; background: transparent;")
+        label.setStyleSheet(f"color: {COLORS['text']}; font-size: 18px; background: transparent;")
         layout.addWidget(label)
 
         self.setStyleSheet("background: transparent;")
@@ -69,9 +65,9 @@ class ToastNotification(QWidget):
         rect = self.rect().adjusted(1, 1, -1, -1)
         painter.setBrush(QColor(COLORS['base']))
         pen = QPen(QColor(COLORS['peach']))
-        pen.setWidth(1)
+        pen.setWidth(2)
         painter.setPen(pen)
-        painter.drawRoundedRect(rect, 8, 8)
+        painter.drawRoundedRect(rect, 12, 12)
 
     def _start_fade_out(self):
         self._anim_out.start()

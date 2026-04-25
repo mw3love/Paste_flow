@@ -165,6 +165,16 @@ def _send_inputs(input_list):
     return result
 
 
+def _send_ctrl_v_plain():
+    """수정키 처리 없이 Ctrl+V 키 이벤트만 전송한다."""
+    _send_inputs([
+        _make_key_input(VK_CONTROL),
+        _make_key_input(VK_V),
+        _make_key_input(VK_V, KEYEVENTF_KEYUP),
+        _make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+    ])
+
+
 class PasteInterceptor:
     """Ctrl+Shift+{V,C,X,Z} 감지 → 순차 붙여넣기 / 큐 관리 (저수준 키보드 훅)
 
@@ -404,12 +414,7 @@ class PasteInterceptor:
             time.sleep(0.02)
 
         # 2) Ctrl+V 전송
-        _send_inputs([
-            _make_key_input(VK_CONTROL),
-            _make_key_input(VK_V),
-            _make_key_input(VK_V, KEYEVENTF_KEYUP),
-            _make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
-        ])
+        _send_ctrl_v_plain()
 
         # 3) Alt가 눌려있었으면 복원 (연속 Alt+N 지원)
         #    Ctrl+V 완료 후이므로 간섭 없음
@@ -424,12 +429,7 @@ class PasteInterceptor:
             time.sleep(0.05)
         self._direct_paste_active = True
         try:
-            _send_inputs([
-                _make_key_input(VK_CONTROL),
-                _make_key_input(VK_V),
-                _make_key_input(VK_V, KEYEVENTF_KEYUP),
-                _make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
-            ])
+            _send_ctrl_v_plain()
         finally:
             time.sleep(0.05)
             self._direct_paste_active = False

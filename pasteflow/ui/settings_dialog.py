@@ -10,6 +10,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
+from pasteflow.ui.theme import COLORS, TEAL_HOVER
+
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _APP_NAME = "PasteFlow"
 
@@ -32,19 +34,6 @@ def _set_auto_start(enabled: bool) -> None:
         winreg.CloseKey(key)
     except OSError:
         pass
-
-# Catppuccin Mocha
-COLORS = {
-    "base": "#1e1e2e",
-    "mantle": "#181825",
-    "surface0": "#313244",
-    "surface1": "#45475a",
-    "teal": "#94e2d5",
-    "text": "#cdd6f4",
-    "subtext0": "#a6adc8",
-    "blue": "#89b4fa",
-    "red": "#f38ba8",
-}
 
 DIALOG_STYLE = f"""
     QDialog {{
@@ -109,7 +98,7 @@ DIALOG_STYLE = f"""
         font-weight: 600;
     }}
     QPushButton#saveBtn:hover {{
-        background-color: #7dd6c8;
+        background-color: {TEAL_HOVER};
     }}
 """
 

@@ -3,6 +3,7 @@ from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor
 from PyQt6.QtCore import pyqtSignal, QObject
 from pasteflow.__version__ import __version__
+from pasteflow.ui.theme import TEAL, BASE, SURFACE0, SURFACE1, TEXT
 
 
 def _create_default_icon() -> QIcon:
@@ -10,8 +11,8 @@ def _create_default_icon() -> QIcon:
     pixmap = QPixmap(16, 16)
     pixmap.fill(QColor("transparent"))
     painter = QPainter(pixmap)
-    painter.setBrush(QColor("#94e2d5"))
-    painter.setPen(QColor("#1e1e2e"))
+    painter.setBrush(QColor(TEAL))
+    painter.setPen(QColor(BASE))
     painter.drawRoundedRect(1, 1, 14, 14, 3, 3)
     painter.drawText(3, 12, "P")
     painter.end()
@@ -35,15 +36,15 @@ class TrayIcon(QObject):
     def _setup_menu(self):
         """우클릭 메뉴"""
         self._menu = menu = QMenu()
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #313244;
-                color: #cdd6f4;
-                border: 1px solid #45475a;
-            }
-            QMenu::item:selected {
-                background-color: #45475a;
-            }
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {SURFACE0};
+                color: {TEXT};
+                border: 1px solid {SURFACE1};
+            }}
+            QMenu::item:selected {{
+                background-color: {SURFACE1};
+            }}
         """)
         menu.addAction("📋 패널 열기", self.panel_toggle_requested.emit)
         menu.addSeparator()

@@ -8,12 +8,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QPixmap
 
-
-# Catppuccin Mocha
-_BG = "#1e1e2e"
-_BORDER = "#45475a"
-_TEXT = "#cdd6f4"
-_SURFACE1 = "#313244"
+from pasteflow.ui.theme import BASE as _BG, SURFACE1 as _BORDER, TEXT as _TEXT, SURFACE0 as _SURFACE0, PEACH as _PEACH
 
 PREVIEW_MAX_W = 640
 PREVIEW_MAX_H = 480
@@ -76,11 +71,11 @@ class ImagePreviewPopup(QWidget):
                 border-radius: 3px;
             }}
             QToolButton#close_btn:hover {{
-                background-color: {_SURFACE1};
+                background-color: {_SURFACE0};
             }}
             QLabel#image_label {{
                 background: transparent;
-                border: 2px solid #fab387;
+                border: 2px solid {_PEACH};
             }}
         """)
 
@@ -88,9 +83,15 @@ class ImagePreviewPopup(QWidget):
         root.setContentsMargins(6, 4, 6, 6)
         root.setSpacing(2)
 
-        # 상단 바: × 닫기 버튼
+        # 상단 바: 줌 레벨 + × 닫기 버튼
         top_bar = QHBoxLayout()
-        top_bar.setContentsMargins(0, 0, 0, 0)
+        top_bar.setContentsMargins(4, 0, 0, 0)
+
+        self._zoom_label = QLabel("100%")
+        self._zoom_label.setStyleSheet(
+            f"color: {_TEXT}; font-size: 11px; background: transparent; border: none;"
+        )
+        top_bar.addWidget(self._zoom_label)
         top_bar.addStretch()
 
         close_btn = QToolButton()
@@ -155,7 +156,7 @@ class ImagePreviewPopup(QWidget):
         if delta == 0:
             return
         factor = 1.1 if delta > 0 else (1 / 1.1)
-        self._scale_factor = max(0.1, min(8.0, self._scale_factor * factor))
+        self._scale_factor = max(0.25, min(4.0, self._scale_factor * factor))
         self._apply_scale()
 
     def _apply_scale(self):
@@ -180,6 +181,7 @@ class ImagePreviewPopup(QWidget):
         self._image_label.setPixmap(scaled)
         self._image_label.adjustSize()
         self.adjustSize()
+        self._zoom_label.setText(f"{round(self._scale_factor * 100)}%")
 
     # ------------------------------------------------------------------
     # 드래그 이동

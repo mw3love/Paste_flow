@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 import ctypes
 import ctypes.wintypes
 
-from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QMimeData, QRect
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QMimeData, QRect, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QPixmap, QCursor, QFontMetrics, QFont
 
 _HWND_TOPMOST = ctypes.wintypes.HWND(-1)
@@ -25,24 +25,7 @@ _SWP_NOACTIVATE = 0x0010
 from pasteflow.models import ClipboardItem
 from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.text_preview import TextPreviewPopup
-
-# Catppuccin Mocha 색상
-COLORS = {
-    "base": "#1e1e2e",
-    "mantle": "#181825",
-    "crust": "#11111b",
-    "surface0": "#313244",
-    "surface1": "#45475a",
-    "surface2": "#585b70",
-    "teal": "#94e2d5",
-    "peach": "#fab387",
-    "text": "#cdd6f4",
-    "subtext0": "#a6adc8",
-    "overlay0": "#6c7086",
-    "blue": "#89b4fa",
-    "red": "#f38ba8",
-    "green": "#a6e3a1",
-}
+from pasteflow.ui.theme import COLORS, TEAL_HOVER, RED_HOVER
 
 PANEL_WIDTH = 280
 PANEL_HEIGHT = 350
@@ -458,7 +441,7 @@ class EditItemDialog(QDialog):
                 color: {COLORS['base']};
             }}
             QPushButton[text="저장"]:hover {{
-                background-color: #7ed5c8;
+                background-color: {TEAL_HOVER};
             }}
         """)
 
@@ -536,9 +519,11 @@ class ClipboardPanel(QWidget):
         self._kbd_focus_id: Optional[int] = None  # 키보드 포커스된 항목 ID
         self._always_on_top = True       # 항상 위에 토글 상태
         self._pin_btn: Optional[QPushButton] = None
+        self._fade_anim: Optional[QPropertyAnimation] = None
 
         self._setup_window()
         self._setup_ui()
+        self._setup_opacity()
 
     def _setup_window(self):
         self.setWindowFlags(
@@ -625,7 +610,7 @@ class ClipboardPanel(QWidget):
                 border-radius: 12px;
             }}
             QPushButton:hover {{
-                background: #e06c75;
+                background: {RED_HOVER};
             }}
         """)
         close_btn.clicked.connect(self.hide)
@@ -734,6 +719,43 @@ class ClipboardPanel(QWidget):
             else:
                 widget.set_queue_state(is_current=False, is_done=False, in_queue=False)
 
+    def _setup_opacity(self):
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self._opacity_effect.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity_effect)
+
+    def _fade_in(self):
+        if self._fade_anim and self._fade_anim.state() == QPropertyAnimation.State.Running:
+            self._fade_anim.stop()
+        anim = QPropertyAnimation(self._opacity_effect, b"opacity", self)
+        anim.setDuration(180)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade_anim = anim
+        anim.start()
+
+    def _fade_out_and_hide(self):
+        if self._fade_anim and self._fade_anim.state() == QPropertyAnimation.State.Running:
+            self._fade_anim.stop()
+        anim = QPropertyAnimation(self._opacity_effect, b"opacity", self)
+        anim.setDuration(140)
+        anim.setStartValue(self._opacity_effect.opacity())
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QEasingCurve.Type.InCubic)
+        anim.finished.connect(self._do_hide)
+        self._fade_anim = anim
+        anim.start()
+
+    def _do_hide(self):
+        self._opacity_effect.setOpacity(1.0)
+        super().hide()
+
+    def hide(self):
+        if not self.isVisible():
+            return
+        self._fade_out_and_hide()
+
     def show_near_cursor(self):
         """마우스 커서 근처(우하단 +16px)에 패널 표시. 화면 경계 초과 시 반전."""
         cursor_pos = QCursor.pos()
@@ -755,10 +777,12 @@ class ClipboardPanel(QWidget):
         x = max(avail.left(), x)
         y = max(avail.top(), y)
 
+        self._opacity_effect.setOpacity(0.0)
         self.move(x, y)
         self.show()
         self.raise_()
         self.activateWindow()
+        self._fade_in()
 
     def toggle(self):
         if self.isVisible():

@@ -68,8 +68,7 @@ def _activate_and_send_ctrl_v(hwnd):
     """
     import win32gui
     import win32process
-    from pasteflow.paste_interceptor import _make_key_input, _send_inputs, VK_V, KEYEVENTF_KEYUP
-    VK_CONTROL = 0x11
+    from pasteflow.paste_interceptor import _send_ctrl_v_plain
 
     fg_hwnd = win32gui.GetForegroundWindow()
     current_tid = ctypes.windll.kernel32.GetCurrentThreadId()
@@ -100,12 +99,7 @@ def _activate_and_send_ctrl_v(hwnd):
                 return  # 다른 창이 활성화됐으면 전송 안 함
         except Exception:
             pass
-        _send_inputs([
-            _make_key_input(VK_CONTROL),
-            _make_key_input(VK_V),
-            _make_key_input(VK_V, KEYEVENTF_KEYUP),
-            _make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
-        ])
+        _send_ctrl_v_plain()
 
     QTimer.singleShot(80, _send)
 
@@ -843,7 +837,7 @@ class PasteFlowApp:
         # 시작 알림 토스트
         def _show_startup_toast():
             from pasteflow.ui.toast import ToastNotification
-            self._startup_toast = ToastNotification("PasteFlow 시작됨")
+            self._startup_toast = ToastNotification("PasteFlow 시작됨  ·  Ctrl+Shift+V로 붙여넣기")
 
         QTimer.singleShot(500, _show_startup_toast)
 

@@ -3,10 +3,7 @@
 from PyQt6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget, QApplication
 from PyQt6.QtCore import Qt, QPoint
 
-# Catppuccin Mocha
-_BG = "#1e1e2e"
-_BORDER = "#45475a"
-_TEXT = "#cdd6f4"
+from pasteflow.ui.theme import BASE as _BG, SURFACE1 as _BORDER, TEXT as _TEXT
 
 PREVIEW_MAX_W = 360
 PREVIEW_MAX_H = 300
