@@ -465,7 +465,7 @@ class PasteFlowApp:
         if self._panel_opened_by_paste:
             self._panel_opened_by_paste = False
             if self.panel.isVisible():
-                self.panel.hide()
+                self.panel.hide_immediate()
 
     def _on_panel_hidden(self):
         """패널이 닫힐 때 자동 숨기기 타이머 취소 및 플래그 초기화"""
@@ -510,8 +510,8 @@ class PasteFlowApp:
         target_hwnd = self._prev_foreground_hwnd
 
         if self.panel._auto_close:
-            # 자동 닫기 ON: 패널 먼저 닫고 붙여넣기
-            self.panel.hide()
+            # 자동 닫기 ON: 즉시 숨기고 붙여넣기 (fade 대기 시 포그라운드 잠금 문제 발생)
+            self.panel.hide_immediate()
             def _do_paste():
                 try:
                     self.interceptor.direct_paste(full_item, target_hwnd)

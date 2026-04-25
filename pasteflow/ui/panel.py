@@ -756,6 +756,12 @@ class ClipboardPanel(QWidget):
             return
         self._fade_out_and_hide()
 
+    def hide_immediate(self):
+        """애니메이션 없이 즉시 숨긴다 — 붙여넣기 직전처럼 타이밍이 중요한 경우에 사용."""
+        if self._fade_anim and self._fade_anim.state() == QPropertyAnimation.State.Running:
+            self._fade_anim.stop()
+        self._do_hide()
+
     def show_near_cursor(self):
         """마우스 커서 근처(우하단 +16px)에 패널 표시. 화면 경계 초과 시 반전."""
         cursor_pos = QCursor.pos()
