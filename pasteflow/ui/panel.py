@@ -17,7 +17,6 @@ from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QMimeData, QRec
 from PyQt6.QtGui import QPixmap, QCursor, QFontMetrics, QFont
 
 _HWND_TOPMOST = ctypes.wintypes.HWND(-1)
-_HWND_NOTOPMOST = ctypes.wintypes.HWND(-2)
 _SWP_NOMOVE = 0x0002
 _SWP_NOSIZE = 0x0001
 _SWP_NOACTIVATE = 0x0010
@@ -27,10 +26,10 @@ from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.text_preview import TextPreviewPopup
 from pasteflow.ui.theme import COLORS, TEAL_HOVER, RED_HOVER
 
-PANEL_WIDTH = 280
-PANEL_HEIGHT = 350
-PANEL_MIN_WIDTH = 220
-PANEL_MIN_HEIGHT = 325
+PANEL_WIDTH = 320
+PANEL_HEIGHT = 420
+PANEL_MIN_WIDTH = 260
+PANEL_MIN_HEIGHT = 390
 RESIZE_MARGIN = 6
 
 # 드래그 MIME 타입
@@ -41,15 +40,12 @@ class PanelItemWidget(QWidget):
     """패널 내 개별 항목 위젯"""
 
     clicked = pyqtSignal(int, object)
-    double_clicked = pyqtSignal(int)
     context_menu_requested = pyqtSignal(int, object)
-    delete_clicked = pyqtSignal(int)
     external_drag_paste = pyqtSignal(int, QPoint)
 
     def __init__(
         self,
         item: ClipboardItem,
-        number: int,
         is_current: bool = False,
         is_done: bool = False,
         is_pinned: bool = False,
@@ -68,20 +64,19 @@ class PanelItemWidget(QWidget):
         self._text_label: Optional[QLabel] = None
         self._first_resize = True
 
-        self._setup_ui(item, number, is_current, is_done, is_pinned)
+        self._setup_ui(item, is_current, is_done, is_pinned)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
 
     def _setup_ui(
-        self, item: ClipboardItem, number: int,
+        self, item: ClipboardItem,
         is_current: bool, is_done: bool, is_pinned: bool,
     ):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 0, 4, 0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(0)
 
-        # 좌측 번호 레이블 — 현재 큐 항목=청록, 완료=회색, 고정=주황, 일반=주황
         if is_current:
             accent_color = COLORS['teal']
         elif is_done:
@@ -90,12 +85,6 @@ class PanelItemWidget(QWidget):
             accent_color = COLORS['peach']
         self._accent_color = accent_color
 
-        num_label = QLabel(str(number))
-        num_label.setFixedWidth(22)
-        num_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        num_label.setStyleSheet("color: #ffffff; font-size: 13px; background: transparent; border: none;")
-        layout.addWidget(num_label)
-
         # 미리보기
         text_color = COLORS['subtext0'] if is_done else "#ffffff"
         if item.content_type == "image" and item.thumbnail:
@@ -103,12 +92,12 @@ class PanelItemWidget(QWidget):
             thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             pixmap = QPixmap()
             pixmap.loadFromData(item.thumbnail)
-            scaled = pixmap.scaled(80, 60, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            scaled = pixmap.scaled(96, 72, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             thumb_label.setPixmap(scaled)
-            thumb_label.setFixedSize(80, 60)
+            thumb_label.setFixedSize(96, 72)
             layout.addWidget(thumb_label)
             layout.addStretch(1)
-            self.setFixedHeight(72)
+            self.setFixedHeight(86)
         else:
             preview = item.text_content or item.preview_text or ""
             all_lines = preview.strip().split("\n")
@@ -128,11 +117,11 @@ class PanelItemWidget(QWidget):
             self._text_label = text_label
 
             # 생성 시 높이 미리 계산 → 첫 resizeEvent 점프(지직) 방지
-            # 실제 레이블 너비 ≈ PANEL_WIDTH - 패널마진(20) - 아이템내부(lmargin4+num22+spacing6+del22+rmargin4) = PANEL_WIDTH - 78
+            # 실제 레이블 너비 ≈ PANEL_WIDTH - 패널마진(20) - 아이템내부(lmargin8+rmargin8) = PANEL_WIDTH - 36
             _f = QFont(); _f.setPixelSize(12)
             _fm = QFontMetrics(_f)
             _rect = _fm.boundingRect(
-                QRect(0, 0, max(1, PANEL_WIDTH - 78), 10000),
+                QRect(0, 0, max(1, PANEL_WIDTH - 36), 10000),
                 Qt.TextFlag.TextWordWrap | int(Qt.AlignmentFlag.AlignLeft),
                 display_text,
             )
@@ -141,26 +130,6 @@ class PanelItemWidget(QWidget):
             self.setFixedHeight(_init_h)
 
         # 바는 레이아웃이 행 높이에 맞춰 자동 조정 (타이머 불필요)
-
-        # 삭제 버튼 (×)
-        del_btn = QPushButton("\u2715")
-        del_btn.setFixedSize(22, 22)
-        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        del_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent;
-                color: {COLORS['overlay0']};
-                border: none;
-                font-size: 12px;
-            }}
-            QPushButton:hover {{
-                background: {COLORS['red']};
-                color: {COLORS['base']};
-                border-radius: 11px;
-            }}
-        """)
-        del_btn.clicked.connect(lambda: self.delete_clicked.emit(self.item_id))
-        layout.addWidget(del_btn)
 
         self._apply_bg_style()
 
@@ -174,7 +143,7 @@ class PanelItemWidget(QWidget):
     def _adjust_text_height(self):
         if self._text_label is None:
             return
-        avail_w = self.width() - 58  # lmargin(4) + num(22) + spacing(6) + del_btn(22) + rmargin(4)
+        avail_w = self.width() - 16  # lmargin(8) + rmargin(8)
         if avail_w <= 0:
             return
         fm = self._text_label.fontMetrics()
@@ -353,12 +322,10 @@ class PanelItemWidget(QWidget):
         self._did_drag = False
         event.accept()
 
-    def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.double_clicked.emit(self.item_id)
-        super().mouseDoubleClickEvent(event)
-
     def contextMenuEvent(self, event):
+        if self.childAt(event.pos()) is None:
+            event.ignore()
+            return
         self.context_menu_requested.emit(self.item_id, event.globalPos())
 
 
@@ -488,9 +455,10 @@ class ClipboardPanel(QWidget):
     quit_requested = pyqtSignal()
     clear_history_requested = pyqtSignal()
     drag_to_app_requested = pyqtSignal(int, QPoint)
-    queue_select_requested = pyqtSignal(int)  # item_id — 해당 항목부터 최신까지 큐 설정
+    queue_select_requested = pyqtSignal(int)    # item_id — 해당 항목부터 최신까지 큐 설정
+    queue_deselect_requested = pyqtSignal(int)  # item_id — 큐 해제
     panel_hidden = pyqtSignal()  # 패널 숨겨질 때 emit
-    always_on_top_changed = pyqtSignal(bool)  # 항상 위에 상태 변경 → main이 DB 저장
+    auto_close_changed = pyqtSignal(bool)  # 자동닫기 상태 변경 → main이 DB 저장
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -512,12 +480,12 @@ class ClipboardPanel(QWidget):
         self._resize_start_pos = None
         self._resize_start_geometry = None
         self._pinned_collapsed = True
-        self._auto_close = True  # F4-9: 외부 클릭 시 자동 닫기
+        self._history_collapsed = False
+        self._auto_close = True  # 핀 비활성 시 외부 클릭으로 자동 닫기
         self._user_activated = False  # 사용자가 직접 열었는지 (vs 복사 팝업)
         self._paste_in_progress = False  # 패널 붙여넣기 중 자동닫기 방지
         self._ext_drag_active = False    # 외부 드래그 중 자동닫기 방지
         self._kbd_focus_id: Optional[int] = None  # 키보드 포커스된 항목 ID
-        self._always_on_top = True       # 항상 위에 토글 상태
         self._pin_btn: Optional[QPushButton] = None
         self._fade_anim: Optional[QPropertyAnimation] = None
 
@@ -559,58 +527,65 @@ class ClipboardPanel(QWidget):
         self._container.setStyleSheet(f"""
             #panelContainer {{
                 background-color: {COLORS['base']};
-                border: 1px solid {COLORS['surface1']};
-                border-radius: 12px;
+                border: 1.5px solid {COLORS['overlay0']};
+                border-radius: 10px;
             }}
         """)
 
         outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(
-            RESIZE_MARGIN, RESIZE_MARGIN, RESIZE_MARGIN, RESIZE_MARGIN
-        )
+        outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.addWidget(self._container)
 
         main_layout = QVBoxLayout(self._container)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(8)
 
-        # ── 헤더: 📌 + ✕ ──
+        # ── 헤더: 상태 레이블 + 📌 + ✕ ──
         header_row = QHBoxLayout()
-        header_row.setSpacing(6)
+        header_row.setSpacing(4)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         header_row.addWidget(spacer)
 
-        # 항상 위에 토글 버튼
-        self._pin_btn = QPushButton("📌")
+        # 붙여넣기 상태 레이블
+        self._status_label = QLabel()
+        self._status_label.setFixedHeight(24)
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._status_label.setStyleSheet(
+            f"color: {COLORS['teal']}; font-size: 11px; font-weight: 600; "
+            f"background: transparent; padding-right: 2px;"
+        )
+        self._status_label.hide()
+        header_row.addWidget(self._status_label)
+
+        # 항상 위에 토글 버튼 (Segoe MDL2 Assets: =PinnedFill, =Pin)
+        self._pin_btn = QPushButton()
         self._pin_btn.setFixedSize(24, 24)
         self._pin_btn.setCheckable(True)
-        self._pin_btn.setChecked(True)
+        self._pin_btn.setChecked(False)
         self._pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._pin_btn.setToolTip("항상 위에 고정")
-        self._pin_btn.setStyleSheet(self._pin_btn_style(active=True))
-        self._pin_btn.clicked.connect(self._toggle_always_on_top)
+        self._apply_pin_btn_state(active=False)  # 기본: 핀 비활성 = 자동닫기 ON
+        self._pin_btn.clicked.connect(self._toggle_auto_close)
         header_row.addWidget(self._pin_btn)
 
-        # 닫기 버튼
-        close_btn = QPushButton("×")
+        # 숨기기(최소화) 버튼
+        close_btn = QPushButton("−")
         close_btn.setFixedSize(24, 24)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.setStyleSheet(f"""
             QPushButton {{
-                background: {COLORS['red']};
-                color: {COLORS['crust']};
+                background: transparent;
+                color: {COLORS['subtext0']};
                 border: none;
-                font-size: 16px;
-                font-weight: 400;
-                font-family: 'Segoe UI', sans-serif;
+                font-size: 13px;
+                border-radius: 6px;
                 padding: 0;
-                padding-bottom: 1px;
-                border-radius: 12px;
             }}
             QPushButton:hover {{
-                background: {RED_HOVER};
+                background: {COLORS['red']};
+                color: {COLORS['crust']};
             }}
         """)
         close_btn.clicked.connect(self.hide)
@@ -764,6 +739,7 @@ class ClipboardPanel(QWidget):
 
     def show_near_cursor(self):
         """마우스 커서 근처(우하단 +16px)에 패널 표시. 화면 경계 초과 시 반전."""
+        self.resize(PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT)
         cursor_pos = QCursor.pos()
         screen = QApplication.screenAt(cursor_pos) or QApplication.primaryScreen()
         avail = screen.availableGeometry()
@@ -844,20 +820,6 @@ class ClipboardPanel(QWidget):
             pin_header_row.addWidget(pin_header_btn)
             pin_header_row.addStretch()
 
-            self._status_label = QLabel()
-            self._status_label.setFixedHeight(20)
-            self._status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self._status_label.setStyleSheet(
-                f"color: {COLORS['peach']}; font-size: 11px; font-weight: 600; "
-                f"background: transparent; padding-right: 4px;"
-            )
-            if self._total > 0:
-                self._status_label.setText(f"붙여넣기 {self._pointer}/{self._total}")
-                self._status_label.show()
-            else:
-                self._status_label.hide()
-            pin_header_row.addWidget(self._status_label)
-
             pin_header_wrapper = QWidget(sc)
             pin_header_wrapper.setLayout(pin_header_row)
             pin_header_wrapper.setStyleSheet("background: transparent;")
@@ -878,7 +840,7 @@ class ClipboardPanel(QWidget):
                         elif q_idx == self._pointer:
                             is_current_pin = True
                     widget = PanelItemWidget(
-                        item, i,
+                        item,
                         is_pinned=True,
                         is_current=is_current_pin,
                         is_done=is_done_pin,
@@ -897,17 +859,34 @@ class ClipboardPanel(QWidget):
             # ── 히스토리 섹션 헤더 ──
             filtered_history = self._history_items
 
+            hist_arrow = "▼" if not self._history_collapsed else "▶"
+            hist_header_text = f"{hist_arrow} 히스토리"
+
             hist_header_row = QHBoxLayout()
             hist_header_row.setContentsMargins(4, 0, 0, 0)
             hist_header_row.setSpacing(0)
 
-            hist_title = QLabel("\U0001f4cb 히스토리")
-            hist_title.setFixedHeight(20)
-            hist_title.setStyleSheet(
-                f"color: {COLORS['peach']}; font-size: 11px; font-weight: 600; "
-                f"background: transparent; padding-left: 2px;"
-            )
-            hist_header_row.addWidget(hist_title)
+            hist_header_btn = QPushButton(hist_header_text)
+            hist_header_btn.setFixedHeight(24)
+            fm = QFontMetrics(hist_header_btn.font())
+            hist_header_btn.setFixedWidth(fm.horizontalAdvance(hist_header_text) + 16)
+            hist_header_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            hist_header_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent;
+                    color: {COLORS['peach']};
+                    border: none;
+                    font-size: 11px;
+                    font-weight: 600;
+                    text-align: left;
+                    padding: 0 4px;
+                }}
+                QPushButton:hover {{
+                    color: {COLORS['peach']};
+                }}
+            """)
+            hist_header_btn.clicked.connect(self._toggle_history)
+            hist_header_row.addWidget(hist_header_btn)
             hist_header_row.addStretch()
 
             hist_header_wrapper = QWidget(sc)
@@ -915,28 +894,37 @@ class ClipboardPanel(QWidget):
             hist_header_wrapper.setStyleSheet("background: transparent;")
             self._items_layout.addWidget(hist_header_wrapper)
 
-            for i, item in enumerate(filtered_history, 1):
-                # 큐 상태 계산: 큐에 있는 항목이면 포인터 기준으로 current/done 판단
-                is_current = False
-                is_done = False
-                if item.id in self._queue_item_ids:
-                    q_idx = self._queue_item_ids.index(item.id)
-                    if q_idx < self._pointer:
-                        is_done = True
-                    elif q_idx == self._pointer:
-                        is_current = True
+            if not self._history_collapsed:
+                for i, item in enumerate(filtered_history, 1):
+                    # 큐 상태 계산: 큐에 있는 항목이면 포인터 기준으로 current/done 판단
+                    is_current = False
+                    is_done = False
+                    if item.id in self._queue_item_ids:
+                        q_idx = self._queue_item_ids.index(item.id)
+                        if q_idx < self._pointer:
+                            is_done = True
+                        elif q_idx == self._pointer:
+                            is_current = True
 
-                widget = PanelItemWidget(
-                    item, i,
-                    is_current=is_current,
-                    is_done=is_done,
-                    is_selected=item.id in self._selected_ids,
-                    parent=sc,
-                )
-                self._connect_item_signals(widget)
-                self._items_layout.addWidget(widget)
+                    widget = PanelItemWidget(
+                        item,
+                        is_current=is_current,
+                        is_done=is_done,
+                        is_selected=item.id in self._selected_ids,
+                        parent=sc,
+                    )
+                    self._connect_item_signals(widget)
+                    self._items_layout.addWidget(widget)
 
             self._items_layout.addStretch()
+
+            # 헤더 상태 레이블 동기화
+            if self._status_label:
+                if self._total > 0:
+                    self._status_label.setText(f"붙여넣기 {self._pointer}/{self._total}")
+                    self._status_label.show()
+                else:
+                    self._status_label.hide()
         finally:
             sc.setUpdatesEnabled(True)
 
@@ -945,65 +933,58 @@ class ClipboardPanel(QWidget):
         self._rebuild()
         self._scroll.verticalScrollBar().setValue(0)
 
-    def _pin_btn_style(self, active: bool) -> str:
-        if active:
-            return f"""
-                QPushButton {{
-                    background: {COLORS['surface1']};
-                    color: {COLORS['peach']};
-                    border: none;
-                    font-size: 13px;
-                    border-radius: 6px;
-                    padding: 0;
-                }}
-                QPushButton:hover {{
-                    background: {COLORS['surface2']};
-                }}
-            """
-        else:
-            return f"""
-                QPushButton {{
-                    background: transparent;
-                    color: {COLORS['overlay0']};
-                    border: none;
-                    font-size: 13px;
-                    border-radius: 6px;
-                    padding: 0;
-                }}
-                QPushButton:hover {{
-                    background: {COLORS['surface0']};
-                }}
-            """
+    def _toggle_history(self):
+        self._history_collapsed = not self._history_collapsed
+        self._rebuild()
 
-    def _apply_always_on_top(self, value: bool):
-        """SetWindowPos로 TOPMOST 플래그만 변경 — 창 재생성 없이 깜빡임 방지"""
+    def _apply_pin_btn_state(self, active: bool):
+        """핀 버튼 글리프·색상 동시 업데이트 — Segoe MDL2 Assets"""
+        if not self._pin_btn:
+            return
+        #  = PinnedFill (활성),   = Pin (비활성)
+        self._pin_btn.setText("" if active else "")
+        color = COLORS["teal"] if active else COLORS["subtext0"]
+        self._pin_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {color};
+                border: none;
+                font-size: 13px;
+                font-family: 'Segoe MDL2 Assets';
+                border-radius: 6px;
+                padding: 0;
+            }}
+            QPushButton:hover {{
+                background: {COLORS["surface1"]};
+            }}
+        """)
+
+
+    def _set_always_on_top(self):
+        """항상 최상단 고정 — 창 생성 후 1회 호출"""
         hwnd = ctypes.wintypes.HWND(int(self.winId()))
-        insert_after = _HWND_TOPMOST if value else _HWND_NOTOPMOST
         ctypes.windll.user32.SetWindowPos(
-            hwnd, insert_after, 0, 0, 0, 0,
+            hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
             _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE,
         )
 
-    def _toggle_always_on_top(self, checked: bool):
-        self._always_on_top = checked
-        if self._pin_btn:
-            self._pin_btn.setStyleSheet(self._pin_btn_style(active=checked))
-        self._apply_always_on_top(checked)
-        self.always_on_top_changed.emit(checked)
+    def _toggle_auto_close(self, checked: bool):
+        # 핀 활성(checked=True) = 자동닫기 OFF
+        self._auto_close = not checked
+        self._apply_pin_btn_state(active=checked)
+        self.auto_close_changed.emit(self._auto_close)
 
-    def set_always_on_top(self, value: bool):
-        """외부(main.py)에서 DB 설정값 적용 시 호출. 창 가시성은 변경하지 않음."""
-        self._always_on_top = value
+    def set_auto_close(self, value: bool):
+        """외부(main.py)에서 DB 설정값 적용 시 호출"""
+        self._auto_close = value
         if self._pin_btn:
-            self._pin_btn.setChecked(value)
-            self._pin_btn.setStyleSheet(self._pin_btn_style(active=value))
-        self._apply_always_on_top(value)
+            pin_active = not value
+            self._pin_btn.setChecked(pin_active)
+            self._apply_pin_btn_state(active=pin_active)
 
     def _connect_item_signals(self, widget: PanelItemWidget):
         widget.clicked.connect(self._on_item_clicked)
-        widget.double_clicked.connect(self._on_item_double_clicked)
         widget.context_menu_requested.connect(self._on_item_context_menu)
-        widget.delete_clicked.connect(self._on_item_delete)
         widget.external_drag_paste.connect(self._on_item_external_drag_paste)
 
     def _on_item_external_drag_paste(self, item_id: int, cursor_pos: QPoint):
@@ -1062,17 +1043,6 @@ class ClipboardPanel(QWidget):
         for idx in range(start, end + 1):
             self._selected_ids.add(ids[idx])
 
-    def _on_item_double_clicked(self, item_id: int):
-        """더블클릭 — 이미지: 미리보기 팝업 / 텍스트: 텍스트 미리보기 팝업 토글"""
-        item = self._find_item(item_id)
-        if not item:
-            return
-        if item.content_type == "image":
-            self.preview_image_requested.emit(item_id, QCursor.pos())
-        else:
-            text = item.text_content or item.preview_text or ""
-            TextPreviewPopup.instance().toggle_preview(text, QCursor.pos())
-
     def _on_item_delete(self, item_id: int):
         for i in range(self._items_layout.count()):
             widget = self._items_layout.itemAt(i).widget()
@@ -1102,40 +1072,51 @@ class ClipboardPanel(QWidget):
             QMenu::item:selected {{
                 background-color: {COLORS['surface1']};
             }}
-            QMenu::separator {{
-                height: 1px;
-                background: {COLORS['surface1']};
-                margin: 4px 8px;
-            }}
         """)
 
-        queue_action = menu.addAction("🔢 큐에 추가")
-        queue_action.triggered.connect(lambda: self.queue_select_requested.emit(item_id))
-
-        menu.addSeparator()
-
-        if item.is_pinned:
-            unpin_action = menu.addAction("고정메모 해제")
-            unpin_action.triggered.connect(lambda: self.unpin_item_requested.emit(item_id))
-        else:
-            pin_action = menu.addAction("고정메모")
-            pin_action.triggered.connect(lambda: self.pin_item_requested.emit(item_id))
-
-        copy_action = menu.addAction("\U0001f4cb 복사")
-        copy_action.triggered.connect(lambda: self._do_copy(item))
-
-        if item.content_type != "image":
-            edit_action = menu.addAction("\u270f\ufe0f 수정")
-            edit_action.triggered.connect(lambda: self._on_edit_item(item))
-        else:
-            preview_action = menu.addAction("\U0001f50d 미리보기")
+        if item.content_type == "image":
+            preview_action = menu.addAction("1  미리보기")
             preview_action.triggered.connect(
                 lambda: self.preview_image_requested.emit(item_id, pos)
             )
+        else:
+            _text = item.text_content or item.preview_text or ""
+            preview_action = menu.addAction("1  미리보기")
+            preview_action.triggered.connect(
+                lambda checked=False, t=_text: TextPreviewPopup.instance().toggle_preview(t, QCursor.pos())
+            )
+
+        if item_id in self._queue_item_ids:
+            queue_action = menu.addAction("2  큐 해제")
+            queue_action.triggered.connect(lambda: self.queue_deselect_requested.emit(item_id))
+        else:
+            queue_action = menu.addAction("2  큐에 추가")
+            queue_action.triggered.connect(lambda: self.queue_select_requested.emit(item_id))
 
         menu.addSeparator()
 
-        delete_action = menu.addAction("\U0001f5d1 삭제")
+        copy_action = menu.addAction("3  복사")
+        copy_action.triggered.connect(lambda: self._do_copy(item))
+
+        if item.content_type != "image":
+            edit_action = menu.addAction("4  수정")
+            edit_action.triggered.connect(lambda: self._on_edit_item(item))
+            pin_num = "5"
+            delete_num = "6"
+        else:
+            pin_num = "4"
+            delete_num = "5"
+
+        if item.is_pinned:
+            unpin_action = menu.addAction(f"{pin_num}  고정 해제")
+            unpin_action.triggered.connect(lambda: self.unpin_item_requested.emit(item_id))
+        else:
+            pin_action = menu.addAction(f"{pin_num}  고정추가")
+            pin_action.triggered.connect(lambda: self.pin_item_requested.emit(item_id))
+
+        menu.addSeparator()
+
+        delete_action = menu.addAction(f"{delete_num}  삭제")
         delete_action.triggered.connect(lambda: self.delete_item_requested.emit(item_id))
 
         menu.exec(pos)
@@ -1431,10 +1412,9 @@ class ClipboardPanel(QWidget):
     # ── F4-9: 외부 클릭 시 자동 닫기 ──
 
     def changeEvent(self, event):
-        """창 비활성화 시 자동 닫기 (사용자가 직접 연 경우만, 항상 위에 활성 시 닫지 않음)"""
+        """창 비활성화 시 자동 닫기 (핀 비활성 상태이고 사용자가 직접 연 경우만)"""
         if (event.type() == QEvent.Type.ActivationChange
                 and self._auto_close
-                and not self._always_on_top
                 and self._user_activated
                 and not self._paste_in_progress
                 and not self._ext_drag_active
@@ -1446,6 +1426,7 @@ class ClipboardPanel(QWidget):
     def showEvent(self, event):
         self._cursor_timer.start()
         super().showEvent(event)
+        self._set_always_on_top()
         QTimer.singleShot(0, self.setFocus)
 
     def hideEvent(self, event):
@@ -1550,9 +1531,12 @@ class ClipboardPanel(QWidget):
                 break
 
     def _kbd_activate(self):
-        """Enter: 포커스 항목에 더블클릭 동작 실행"""
-        if self._kbd_focus_id is not None:
-            self._on_item_double_clicked(self._kbd_focus_id)
+        """Enter: 포커스 항목 붙여넣기"""
+        if self._kbd_focus_id is None:
+            return
+        item = self._find_item(self._kbd_focus_id)
+        if item:
+            self.paste_item_requested.emit(item)
 
     def _kbd_delete(self):
         """Delete: 포커스 항목 삭제 후 포커스를 다음 항목으로 이동"""
@@ -1596,11 +1580,8 @@ class ClipboardPanel(QWidget):
             }}
         """)
 
-        close_action = menu.addAction("패널 닫기")
+        close_action = menu.addAction("패널 숨기기")
         close_action.triggered.connect(self.hide)
-
-        settings_action = menu.addAction("설정")
-        settings_action.triggered.connect(self.open_settings_requested.emit)
 
         menu.addSeparator()
 
@@ -1609,7 +1590,10 @@ class ClipboardPanel(QWidget):
 
         menu.addSeparator()
 
-        quit_action = menu.addAction("종료")
+        settings_action = menu.addAction("설정")
+        settings_action.triggered.connect(self.open_settings_requested.emit)
+
+        quit_action = menu.addAction("PasteFlow 종료")
         quit_action.triggered.connect(self.quit_requested.emit)
 
         menu.exec(event.globalPos())

@@ -49,7 +49,7 @@ class TrayIcon(QObject):
         menu.addAction("📋 패널 열기", self.panel_toggle_requested.emit)
         menu.addSeparator()
         menu.addAction("⚙️ 설정", self.settings_requested.emit)
-        menu.addAction("❌ 종료", self.quit_requested.emit)
+        menu.addAction("❌ PasteFlow 종료", self.quit_requested.emit)
         self._tray.setContextMenu(menu)
 
     def _on_activated(self, reason):

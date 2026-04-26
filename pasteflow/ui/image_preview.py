@@ -2,13 +2,17 @@
 import io
 
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QToolButton,
-    QVBoxLayout, QHBoxLayout, QApplication,
+    QWidget, QFrame, QLabel, QToolButton,
+    QVBoxLayout, QHBoxLayout, QApplication, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QPixmap
 
-from pasteflow.ui.theme import BASE as _BG, SURFACE1 as _BORDER, TEXT as _TEXT, SURFACE0 as _SURFACE0, PEACH as _PEACH
+from pasteflow.ui.theme import (
+    BASE as _BG, MANTLE as _MANTLE, CRUST as _CRUST,
+    SURFACE0 as _SURFACE0, SURFACE1 as _BORDER,
+    TEXT as _TEXT, PEACH as _PEACH, RED as _RED,
+)
 
 PREVIEW_MAX_W = 640
 PREVIEW_MAX_H = 480
@@ -57,21 +61,41 @@ class ImagePreviewPopup(QWidget):
         self._scale_factor: float = 1.0
 
         self.setStyleSheet(f"""
-            QWidget {{
+            QWidget#popup_root {{
                 background-color: {_BG};
                 border: 1px solid {_BORDER};
                 border-radius: 6px;
+            }}
+            QFrame#top_bar_frame {{
+                background-color: {_SURFACE0};
+                border: none;
+                border-bottom: 1px solid {_BORDER};
+                border-top-left-radius: 5px;
+                border-top-right-radius: 5px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
+            }}
+            QWidget#img_wrapper {{
+                background: transparent;
+                border: none;
             }}
             QToolButton#close_btn {{
                 color: {_TEXT};
                 background: transparent;
                 border: none;
-                font-size: 14px;
+                font-size: 16px;
                 font-weight: bold;
                 border-radius: 3px;
             }}
             QToolButton#close_btn:hover {{
-                background-color: {_SURFACE0};
+                background-color: {_RED};
+                color: {_CRUST};
+            }}
+            QLabel#zoom_label {{
+                color: {_TEXT};
+                font-size: 11px;
+                background: transparent;
+                border: none;
             }}
             QLabel#image_label {{
                 background: transparent;
@@ -79,34 +103,47 @@ class ImagePreviewPopup(QWidget):
             }}
         """)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(6, 4, 6, 6)
-        root.setSpacing(2)
+        self.setObjectName("popup_root")
 
-        # 상단 바: 줌 레벨 + × 닫기 버튼
-        top_bar = QHBoxLayout()
-        top_bar.setContentsMargins(4, 0, 0, 0)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── 상단 바: 다크 스트립 ──
+        top_bar_frame = QFrame()
+        top_bar_frame.setObjectName("top_bar_frame")
+        top_bar_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        top_bar = QHBoxLayout(top_bar_frame)
+        top_bar.setContentsMargins(8, 2, 4, 2)
+        top_bar.setSpacing(4)
 
         self._zoom_label = QLabel("100%")
-        self._zoom_label.setStyleSheet(
-            f"color: {_TEXT}; font-size: 11px; background: transparent; border: none;"
-        )
+        self._zoom_label.setObjectName("zoom_label")
         top_bar.addWidget(self._zoom_label)
         top_bar.addStretch()
 
         close_btn = QToolButton()
         close_btn.setObjectName("close_btn")
         close_btn.setText("×")
-        close_btn.setFixedSize(18, 18)
+        close_btn.setFixedSize(28, 28)
         close_btn.clicked.connect(self.close)
         top_bar.addWidget(close_btn)
-        root.addLayout(top_bar)
 
-        # 이미지 표시 레이블
+        root.addWidget(top_bar_frame)
+
+        # ── 이미지 영역 ──
+        img_wrapper = QWidget()
+        img_wrapper.setObjectName("img_wrapper")
+        img_layout = QVBoxLayout(img_wrapper)
+        img_layout.setContentsMargins(6, 4, 6, 6)
+        img_layout.setSpacing(0)
+
         self._image_label = QLabel()
         self._image_label.setObjectName("image_label")
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(self._image_label)
+        img_layout.addWidget(self._image_label)
+
+        root.addWidget(img_wrapper)
 
         self.hide()
 
@@ -156,7 +193,7 @@ class ImagePreviewPopup(QWidget):
         if delta == 0:
             return
         factor = 1.1 if delta > 0 else (1 / 1.1)
-        self._scale_factor = max(0.25, min(4.0, self._scale_factor * factor))
+        self._scale_factor *= factor
         self._apply_scale()
 
     def _apply_scale(self):

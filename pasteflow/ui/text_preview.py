@@ -7,15 +7,13 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QPoint, QEvent
 
 from pasteflow.ui.theme import (
-    BASE as _BG, SURFACE1 as _BORDER, TEXT as _TEXT,
-    SURFACE0 as _SURFACE0,
+    BASE as _BG, CRUST as _CRUST, SURFACE0 as _SURFACE0,
+    SURFACE1 as _BORDER, TEXT as _TEXT, RED as _RED,
 )
 
 PREVIEW_MAX_W = 360
 PREVIEW_MAX_H = 300
 _BASE_FONT_SIZE = 12
-_SCALE_MIN = 0.75
-_SCALE_MAX = 3.0
 _SCALE_STEP = 1.3
 
 
@@ -77,28 +75,29 @@ class TextPreviewPopup(QWidget):
                 color: {_TEXT};
                 background: transparent;
                 border: none;
-                font-size: 14px;
+                font-size: 16px;
                 font-weight: bold;
                 border-radius: 3px;
             }}
             QToolButton#close_btn:hover {{
-                background-color: {_SURFACE0};
+                background-color: {_RED};
+                color: {_CRUST};
             }}
         """)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 4, 6, 6)
+        root.setContentsMargins(6, 0, 0, 6)
         root.setSpacing(2)
 
         # 헤더: 드래그 이동 + 줌 레벨 + × 닫기
         header = _DragHeader(self)
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(4, 0, 0, 0)
+        header_layout.setContentsMargins(6, 0, 0, 0)
         header_layout.setSpacing(0)
 
         self._zoom_label = QLabel("100%")
         self._zoom_label.setStyleSheet(
-            f"color: {_TEXT}; font-size: 11px; background: transparent; border: none;"
+            f"color: {_TEXT}; font-size: 13px; background: transparent; border: none;"
         )
         header_layout.addWidget(self._zoom_label)
         header_layout.addStretch()
@@ -106,7 +105,7 @@ class TextPreviewPopup(QWidget):
         close_btn = QToolButton()
         close_btn.setObjectName("close_btn")
         close_btn.setText("×")
-        close_btn.setFixedSize(18, 18)
+        close_btn.setFixedSize(32, 32)
         close_btn.clicked.connect(self.hide)
         header_layout.addWidget(close_btn)
 
@@ -159,7 +158,7 @@ class TextPreviewPopup(QWidget):
             delta = event.angleDelta().y()
             if delta != 0:
                 factor = _SCALE_STEP if delta > 0 else (1 / _SCALE_STEP)
-                self._scale_factor = max(_SCALE_MIN, min(_SCALE_MAX, self._scale_factor * factor))
+                self._scale_factor *= factor
                 self._apply_scale()
                 self._label.adjustSize()
                 self._resize_to_content()
@@ -215,7 +214,7 @@ class TextPreviewPopup(QWidget):
         max_w = round(PREVIEW_MAX_W * self._scale_factor)
         max_h = round(PREVIEW_MAX_H * self._scale_factor)
         w = min(max_w, self._label.sizeHint().width() + 28)
-        h = min(max_h, self._label.sizeHint().height() + 52)
+        h = min(max_h, self._label.sizeHint().height() + 60)
         self.resize(w, h)
 
     def _place_near(self, global_pos: QPoint):
