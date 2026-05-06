@@ -1,0 +1,5 @@
+PyQt6
+pywin32
+Pillow
+winocr          # Windows WinRT OCR (winrt-* 패키지 포함, Python 3.14+ 지원)
+# anthropic     # AI API OCR 사용 시 별도 설치 (lazy import)
