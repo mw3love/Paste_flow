@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal
-from PyQt6.QtGui import QPainter, QPixmap, QColor, QPen
+from PyQt6.QtGui import QPainter, QPixmap, QColor, QPen, QFont
 
 from pasteflow.ui.theme import TEAL
 
@@ -40,6 +40,7 @@ class OcrOverlay(QWidget):
         self._start: QPoint | None = None
         self._end: QPoint | None = None
         self._dragging = False
+        self._hint_visible = True  # 드래그 시작 전까지 안내 텍스트 표시
 
     # ── public ──────────────────────────────────────────────────────────────
 
@@ -47,22 +48,38 @@ class OcrOverlay(QWidget):
         """가상 데스크톱을 캡처한 뒤 오버레이를 표시한다.
 
         캡처를 먼저 수행해야 오버레이가 화면을 덮기 전 스크린샷을 확보한다.
+        각 QScreen별 native 해상도로 캡처 후 가상 데스크톱 좌표 기준으로 합성한다
+        (DPI 배율이 다른 다중 모니터 환경에서 좌표 어긋남 방지).
         """
-        screen = QApplication.primaryScreen()
-        vg = screen.virtualGeometry()
-
         # 이전 상태 초기화 및 오버레이 숨기기 (재사용 시 이전 드로잉 제거)
         self._start = None
         self._end = None
         self._dragging = False
+        self._hint_visible = True
         self.hide()
         QApplication.processEvents()
 
-        # 전체 가상 데스크톱 캡처 (vg 원점이 음수일 수 있음 — 다중 모니터 좌측 배치)
-        self._screenshot = screen.grabWindow(
-            0, vg.x(), vg.y(), vg.width(), vg.height()
-        )
+        # 가상 데스크톱 전체 범위 (논리 좌표)
+        vg = QApplication.primaryScreen().virtualGeometry()
+        screens = QApplication.screens()
 
+        # 가장 높은 DPR 기준으로 합성 캔버스 생성
+        max_dpr = max((s.devicePixelRatio() for s in screens), default=1.0)
+        combined = QPixmap(int(vg.width() * max_dpr), int(vg.height() * max_dpr))
+        combined.setDevicePixelRatio(max_dpr)
+        combined.fill(Qt.GlobalColor.black)
+
+        painter = QPainter(combined)
+        for screen in screens:
+            sg = screen.geometry()
+            pm = screen.grabWindow(0)  # 해당 화면 native 해상도
+            painter.drawPixmap(
+                QRect(sg.x() - vg.x(), sg.y() - vg.y(), sg.width(), sg.height()),
+                pm,
+            )
+        painter.end()
+
+        self._screenshot = combined
         self.setGeometry(vg)
         self.show()
         self.raise_()
@@ -103,12 +120,44 @@ class OcrOverlay(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(sel.adjusted(0, 0, -1, -1))
 
+        # 안내 텍스트 — 드래그 전에만 표시
+        if self._hint_visible:
+            hint = "드래그하여 영역 선택  ·  ESC 또는 우클릭으로 취소"
+            font = QFont()
+            font.setPointSize(13)
+            font.setBold(True)
+            p.setFont(font)
+
+            fm = p.fontMetrics()
+            text_w = fm.horizontalAdvance(hint)
+            text_h = fm.height()
+            pad_x, pad_y = 16, 8
+            rect_w = text_w + pad_x * 2
+            rect_h = text_h + pad_y * 2
+            rx = (self.width() - rect_w) // 2
+            ry = 32
+
+            # 배경 박스 (반투명 검정)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 160))
+            p.drawRoundedRect(rx, ry, rect_w, rect_h, 6, 6)
+
+            # 흰색 텍스트
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(rx + pad_x, ry + pad_y + fm.ascent(), hint)
+
         p.end()
 
     # ── mouse ─────────────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            # 우클릭 → 취소 (Phase 3-2)
+            self.close()
+            self.cancelled.emit()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
+            self._hint_visible = False  # 드래그 시작 → 안내 텍스트 숨김
             self._start = event.position().toPoint()
             self._end = self._start
             self._dragging = True
@@ -159,7 +208,9 @@ class OcrOverlay(QWidget):
     def _sel_rect(self) -> QRect:
         if self._start is None or self._end is None:
             return QRect()
-        return QRect(self._start, self._end).normalized()
+        r = QRect(self._start, self._end).normalized()
+        # 화면 밖으로 나가지 않도록 위젯 경계 안으로 클램프
+        return r.intersected(self.rect())
 
 
 # ── 단독 실행 검증 ─────────────────────────────────────────────────────────────

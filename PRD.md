@@ -25,7 +25,8 @@ Windows에서 복사한 항목들을 **복사한 순서대로 자동으로 순�
 | 텍스트, 이미지, Rich Text, HTML | 파일/폴더 경로 복사 |
 | 노션 복사 내용 서식 보존 | 노션 API 연동 |
 | 로컬 SQLite 영구 저장 | 클라우드 동기화 |
-| 단일 .exe 배포 | OCR (이미지 내 텍스트) |
+| 단일 .exe 배포 | Mac / Linux |
+| OCR (화면 텍스트 인식, Windows WinRT) | Claude Vision AI OCR (세션 4 예정) |
 
 ### 1.4 이전 버전 교훈
 > ⚠️ 이전 2회 시도(ClipStack, ClipFlow)에서 **순차 붙여넣기가 한 번도 정상 동작하지 않았음**.
@@ -183,13 +184,13 @@ Windows에서 복사한 항목들을 **복사한 순서대로 자동으로 순�
 |----|---------|
 | F3-1 | 클립보드 변경(복사) 발생 시 패널이 자동으로 표시됨 |
 | F3-2 | 패널 자동 표시 시 포커스를 빼앗지 않음 (`SW_SHOWNOACTIVATE`) — 현재 작업 방해 없음 |
-| F3-3 | 사용자가 Alt+V로 직접 패널을 열 경우에는 포커스 이동 (활성 창으로 동작) |
+| F3-3 | 사용자가 `ctrl+space`(기본값, 설정 가능)로 직접 패널을 열 경우에는 포커스 이동 (활성 창으로 동작) |
 
 ### F4. 전체 클립보드 패널
 
 | ID | 요구사항 |
 |----|---------|
-| F4-1 | 단축키(기본: `Alt+V`)로 팝업/닫기 토글 |
+| F4-1 | 단축키(기본: `ctrl+space`, 설정 가능)로 팝업/닫기 토글 |
 | F4-2 | 시스템 트레이 아이콘 클릭으로 팝업 |
 | F4-3 | 복사 발생 시 패널이 자동으로 팝업 (F3-1 참고) |
 | F4-4 | 패널 구성: 상단 고정 섹션 + 하단 히스토리 섹션 |
@@ -198,7 +199,7 @@ Windows에서 복사한 항목들을 **복사한 순서대로 자동으로 순�
 | F4-7 | `Shift+클릭`: 범위 선택 (연속) |
 | F4-8 | 항목 우클릭 컨텍스트 메뉴: 붙여넣기 / 고정·해제 / 복사 / 삭제 |
 | F4-9 | 패널 외부 클릭 시 자동 닫기 (설정으로 비활성화 가능) |
-| F4-10 | 상단 검색 박스로 히스토리 텍스트 검색 |
+| ~~F4-10~~ | ~~상단 검색 박스로 히스토리 텍스트 검색~~ *(의도적으로 제거됨 — 헤더 단순화로 대체)* |
 | F4-11 | 텍스트 항목: 최대 2줄 미리보기, 너무 긴 경우 말줄임(`...`) 처리 |
 | F4-12 | 이미지 항목: 썸네일(80×60px)로 직관적 표시, 마우스 오버 시 확대 미리보기 |
 
@@ -206,8 +207,8 @@ Windows에서 복사한 항목들을 **복사한 순서대로 자동으로 순�
 
 | ID | 요구사항 |
 |----|---------|
-| F5-1 | `Alt+1`~`Alt+9`: 히스토리 1~9번 항목을 클립보드에 설정 후 즉시 붙여넣기 (패널 닫힌 상태에서도 동작) |
-| F5-2 | 패널에서 항목 더블클릭: 해당 항목을 클립보드에 설정 후 이전 포커스 앱에 붙여넣기, **패널 유지** |
+| ~~F5-1~~ | ~~`Alt+1`~`Alt+9`: 히스토리 1~9번 항목을 클립보드에 설정 후 즉시 붙여넣기~~ *(의도적으로 제거됨)* |
+| F5-2 | 패널에서 항목 **단일클릭**: 해당 항목을 즉시 붙여넣기 / **더블클릭**: 미리보기(이미지 → 팝업, 텍스트 → 팝업 토글) |
 | F5-3 | 개별 붙여넣기는 순차 큐 포인터에 영향을 주지 않음 |
 | F5-4 | 붙여넣기는 대상 앱에 포커스를 넘긴 후 실행 (`SendInput` API 사용) |
 
@@ -428,12 +429,15 @@ pasteflow/
 ├── main.py                 # 진입점, 앱 초기화 및 모듈 오케스트레이션
 ├── clipboard_monitor.py    # 클립보드 감시 (WM_CLIPBOARDUPDATE)
 ├── paste_queue.py          # 순차 붙여넣기 큐 & 포인터 관리 (핵심)
-├── paste_interceptor.py    # Ctrl+V 감지 → 클립보드 교체 실행 (핵심)
-├── hotkey_manager.py       # 글로벌 단축키 등록/해제
+├── paste_interceptor.py    # Ctrl+Shift+V 감지 → 클립보드 교체 실행 (핵심)
+├── hotkey_manager.py       # 글로벌 단축키 등록/해제 유틸 (현재 미사용)
 ├── database.py             # SQLite CRUD
 ├── models.py               # ClipboardItem 데이터 모델
 └── ui/
     ├── panel.py            # 클립보드 패널 (기본 UI)
+    ├── image_preview.py    # 이미지 미리보기 팝업 (다중 창 지원)
+    ├── text_preview.py     # 텍스트 미리보기 팝업 (싱글턴)
+    ├── toast.py            # 토스트 알림 (시작 알림)
     ├── settings_dialog.py  # 설정 화면
     └── tray.py             # 시스템 트레이
 ```
@@ -442,17 +446,19 @@ pasteflow/
 
 ```sql
 CREATE TABLE clipboard_items (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    content_type TEXT NOT NULL,       -- 'text' | 'image' | 'richtext' | 'html'
-    text_content TEXT,                -- 텍스트 내용 (text, richtext, html)
-    image_data   BLOB,               -- 원본 이미지 바이너리
-    html_content TEXT,                -- HTML 원본 (노션 등)
-    rtf_content  TEXT,                -- RTF 원본
-    preview_text TEXT,                -- 미리보기 텍스트 (최대 200자)
-    thumbnail    BLOB,               -- 이미지 썸네일 (80×60 PNG)
-    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-    is_pinned    BOOLEAN DEFAULT 0,
-    pin_order    INTEGER DEFAULT 0
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    content_type  TEXT NOT NULL,       -- 'text' | 'image' | 'richtext' | 'html'
+    text_content  TEXT,                -- 텍스트 내용 (text, richtext, html)
+    image_data    BLOB,                -- 원본 이미지 바이너리
+    html_content  TEXT,                -- HTML 원본 (노션 등)
+    rtf_content   TEXT,                -- RTF 원본
+    preview_text  TEXT,                -- 미리보기 텍스트 (최대 200자)
+    thumbnail     BLOB,                -- 이미지 썸네일 (80×60 PNG)
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    is_pinned     BOOLEAN DEFAULT 0,
+    pin_order     INTEGER DEFAULT 0,
+    extra_formats TEXT,                -- {format_id: base64} 앱 전용 포맷 JSON (노션 등)
+    history_order INTEGER DEFAULT 0   -- 비고정 항목 표시 순서 (DB 전용 컬럼)
 );
 
 CREATE TABLE settings (
@@ -558,22 +564,16 @@ class PasteInterceptor:
 
 ```json
 {
-  "hotkey_panel_toggle": "alt+v",
-  "hotkey_item_1": "alt+1",
-  "hotkey_item_2": "alt+2",
-  "hotkey_item_3": "alt+3",
-  "hotkey_item_4": "alt+4",
-  "hotkey_item_5": "alt+5",
-  "hotkey_item_6": "alt+6",
-  "hotkey_item_7": "alt+7",
-  "hotkey_item_8": "alt+8",
-  "hotkey_item_9": "alt+9",
+  "hotkey_panel_toggle": "ctrl+space",
   "history_max": 50,
-  "autostart": false,
+  "auto_start": false,
   "panel_auto_close": true,
+  "panel_always_on_top": true,
   "panel_geometry": null
 }
 ```
+
+> ⚠️ `hotkey_item_1`~`hotkey_item_9` (`Alt+1~9`) 단축키는 **의도적으로 제거**됨.
 
 ---
 
@@ -597,40 +597,36 @@ class PasteInterceptor:
 ### Phase 1 — MVP (순차 붙여넣기 동작 검증)
 > 🎯 목표: **순차 붙여넣기가 100% 정상 동작하는 것을 먼저 검증**
 
-- [ ] 클립보드 모니터링 (F1)
-- [ ] 순차 붙여넣기 큐 & 포인터 (F2)
-- [ ] Ctrl+Shift+V 클립보드 교체 인터셉터 (F2)
-- [ ] 패널 자동 표시 (F3 — 복사 시 SW_SHOWNOACTIVATE)
-- [ ] 시스템 트레이 (F9 — 최소 기능)
+- [x] 클립보드 모니터링 (F1)
+- [x] 순차 붙여넣기 큐 & 포인터 (F2)
+- [x] Ctrl+Shift+V 클립보드 교체 인터셉터 (F2)
+- [x] 패널 자동 표시 (F3 — 복사 시 SW_SHOWNOACTIVATE)
+- [x] 시스템 트레이 (F9 — 최소 기능)
 
 ### Phase 2 — 핵심 UX
-- [ ] 전체 클립보드 패널 (F4)
-- [ ] 항목별 단축키 붙여넣기 (F5)
-- [ ] 고정 기능 (F7)
-- [ ] 이미지 썸네일 (F8)
-- [ ] SQLite 영구 저장
+- [x] 전체 클립보드 패널 (F4)
+- [x] 항목별 붙여넣기 (F5 — 단일클릭/우클릭 메뉴)
+- [x] 고정 기능 (F7)
+- [x] 이미지 썸네일 (F8)
+- [x] SQLite 영구 저장
 
 ### Phase 3 — 완성도
-- [ ] 다중 선택 & 복사 (F6)
-- [ ] 검색 기능 (F4-10)
-- [ ] 설정 화면 UI (F10)
-- [ ] 디자인 완성 (색상, 간격, 애니메이션 등)
-- [ ] Windows 자동 시작 등록
-- [ ] PyInstaller 빌드
+- [x] 다중 선택 & 복사 (F6)
+- [x] ~~검색 기능 (F4-10)~~ *(의도적으로 제거 — 헤더 단순화)*
+- [x] 설정 화면 UI (F10)
+- [x] 디자인 완성 (Catppuccin Mocha 테마)
+- [x] Windows 자동 시작 등록
+- [x] PyInstaller 빌드 (`build.bat` + `PasteFlow.spec`)
 
 ---
 
 ## 9. 기본 단축키
 
-| 기능 | 기본 단축키 |
-|------|------------|
-| 전체 패널 토글 | `Alt+V` |
-| 항목 1번 즉시 붙여넣기 | `Alt+1` |
-| 항목 2번 즉시 붙여넣기 | `Alt+2` |
-| ... | ... |
-| 항목 9번 즉시 붙여넣기 | `Alt+9` |
-
-> 참고: 순차 붙여넣기는 Ctrl+Shift+V로 동작하며 별도 단축키 불필요
+| 기능 | 기본 단축키 | 비고 |
+|------|------------|------|
+| 순차 붙여넣기 | `Ctrl+Shift+V` | 고정 단축키 |
+| 전체 패널 토글 | `ctrl+space` | 설정에서 변경 가능 |
+| ~~항목 1~9번 즉시 붙여넣기~~ | ~~`Alt+1`~`Alt+9`~~ | *(의도적으로 제거됨)* |
 
 ---
 

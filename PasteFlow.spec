@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 import importlib.util, pathlib
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 def _get_version():
     spec = importlib.util.spec_from_file_location(
@@ -13,11 +14,22 @@ APP_VERSION = _get_version()
 
 block_cipher = None
 
+# winocr/winrt 의존성 수집 — 빌드 환경에 설치되지 않은 경우 빈 리스트
+try:
+    winocr_datas, winocr_binaries, winocr_hiddenimports = collect_all('winocr')
+except Exception:
+    winocr_datas, winocr_binaries, winocr_hiddenimports = [], [], []
+
+try:
+    winrt_hiddenimports = collect_submodules('winrt')
+except Exception:
+    winrt_hiddenimports = []
+
 a = Analysis(
     ['run.pyw'],
     pathex=[],
-    binaries=[],
-    datas=[],
+    binaries=winocr_binaries,
+    datas=winocr_datas,
     hiddenimports=[
         # pywin32
         'win32api',
@@ -41,6 +53,13 @@ a = Analysis(
         'sqlite3',
         'ctypes',
         'ctypes.wintypes',
+        # winocr / winrt (OCR 기능)
+        *winocr_hiddenimports,
+        *winrt_hiddenimports,
+        'winrt.windows.media.ocr',
+        'winrt.windows.globalization',
+        'winrt.windows.graphics.imaging',
+        'winrt.windows.storage.streams',
     ],
     hookspath=[],
     hooksconfig={},

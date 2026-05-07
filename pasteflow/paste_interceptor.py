@@ -31,6 +31,7 @@ _GMEM_MOVEABLE = 0x0002
 # 저수준 키보드 훅 상수
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
+WM_SYSKEYDOWN = 0x0104  # Alt 조합 키(Alt+F1 등) — Alt 누른 채 다른 키 누를 때
 VK_V = 0x56
 VK_C = 0x43
 VK_CONTROL = 0x11
@@ -189,12 +190,14 @@ class PasteInterceptor:
         on_paste: Optional[Callable[[ClipboardItem], None]] = None,
         get_full_item: Optional[Callable[[int], Optional[ClipboardItem]]] = None,
         on_toggle_panel: Optional[Callable[[], None]] = None,
+        on_ocr_trigger: Optional[Callable[[], None]] = None,
     ):
         self.queue = paste_queue
         self.monitor = clipboard_monitor
         self.on_paste = on_paste
         self.get_full_item = get_full_item
         self.on_toggle_panel = on_toggle_panel
+        self.on_ocr_trigger = on_ocr_trigger
         self._hook = None
         self._thread: Optional[threading.Thread] = None
         self._hook_thread_id: int = 0
@@ -206,6 +209,11 @@ class PasteInterceptor:
         self._panel_need_ctrl: bool = False
         self._panel_need_shift: bool = False
         self._panel_need_alt: bool = False
+        # OCR 단축키 (패널 토글과 동일 구조)
+        self._ocr_vk: int = 0
+        self._ocr_need_ctrl: bool = False
+        self._ocr_need_shift: bool = False
+        self._ocr_need_alt: bool = False
         # 콜백 참조 유지 (GC 방지)
         self._hook_proc = HOOKPROC(self._low_level_keyboard_proc)
 
@@ -221,6 +229,19 @@ class PasteInterceptor:
             self._panel_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._panel_vk = 0
+
+    def set_ocr_hotkey(self, hotkey_str: str):
+        """OCR 단축키 설정 — WH_KEYBOARD_LL에서 감지할 키 조합을 파싱"""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._ocr_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._ocr_need_shift = "shift" in parts
+        self._ocr_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._ocr_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._ocr_vk = 0
 
     def start(self):
         """저수준 키보드 훅 시작 (별도 스레드)"""
@@ -278,7 +299,7 @@ class PasteInterceptor:
         반드시 모든 예외를 잡아야 한다.
         """
         try:
-            if nCode >= 0 and wParam == WM_KEYDOWN:
+            if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
                 vk_code = ctypes.cast(
                     lParam, ctypes.POINTER(ctypes.c_ulong)
                 ).contents.value
@@ -304,6 +325,18 @@ class PasteInterceptor:
                     if self.on_toggle_panel:
                         try:
                             self.on_toggle_panel()
+                        except Exception:
+                            pass
+                    return 1  # suppress
+
+                # OCR 단축키 감지
+                if (self._ocr_vk and vk_code == self._ocr_vk
+                        and ctrl_pressed  == self._ocr_need_ctrl
+                        and shift_pressed == self._ocr_need_shift
+                        and alt_pressed   == self._ocr_need_alt):
+                    if self.on_ocr_trigger:
+                        try:
+                            self.on_ocr_trigger()
                         except Exception:
                             pass
                     return 1  # suppress

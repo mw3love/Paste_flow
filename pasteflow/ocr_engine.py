@@ -15,10 +15,12 @@ from typing import Literal, Optional
 
 from PIL import Image
 
-EngineKind = Literal["winrt", "ai_api"]
+EngineKind = Literal["winrt", "ai_api", "gemini"]
 
 # WinRT OcrEngine.MaxImageDimension (4096px 초과 이미지는 에러)
 _WINRT_MAX_DIM = 4096
+# OCR 전 이미지 4방향 여백 — 한 줄짜리 좁은 이미지에서 WinRT 인식률 향상
+_OCR_PAD = 16
 
 # ── winocr/winrt lazy load ──────────────────────────────────────────────────
 _winocr_checked = False
@@ -39,6 +41,22 @@ def _check_winocr() -> bool:
     return _winocr_error is None
 
 
+# ── AI OCR 프롬프트 ──────────────────────────────────────────────────────────
+
+def _ocr_prompt(language: str) -> str:
+    if language.startswith("ko"):
+        return (
+            "Extract all text from this image with high accuracy. "
+            "This image contains Korean text — carefully distinguish similar-looking "
+            "Korean characters (e.g. ㅂ/ㅍ, ㄱ/ㄴ/ㄷ/ㄹ, ㅅ/ㅈ/ㅊ, ㅗ/ㅛ/ㅜ/ㅠ, 이/의/에). "
+            "Preserve line breaks. Output only the extracted text with no explanation or commentary."
+        )
+    return (
+        "Extract all text from this image exactly as it appears. "
+        "Preserve line breaks. Output only the extracted text with no explanation or commentary."
+    )
+
+
 # ── 엔진 ────────────────────────────────────────────────────────────────────
 
 
@@ -49,10 +67,12 @@ class OcrEngine:
         self,
         kind: EngineKind = "winrt",
         api_key: str = "",
+        base_url: str = "",
         language: str = "ko",
     ):
         self.kind: EngineKind = kind
         self.api_key = api_key
+        self.base_url = base_url
         self.language = language
 
     def recognize(self, pil_image: Image.Image) -> str:
@@ -61,6 +81,8 @@ class OcrEngine:
             return self._recognize_winrt(pil_image)
         if self.kind == "ai_api":
             return self._recognize_ai_api(pil_image)
+        if self.kind == "gemini":
+            return self._recognize_gemini(pil_image)
         raise ValueError(f"Unknown OCR engine kind: {self.kind!r}")
 
     # ── 진단용 정적 메서드 ──
@@ -111,9 +133,10 @@ class OcrEngine:
         if w == 0 or h == 0:
             return ""
 
-        # WinRT OcrEngine 최대 처리 크기 제한 — 초과 시 downscale
-        if max(w, h) > _WINRT_MAX_DIM:
-            scale = _WINRT_MAX_DIM / max(w, h)
+        # WinRT OcrEngine 최대 처리 크기 제한 — 패딩 추가분(_OCR_PAD*2) 포함해 4096 이내 유지
+        max_before_pad = _WINRT_MAX_DIM - _OCR_PAD * 2
+        if max(w, h) > max_before_pad:
+            scale = max_before_pad / max(w, h)
             pil_image = pil_image.resize(
                 (max(1, int(w * scale)), max(1, int(h * scale))),
                 Image.LANCZOS,
@@ -122,6 +145,16 @@ class OcrEngine:
         # RGBA/RGB 이외 모드는 변환 (OCR은 투명도 불필요)
         if pil_image.mode not in ("RGB", "RGBA"):
             pil_image = pil_image.convert("RGB")
+
+        # 한 줄짜리 좁은 이미지에서 WinRT OCR이 인식 실패하는 문제 방지
+        fill = (255, 255, 255, 255) if pil_image.mode == "RGBA" else (255, 255, 255)
+        padded = Image.new(
+            pil_image.mode,
+            (pil_image.width + _OCR_PAD * 2, pil_image.height + _OCR_PAD * 2),
+            fill,
+        )
+        padded.paste(pil_image, (_OCR_PAD, _OCR_PAD))
+        pil_image = padded
 
         try:
             from winocr import recognize_pil_sync
@@ -136,10 +169,65 @@ class OcrEngine:
                 "Windows 설정 → 시간 및 언어 → 언어 → 한국어 → 언어 옵션 → OCR 다운로드"
             ) from e
 
-    # ── AI API (세션 4) ──
+    # ── AI API ──
 
     def _recognize_ai_api(self, pil_image: Image.Image) -> str:
-        raise NotImplementedError("AI API OCR은 세션 4에서 구현 예정입니다.")
+        try:
+            import anthropic
+        except ImportError:
+            raise RuntimeError("anthropic 패키지 미설치: pip install anthropic")
+
+        import os, io, base64
+
+        # 설정 값 우선, 없으면 환경 변수(ANTHROPIC_AUTH_TOKEN → ANTHROPIC_API_KEY) 순으로 폴백
+        api_key = (
+            self.api_key
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("ANTHROPIC_API_KEY", "")
+        )
+        if not api_key:
+            raise RuntimeError("API 키가 설정되지 않았습니다. 설정에서 API 키를 입력하세요.")
+
+        # 설정값 우선, 없으면 환경 변수 폴백
+        base_url = self.base_url or os.environ.get("ANTHROPIC_BASE_URL", "")
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+
+        buf = io.BytesIO()
+        pil_image.save(buf, format="PNG")
+        b64 = base64.standard_b64encode(buf.getvalue()).decode()
+
+        client = anthropic.Anthropic(**client_kwargs)
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2048,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+                    {"type": "text", "text": _ocr_prompt(self.language)},
+                ],
+            }],
+        )
+        return (msg.content[0].text or "").strip()
+
+    # ── Gemini ──
+
+    def _recognize_gemini(self, pil_image: Image.Image) -> str:
+        import os
+        api_key = self.api_key or os.environ.get("GOOGLE_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("API 키가 설정되지 않았습니다. 설정에서 Gemini API 키를 입력하세요.")
+        try:
+            import google.generativeai as genai
+        except ImportError:
+            raise RuntimeError("google-generativeai 패키지 미설치: pip install google-generativeai")
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content([pil_image, _ocr_prompt(self.language)])
+        return (response.text or "").strip()
 
 
 # ── 단독 실행 검증 ────────────────────────────────────────────────────────
@@ -153,9 +241,17 @@ if __name__ == "__main__":
         print(f"[OCR] 사용 가능한 언어: {OcrEngine.winrt_supported_languages()}")
 
     if len(sys.argv) > 1:
-        path = sys.argv[1]
-        lang = sys.argv[2] if len(sys.argv) > 2 else "ko"
-        engine = OcrEngine(language=lang)
+        import argparse
+        parser = argparse.ArgumentParser(description="OCR 단독 실행 검증")
+        parser.add_argument("path", help="이미지 파일 경로")
+        parser.add_argument("lang", nargs="?", default="ko", help="언어 코드 (기본: ko)")
+        parser.add_argument("--engine", default="winrt", choices=["winrt", "ai_api"])
+        parser.add_argument("--key", default="", help="AI API 키 (--engine ai_api 시 필요)")
+        args = parser.parse_args()
+
+        path = args.path
+        lang = args.lang
+        engine = OcrEngine(kind=args.engine, api_key=args.key, language=lang)
 
         # 워커 스레드에서 호출 (실제 사용 환경 재현)
         result_holder: list[str] = []
@@ -176,4 +272,4 @@ if __name__ == "__main__":
             sys.exit(1)
         print(f"\n[OCR] {path!r} ({lang}):\n{result_holder[0]}")
     else:
-        print("\n사용법: python -m pasteflow.ocr_engine <이미지경로> [언어=ko]")
+        print("\n사용법: python -m pasteflow.ocr_engine <이미지경로> [언어=ko] [--engine winrt|ai_api] [--key <API키>]")

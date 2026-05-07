@@ -3,37 +3,14 @@
 단축키 커스터마이징, 히스토리 제한, 자동 시작, 자동 닫기 설정.
 """
 import sys
-import winreg
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout,
+    QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
 from pasteflow.ui.theme import COLORS, TEAL_HOVER
 
-_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-_APP_NAME = "PasteFlow"
-
-
-def _set_auto_start(enabled: bool) -> None:
-    """Windows 시작 시 자동 실행 레지스트리 등록/해제"""
-    try:
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER, _RUN_KEY,
-            0, winreg.KEY_SET_VALUE
-        )
-        if enabled:
-            exe_path = sys.executable
-            winreg.SetValueEx(key, _APP_NAME, 0, winreg.REG_SZ, f'"{exe_path}" -m pasteflow.main')
-        else:
-            try:
-                winreg.DeleteValue(key, _APP_NAME)
-            except FileNotFoundError:
-                pass
-        winreg.CloseKey(key)
-    except OSError:
-        pass
 
 DIALOG_STYLE = f"""
     QDialog {{
@@ -99,6 +76,14 @@ DIALOG_STYLE = f"""
     }}
     QPushButton#saveBtn:hover {{
         background-color: {TEAL_HOVER};
+    }}
+    QComboBox QAbstractItemView {{
+        background-color: {COLORS['surface0']};
+        color: {COLORS['text']};
+        selection-background-color: {COLORS['surface1']};
+        selection-color: {COLORS['text']};
+        border: 1px solid {COLORS['surface1']};
+        outline: none;
     }}
 """
 
@@ -228,7 +213,11 @@ class SettingsDialog(QDialog):
     KEY_PANEL_TOGGLE = "hotkey_panel_toggle"
     KEY_HISTORY_MAX = "history_max"
     KEY_AUTO_START = "auto_start"
-    KEY_AUTO_CLOSE = "panel_auto_close"
+    KEY_OCR_HOTKEY = "hotkey_ocr_trigger"
+    KEY_OCR_LANG = "ocr_language"
+    KEY_OCR_ENGINE = "ocr_engine"
+    KEY_OCR_API_KEY = "ocr_api_key"
+    KEY_OCR_BASE_URL = "ocr_base_url"
 
     def __init__(self, current_settings: dict, parent=None):
         super().__init__(parent)
@@ -239,7 +228,7 @@ class SettingsDialog(QDialog):
 
     def _setup_window(self):
         self.setWindowTitle("PasteFlow 설정")
-        self.setFixedSize(360, 500)
+        self.setFixedSize(360, 660)
         self.setWindowFlags(
             Qt.WindowType.Dialog
             | Qt.WindowType.WindowCloseButtonHint
@@ -288,6 +277,63 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(info_group)
 
+        # ── OCR 설정 그룹 ──
+        ocr_group = QGroupBox("OCR (화면 텍스트 인식)")
+        self._ocr_form = QFormLayout(ocr_group)
+        ocr_form = self._ocr_form
+
+        self._ocr_hotkey = HotkeyEdit()
+        ocr_form.addRow("OCR 단축키:", self._ocr_hotkey)
+
+        _combo_style = (
+            f"QComboBox {{ background-color: {COLORS['surface0']}; color: {COLORS['text']}; "
+            f"border: 1px solid {COLORS['surface1']}; border-radius: 4px; padding: 4px 8px; }}"
+        )
+
+        self._ocr_engine_combo = QComboBox()
+        self._ocr_engine_combo.setStyleSheet(_combo_style)
+        self._ocr_engine_combo.addItem("Windows WinRT (무료)", "winrt")
+        self._ocr_engine_combo.addItem("Claude AI (API 키 필요)", "ai_api")
+        self._ocr_engine_combo.addItem("Google Gemini (무료 티어 있음)", "gemini")
+        ocr_form.addRow("OCR 엔진:", self._ocr_engine_combo)
+
+        self._api_key_label = QLabel("API 키:")
+        self._api_key_edit = QLineEdit()
+        self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._api_key_edit.setPlaceholderText("sk-ant-... 또는 프록시 토큰")
+        ocr_form.addRow(self._api_key_label, self._api_key_edit)
+
+        self._base_url_label = QLabel("Base URL:")
+        self._base_url_edit = QLineEdit()
+        self._base_url_edit.setPlaceholderText("https://... (공식 API 사용 시 비워두기)")
+        ocr_form.addRow(self._base_url_label, self._base_url_edit)
+
+        self._ocr_engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+
+        self._ocr_lang_combo = QComboBox()
+        self._ocr_lang_combo.setStyleSheet(_combo_style)
+
+        # 설치된 언어팩 동적 탐색 — winocr 미설치 시 기본 목록 폴백
+        try:
+            from pasteflow.ocr_engine import OcrEngine
+            supported = OcrEngine.winrt_supported_languages()
+        except Exception:
+            supported = []
+
+        if supported:
+            self._ocr_lang_combo.addItems(supported)
+        else:
+            self._ocr_lang_combo.addItems(["ko", "en-US", "ja", "zh-Hans"])
+            lang_hint = QLabel("winocr 미설치 또는 언어팩 미확인 — 기본 목록 표시")
+            lang_hint.setStyleSheet(
+                f"color: {COLORS['subtext0']}; font-size: 11px;"
+            )
+            ocr_form.addRow("", lang_hint)
+
+        ocr_form.addRow("인식 언어:", self._ocr_lang_combo)
+
+        layout.addWidget(ocr_group)
+
         # ── 일반 설정 그룹 ──
         general_group = QGroupBox("일반")
         general_form = QFormLayout(general_group)
@@ -296,9 +342,6 @@ class SettingsDialog(QDialog):
         self._history_max_spin.setRange(10, 500)
         self._history_max_spin.setValue(50)
         general_form.addRow("히스토리 최대 개수:", self._history_max_spin)
-
-        self._auto_close_check = QCheckBox("패널 외부 클릭 시 자동 닫기")
-        general_form.addRow(self._auto_close_check)
 
         self._auto_start_check = QCheckBox("Windows 시작 시 자동 실행")
         general_form.addRow(self._auto_start_check)
@@ -321,16 +364,38 @@ class SettingsDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
+    def _on_engine_changed(self, _idx: int):
+        engine = self._ocr_engine_combo.currentData()
+        needs_key = engine in ("ai_api", "gemini")
+        is_claude = engine == "ai_api"
+        is_winrt = engine == "winrt"
+        self._api_key_label.setVisible(needs_key)
+        self._api_key_edit.setVisible(needs_key)
+        self._base_url_label.setVisible(is_claude)
+        self._base_url_edit.setVisible(is_claude)
+        if hasattr(self, '_ocr_form'):
+            self._ocr_form.setRowVisible(self._ocr_lang_combo, is_winrt)
+
     def _load_values(self):
         """현재 설정값 로드"""
         self._panel_toggle_hotkey.set_value(
             self._settings.get(self.KEY_PANEL_TOGGLE, "ctrl+space")
         )
+        self._ocr_hotkey.set_value(
+            self._settings.get(self.KEY_OCR_HOTKEY, "ctrl+shift+s")
+        )
+        engine = self._settings.get(self.KEY_OCR_ENGINE, "winrt")
+        idx = self._ocr_engine_combo.findData(engine)
+        self._ocr_engine_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._api_key_edit.setText(self._settings.get(self.KEY_OCR_API_KEY, ""))
+        self._base_url_edit.setText(self._settings.get(self.KEY_OCR_BASE_URL, ""))
+        self._on_engine_changed(self._ocr_engine_combo.currentIndex())
+
+        lang = self._settings.get(self.KEY_OCR_LANG, "ko")
+        idx = self._ocr_lang_combo.findText(lang)
+        self._ocr_lang_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self._history_max_spin.setValue(
             int(self._settings.get(self.KEY_HISTORY_MAX, "50"))
-        )
-        self._auto_close_check.setChecked(
-            self._settings.get(self.KEY_AUTO_CLOSE, "1") == "1"
         )
         self._auto_start_check.setChecked(
             self._settings.get(self.KEY_AUTO_START, "0") == "1"
@@ -342,8 +407,12 @@ class SettingsDialog(QDialog):
 
         new_settings = {
             self.KEY_PANEL_TOGGLE: self._panel_toggle_hotkey.value() or "ctrl+space",
+            self.KEY_OCR_HOTKEY: self._ocr_hotkey.value() or "ctrl+shift+s",
+            self.KEY_OCR_LANG: self._ocr_lang_combo.currentText(),
+            self.KEY_OCR_ENGINE: self._ocr_engine_combo.currentData(),
+            self.KEY_OCR_API_KEY: self._api_key_edit.text(),
+            self.KEY_OCR_BASE_URL: self._base_url_edit.text(),
             self.KEY_HISTORY_MAX: str(self._history_max_spin.value()),
-            self.KEY_AUTO_CLOSE: "1" if self._auto_close_check.isChecked() else "0",
             self.KEY_AUTO_START: "1" if auto_start else "0",
         }
         self.settings_changed.emit(new_settings)

@@ -10,7 +10,7 @@ import threading
 import time
 import json
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QTimer, QObject, pyqtSignal
+from PyQt6.QtCore import QTimer, QObject, pyqtSignal, QBuffer
 
 from pasteflow.database import Database
 from pasteflow.models import ClipboardItem
@@ -340,6 +340,9 @@ class _SignalBridge(QObject):
     panel_toggle       = pyqtSignal()        # 패널 토글 단축키 (훅 스레드 → 메인)
     paste_queue_popped = pyqtSignal()        # 첫 순차 붙여넣기 발생 (패널 팝업용)
     paste_queue_done   = pyqtSignal()        # 큐 소진 (패널 자동 숨기기용)
+    ocr_requested      = pyqtSignal()        # 훅 스레드 → 메인: OCR 오버레이 띄우기
+    ocr_done           = pyqtSignal(str)     # 워커 스레드 → 메인: OCR 결과 텍스트
+    ocr_error          = pyqtSignal(str)     # 워커 스레드 → 메인: 에러 메시지
 
 
 class PasteFlowApp:
@@ -356,6 +359,9 @@ class PasteFlowApp:
         self._bridge.panel_toggle.connect(self._toggle_panel)
         self._bridge.paste_queue_popped.connect(self._on_paste_queue_popped)
         self._bridge.paste_queue_done.connect(self._on_paste_queue_done)
+        self._bridge.ocr_requested.connect(self._on_ocr_requested)
+        self._bridge.ocr_done.connect(self._on_ocr_done)
+        self._bridge.ocr_error.connect(self._on_ocr_error)
 
         self._auto_hide_timer = QTimer()
         self._auto_hide_timer.setSingleShot(True)
@@ -378,6 +384,7 @@ class PasteFlowApp:
             on_paste=self._on_paste_from_hook,
             get_full_item=self.db.get_item,
             on_toggle_panel=self._bridge.panel_toggle.emit,
+            on_ocr_trigger=self._bridge.ocr_requested.emit,
         )
         self.hotkey_manager = HotkeyManager()
 
@@ -387,8 +394,19 @@ class PasteFlowApp:
         self.panel.winId()
         self.tray = TrayIcon()
 
-        # 패널 열기 전 포커스된 윈도우 추적
+        # OCR 오버레이
+        from pasteflow.ui.ocr_overlay import OcrOverlay
+        self._ocr_overlay = OcrOverlay()
+        self._ocr_overlay.region_captured.connect(self._on_ocr_region_captured)
+        # cancelled 시그널은 내부 close()로 충분 — 별도 콜백 불필요
+
+        # OCR은 호출마다 새 스레드 — asyncio.run()을 재사용 스레드에서 반복 호출 시
+        # WinRT 콜백 상태가 누적돼 두 번째 호출부터 빈 결과를 반환하는 문제 방지
+
+        # 패널 열기 전 포커스된 윈도우 추적 (SetWinEventHook으로 연속 갱신)
         self._prev_foreground_hwnd = None
+        self._fg_hook = None
+        self._fg_proc = None
 
         # DB에서 설정 로드 및 적용
         self._apply_settings_from_db()
@@ -418,10 +436,15 @@ class PasteFlowApp:
         self.panel.clear_history_requested.connect(self._on_clear_history)
         self.panel.drag_to_app_requested.connect(self._on_drag_to_app)
         self.panel.queue_select_requested.connect(self._on_queue_select)
-        self.panel.always_on_top_changed.connect(self._on_always_on_top_changed)
+        self.panel.queue_deselect_requested.connect(self._on_queue_deselect)
+        self.panel.auto_close_changed.connect(self._on_auto_close_changed)
 
         panel_hotkey = self.db.get_setting("hotkey_panel_toggle", "ctrl+space")
         self.interceptor.set_panel_hotkey(panel_hotkey)
+
+        ocr_hotkey = self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s")
+        self.interceptor.set_ocr_hotkey(ocr_hotkey)
+
 
     def _on_new_clipboard_item(self, item: ClipboardItem):
         """Ctrl+Shift+C 경로: DB 저장 + 큐 추가 — 백그라운드 스레드에서 호출됨."""
@@ -472,8 +495,100 @@ class PasteFlowApp:
         self._auto_hide_timer.stop()
         self._panel_opened_by_paste = False
 
-    def _on_always_on_top_changed(self, value: bool):
-        self.db.set_setting("panel_always_on_top", "1" if value else "0")
+    def _on_auto_close_changed(self, value: bool):
+        self.db.set_setting("panel_auto_close", "1" if value else "0")
+
+    # ── OCR ──
+
+    def _on_ocr_requested(self):
+        """메인 스레드: OCR 오버레이 시작"""
+        self._ocr_overlay.start()
+
+    def _on_ocr_region_captured(self, pixmap):
+        """메인 스레드: 선택 영역 픽맵 → 워커 스레드에서 OCR"""
+        import io
+        from PIL import Image
+        from pasteflow.ui.toast import ToastNotification
+
+        # QPixmap/QBuffer는 메인 스레드에서만 안전 — PNG 변환을 여기서 완료
+        buf = QBuffer()
+        buf.open(QBuffer.OpenModeFlag.WriteOnly)
+        pixmap.save(buf, "PNG")
+        png_bytes = bytes(buf.data())
+        buf.close()
+
+        ToastNotification("OCR 인식 중…")
+
+        def _run():
+            # 호출마다 COM 초기화/해제 — asyncio/WinRT 상태 오염 방지
+            ctypes.windll.ole32.CoInitializeEx(None, 0)
+            try:
+                pil_img = Image.open(io.BytesIO(png_bytes))
+
+                from pasteflow.ocr_engine import OcrEngine
+                lang = self.db.get_setting("ocr_language", "ko")
+                engine_kind = self.db.get_setting("ocr_engine", "winrt")
+                api_key = self.db.get_setting("ocr_api_key", "")
+                base_url = self.db.get_setting("ocr_base_url", "")
+                engine = OcrEngine(kind=engine_kind, api_key=api_key, base_url=base_url, language=lang)
+                text = engine.recognize(pil_img)
+                self._bridge.ocr_done.emit(text)
+            except Exception as e:
+                self._bridge.ocr_error.emit(str(e))
+            finally:
+                ctypes.windll.ole32.CoUninitialize()
+
+        threading.Thread(target=_run, daemon=True, name="ocr-worker").start()
+
+    def _on_ocr_done(self, text: str):
+        """메인 스레드: OCR 결과 → 클립보드 + DB + 큐 + 토스트"""
+        from pasteflow.ui.toast import ToastNotification
+
+        if not text.strip():
+            ToastNotification("OCR: 텍스트를 인식하지 못했습니다")
+            return
+
+        item = ClipboardItem(
+            content_type="text",
+            text_content=text,
+            preview_text=text[:200],
+        )
+        # 클립보드 먼저 입력 — _set_clipboard가 내부에서 monitor._self_triggered를 설정해
+        # 클립보드 모니터가 동일 항목을 재감지(큐 중복 추가)하지 않도록 함
+        self.interceptor._set_clipboard(item)
+        self._on_new_clipboard_item(item)
+
+        preview = text[:30].replace("\n", " ")
+        suffix = "..." if len(text) > 30 else ""
+        ToastNotification(f"OCR: {preview}{suffix}")
+
+    def _on_ocr_error(self, msg: str):
+        from pasteflow.ui.toast import ToastNotification
+
+        # API 키 미설정 → 토스트 후 설정 다이얼로그 자동 열기
+        if "API 키" in msg:
+            ToastNotification("OCR: API 키를 설정해 주세요")
+            QTimer.singleShot(300, self._open_settings)
+            return
+
+        # 언어팩 미설치 오류 → QMessageBox로 상세 안내 (60자 토스트로는 설치 경로 안내 불가)
+        if "언어팩" in msg or "language" in msg.lower():
+            from PyQt6.QtWidgets import QMessageBox, QPushButton
+            import os
+            dlg = QMessageBox(self.panel)
+            dlg.setWindowTitle("OCR 언어팩 미설치")
+            dlg.setIcon(QMessageBox.Icon.Warning)
+            dlg.setText("선택한 언어의 OCR 언어팩이 설치되지 않았습니다.")
+            dlg.setDetailedText(msg)
+            open_btn = dlg.addButton(
+                "Windows 언어 설정 열기", QMessageBox.ButtonRole.ActionRole
+            )
+            dlg.addButton(QMessageBox.StandardButton.Close)
+            dlg.exec()
+            if dlg.clickedButton() == open_btn:
+                os.startfile("ms-settings:regionlanguage")
+        else:
+            ToastNotification(f"OCR 오류: {msg[:60]}")
 
     def _update_paste_ui(self):
         """메인 스레드에서 붙여넣기 UI 업데이트"""
@@ -489,7 +604,7 @@ class PasteFlowApp:
             self._auto_hide_timer.stop()
             self.panel.hide()
         else:
-            self._prev_foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
+            # _prev_foreground_hwnd는 SetWinEventHook이 연속 추적 — 별도 캡처 불필요
             self.panel._user_activated = True
             self._panel_opened_by_paste = False
             self._apply_saved_panel_size()
@@ -567,6 +682,11 @@ class PasteFlowApp:
         queue_item_ids = [item.id for item in self.queue.get_items()]
         self.tray.update_queue_status(pointer, total)
         self.panel.update_queue_highlight(pointer, total, queue_item_ids)
+
+    def _on_queue_deselect(self, item_id: int):
+        self.queue.clear()
+        self.tray.update_queue_status(0, 0)
+        self.panel.update_queue_highlight(0, 0, [])
 
     def _on_combine_copy(self, item: ClipboardItem):
         """F6: 다중 선택 결합 복사 → DB 저장 + 클립보드 + 큐"""
@@ -692,10 +812,7 @@ class PasteFlowApp:
         self._sync_auto_start_from_registry()
 
         auto_close = self.db.get_setting("panel_auto_close", "1")
-        self.panel._auto_close = auto_close == "1"
-
-        always_on_top = self.db.get_setting("panel_always_on_top", "1")
-        self.panel.set_always_on_top(always_on_top == "1")
+        self.panel.set_auto_close(auto_close == "1")
 
         # 패널 위치/크기 — show_near_cursor() 시 적용하도록 저장만 해둠
         geo_json = self.db.get_setting("panel_geometry")
@@ -712,8 +829,12 @@ class PasteFlowApp:
         current = {
             "hotkey_panel_toggle": self.db.get_setting("hotkey_panel_toggle", "ctrl+space"),
             "history_max": self.db.get_setting("history_max", "50"),
-            "panel_auto_close": self.db.get_setting("panel_auto_close", "1"),
             "auto_start": self.db.get_setting("auto_start", "0"),
+            "hotkey_ocr_trigger": self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s"),
+            "ocr_language": self.db.get_setting("ocr_language", "ko"),
+            "ocr_engine": self.db.get_setting("ocr_engine", "winrt"),
+            "ocr_api_key": self.db.get_setting("ocr_api_key", ""),
+            "ocr_base_url": self.db.get_setting("ocr_base_url", ""),
         }
         dlg = SettingsDialog(current, parent=self.panel)
         dlg.settings_changed.connect(self._on_settings_changed)
@@ -725,46 +846,32 @@ class PasteFlowApp:
         """설정 변경 적용"""
         # 단축키 비교는 DB 저장 전에 이전 값을 먼저 읽어야 함
         old_hotkey = self.db.get_setting("hotkey_panel_toggle", "ctrl+space")
+        old_ocr_hotkey = self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s")
 
         for key, value in new_settings.items():
             self.db.set_setting(key, value)
 
-        # 패널 자동 닫기
-        self.panel._auto_close = new_settings.get("panel_auto_close", "1") == "1"
-
-        # 단축키 재설정
+        # 패널 토글 단축키 재설정
         new_hotkey = new_settings.get("hotkey_panel_toggle", "ctrl+space")
         if old_hotkey != new_hotkey:
             self.interceptor.set_panel_hotkey(new_hotkey)
+
+        # OCR 단축키 재설정
+        new_ocr_hotkey = new_settings.get("hotkey_ocr_trigger", "ctrl+shift+s")
+        if old_ocr_hotkey != new_ocr_hotkey:
+            self.interceptor.set_ocr_hotkey(new_ocr_hotkey)
 
         # 자동 시작
         auto_start = new_settings.get("auto_start", "0") == "1"
         self._set_auto_start(auto_start)
 
     def _set_auto_start(self, enable: bool):
-        """Windows 시작 시 자동 실행 레지스트리 설정"""
         import winreg
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
         try:
-            reg_key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE
-            )
+            reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
             if enable:
-                if getattr(sys, "frozen", False):
-                    # PyInstaller .exe 빌드: 실행 파일 자체가 엔트리포인트
-                    cmd = f'"{sys.executable}"'
-                else:
-                    # 스크립트 모드: run.pyw 전체 경로로 등록
-                    import pathlib
-                    interpreter = str(pathlib.Path(sys.executable).with_name("pythonw.exe"))
-                    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    run_pyw = os.path.join(project_dir, "run.pyw")
-                    if os.path.exists(run_pyw):
-                        cmd = f'"{interpreter}" "{run_pyw}"'
-                    else:
-                        p = repr(project_dir)
-                        cmd = f'"{interpreter}" -c "import os,sys; d={p}; os.chdir(d); sys.path.insert(0,d); from pasteflow.main import main; main()"'
-                winreg.SetValueEx(reg_key, "PasteFlow", 0, winreg.REG_SZ, cmd)
+                winreg.SetValueEx(reg_key, "PasteFlow", 0, winreg.REG_SZ, f'"{sys.executable}"')
             else:
                 try:
                     winreg.DeleteValue(reg_key, "PasteFlow")
@@ -775,7 +882,6 @@ class PasteFlowApp:
             print(f"[Settings] 자동 시작 설정 실패: {e}")
 
     def _sync_auto_start_from_registry(self):
-        """레지스트리 실제 등록 여부를 DB auto_start 값에 반영"""
         import winreg
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
         registered = False
@@ -785,16 +891,78 @@ class PasteFlowApp:
                 winreg.QueryValueEx(reg_key, "PasteFlow")
                 registered = True
             except FileNotFoundError:
-                registered = False
+                pass
             winreg.CloseKey(reg_key)
         except OSError:
-            registered = False
+            pass
         self.db.set_setting("auto_start", "1" if registered else "0")
+
+    # ── 포그라운드 창 추적 ──
+
+    # 트레이 클릭, 시작 메뉴 등 시스템 UI가 포그라운드를 가져갈 때 무시할 클래스명
+    _FG_IGNORE_CLASSES = frozenset({
+        "Shell_TrayWnd",           # 작업 표시줄
+        "NotifyIconOverflowWindow", # 트레이 오버플로우
+        "DV2ControlHost",          # 시작 메뉴 (Win10)
+        "Windows.UI.Core.CoreWindow", # 시작 메뉴 / 액션 센터 (Win10/11)
+        "TaskListThumbnailWnd",    # 작업 표시줄 썸네일
+        "SysShadow",               # 그림자 창
+        "#32768",                  # 시스템 드롭다운 메뉴
+    })
+
+    def _start_foreground_tracker(self):
+        """SetWinEventHook(EVENT_SYSTEM_FOREGROUND)으로 포그라운드 창 연속 추적.
+
+        시스템 창·자기 프로세스 창을 제외한 실제 앱 창이 포그라운드를 가져올 때마다
+        _prev_foreground_hwnd를 갱신한다. WINEVENT_OUTOFCONTEXT이므로 _pump_messages가
+        DispatchMessageW를 처리할 때 콜백이 호출된다.
+        """
+        my_pid = ctypes.windll.kernel32.GetCurrentProcessId()
+        ignore = self._FG_IGNORE_CLASSES
+
+        WinEventProc = ctypes.WINFUNCTYPE(
+            None,
+            ctypes.wintypes.HANDLE,
+            ctypes.wintypes.DWORD,
+            ctypes.wintypes.HWND,
+            ctypes.wintypes.LONG,
+            ctypes.wintypes.LONG,
+            ctypes.wintypes.DWORD,
+            ctypes.wintypes.DWORD,
+        )
+
+        def _on_fg_changed(hHook, event, hwnd, idObject, idChild, tid, ts):
+            if not hwnd:
+                return
+            try:
+                pid_buf = ctypes.wintypes.DWORD()
+                ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid_buf))
+                if pid_buf.value == my_pid:
+                    return  # 패널·팝업 등 PasteFlow 자신의 창 무시
+                import win32gui
+                cls = win32gui.GetClassName(hwnd)
+                if not cls or cls in ignore:
+                    return
+                self._prev_foreground_hwnd = hwnd
+            except Exception:
+                pass
+
+        self._fg_proc = WinEventProc(_on_fg_changed)  # GC 방지
+        EVENT_SYSTEM_FOREGROUND = 0x0003
+        WINEVENT_OUTOFCONTEXT = 0x0000
+        self._fg_hook = ctypes.windll.user32.SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+            None, self._fg_proc, 0, 0, WINEVENT_OUTOFCONTEXT,
+        )
 
     def _quit(self):
         # 패널 위치/크기 저장
         geo = self.panel.get_geometry_dict()
         self.db.set_setting("panel_geometry", json.dumps(geo))
+
+        if self._fg_hook:
+            ctypes.windll.user32.UnhookWinEvent(self._fg_hook)
+            self._fg_hook = None
 
         self.interceptor.stop()
         self.monitor.stop()
@@ -828,6 +996,7 @@ class PasteFlowApp:
         self.monitor.start()
         self.interceptor.start()
         self._start_ipc_server()
+        self._start_foreground_tracker()
         self.tray.show()
 
         self._msg_timer = QTimer()

@@ -40,6 +40,7 @@ class PanelItemWidget(QWidget):
     """패널 내 개별 항목 위젯"""
 
     clicked = pyqtSignal(int, object)
+    double_clicked = pyqtSignal(int)
     context_menu_requested = pyqtSignal(int, object)
     external_drag_paste = pyqtSignal(int, QPoint)
 
@@ -62,7 +63,6 @@ class PanelItemWidget(QWidget):
         self._did_drag = False
         self._ext_drag_active = False
         self._text_label: Optional[QLabel] = None
-        self._first_resize = True
 
         self._setup_ui(item, is_current, is_done, is_pinned)
         self.setMouseTracking(True)
@@ -74,7 +74,7 @@ class PanelItemWidget(QWidget):
         is_current: bool, is_done: bool, is_pinned: bool,
     ):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(0)
 
         if is_current:
@@ -101,22 +101,18 @@ class PanelItemWidget(QWidget):
         else:
             preview = item.text_content or item.preview_text or ""
             all_lines = preview.strip().split("\n")
-            lines = all_lines[:3]
+            lines = all_lines[:5]
             display_text = "\n".join(line[:80] for line in lines)
-            line_count = len(lines)
 
             text_label = QLabel(display_text)
             text_label.setWordWrap(True)
             text_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
             text_label.setMinimumWidth(0)
-            text_label.setMaximumHeight(45)  # 최대 3줄
             text_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             text_label.setStyleSheet(f"color: {text_color}; font-size: 12px;")
-            # AlignVCenter 명시: label이 행 내 상단/하단 쏠림 방지
-            layout.addWidget(text_label, 1, Qt.AlignmentFlag.AlignVCenter)
+            layout.addWidget(text_label, 1)
             self._text_label = text_label
 
-            # 생성 시 높이 미리 계산 → 첫 resizeEvent 점프(지직) 방지
             # 실제 레이블 너비 ≈ PANEL_WIDTH - 패널마진(20) - 아이템내부(lmargin8+rmargin8) = PANEL_WIDTH - 36
             _f = QFont(); _f.setPixelSize(12)
             _fm = QFontMetrics(_f)
@@ -125,9 +121,10 @@ class PanelItemWidget(QWidget):
                 Qt.TextFlag.TextWordWrap | int(Qt.AlignmentFlag.AlignLeft),
                 display_text,
             )
-            _vl = max(1, (_rect.height() + _fm.height() - 1) // _fm.height())
-            _init_h = 26 if _vl == 1 else (38 if _vl == 2 else 50)
-            self.setFixedHeight(_init_h)
+            _vl = max(1, min(5, (_rect.height() + _fm.lineSpacing() - 1) // _fm.lineSpacing()))
+            _label_h = _vl * _fm.lineSpacing() + 8
+            text_label.setFixedHeight(_label_h)
+            self.setFixedHeight(_label_h + 12)  # 12 = 상하 패딩(6+6)
 
         # 바는 레이아웃이 행 높이에 맞춰 자동 조정 (타이머 불필요)
 
@@ -135,9 +132,6 @@ class PanelItemWidget(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self._first_resize:
-            self._first_resize = False
-            return
         self._adjust_text_height()
 
     def _adjust_text_height(self):
@@ -152,14 +146,15 @@ class PanelItemWidget(QWidget):
             Qt.TextFlag.TextWordWrap | int(Qt.AlignmentFlag.AlignLeft),
             self._text_label.text(),
         )
-        actual_lines = max(1, (rect.height() + fm.height() - 1) // fm.height())
-        visual_lines = min(3, actual_lines)
-        new_h = 26 if visual_lines == 1 else (38 if visual_lines == 2 else 50)
-        # 4줄 이상: AlignTop(1·2·3번째 줄 표시, 나머지 하단 클립)
-        # 1~3줄: AlignVCenter(균등 여백)
-        align = (Qt.AlignmentFlag.AlignTop if actual_lines > 3
+        actual_lines = max(1, (rect.height() + fm.lineSpacing() - 1) // fm.lineSpacing())
+        visual_lines = min(5, actual_lines)
+        label_h = visual_lines * fm.lineSpacing() + 8
+        new_h = label_h + 12  # 12 = 상하 패딩(6+6)
+        align = (Qt.AlignmentFlag.AlignTop if actual_lines > 5
                  else Qt.AlignmentFlag.AlignVCenter) | Qt.AlignmentFlag.AlignLeft
         self._text_label.setAlignment(align)
+        if self._text_label.height() != label_h:
+            self._text_label.setFixedHeight(label_h)
         if self.height() != new_h:
             self.setFixedHeight(new_h)
 
@@ -321,6 +316,11 @@ class PanelItemWidget(QWidget):
         self._drag_start_pos = None
         self._did_drag = False
         event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and not self._ext_drag_active:
+            self.double_clicked.emit(self.item_id)
+        super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event):
         if self.childAt(event.pos()) is None:
@@ -984,6 +984,7 @@ class ClipboardPanel(QWidget):
 
     def _connect_item_signals(self, widget: PanelItemWidget):
         widget.clicked.connect(self._on_item_clicked)
+        widget.double_clicked.connect(self._on_item_double_clicked)
         widget.context_menu_requested.connect(self._on_item_context_menu)
         widget.external_drag_paste.connect(self._on_item_external_drag_paste)
 
@@ -1012,16 +1013,20 @@ class ClipboardPanel(QWidget):
             if self._last_clicked_id is not None:
                 self._select_range(self._last_clicked_id, item_id)
         else:
-            # 단순 클릭 → 즉시 붙여넣기
             self._selected_ids.clear()
             self._selected_ids.add(item_id)
-            item = self._find_item(item_id)
-            if item:
-                self.paste_item_requested.emit(item)
 
         self._last_clicked_id = item_id
         self._kbd_focus_id = item_id
         self._update_selection_visuals()
+
+    def _on_item_double_clicked(self, item_id: int):
+        item = self._find_item(item_id)
+        if item:
+            self._selected_ids.clear()
+            self._selected_ids.add(item_id)
+            self._update_selection_visuals()
+            self.paste_item_requested.emit(item)
 
     def _update_selection_visuals(self):
         for i in range(self._items_layout.count()):
@@ -1481,6 +1486,12 @@ class ClipboardPanel(QWidget):
         # ── Escape: 패널 닫기 ──
         if key == Qt.Key.Key_Escape:
             self.hide()
+            event.accept()
+            return
+
+        # ── F10: 설정 열기 ──
+        if key == Qt.Key.Key_F10:
+            self.open_settings_requested.emit()
             event.accept()
             return
 
