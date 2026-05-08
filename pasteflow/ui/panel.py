@@ -1079,48 +1079,43 @@ class ClipboardPanel(QWidget):
         """)
 
         if item.content_type == "image":
-            preview_action = menu.addAction("1  미리보기")
+            preview_action = menu.addAction("미리보기\tSpace")
             preview_action.triggered.connect(
                 lambda: self.preview_image_requested.emit(item_id, pos)
             )
         else:
             _text = item.text_content or item.preview_text or ""
-            preview_action = menu.addAction("1  미리보기")
+            preview_action = menu.addAction("미리보기\tSpace")
             preview_action.triggered.connect(
                 lambda checked=False, t=_text: TextPreviewPopup.instance().toggle_preview(t, QCursor.pos())
             )
 
         if item_id in self._queue_item_ids:
-            queue_action = menu.addAction("2  큐 해제")
+            queue_action = menu.addAction("큐 해제\tC")
             queue_action.triggered.connect(lambda: self.queue_deselect_requested.emit(item_id))
         else:
-            queue_action = menu.addAction("2  큐에 추가")
+            queue_action = menu.addAction("큐에 추가\tC")
             queue_action.triggered.connect(lambda: self.queue_select_requested.emit(item_id))
 
         menu.addSeparator()
 
-        copy_action = menu.addAction("3  복사")
+        copy_action = menu.addAction("복사\tCtrl+C")
         copy_action.triggered.connect(lambda: self._do_copy(item))
 
         if item.content_type != "image":
-            edit_action = menu.addAction("4  수정")
+            edit_action = menu.addAction("수정")
             edit_action.triggered.connect(lambda: self._on_edit_item(item))
-            pin_num = "5"
-            delete_num = "6"
-        else:
-            pin_num = "4"
-            delete_num = "5"
 
         if item.is_pinned:
-            unpin_action = menu.addAction(f"{pin_num}  고정 해제")
+            unpin_action = menu.addAction("고정 해제")
             unpin_action.triggered.connect(lambda: self.unpin_item_requested.emit(item_id))
         else:
-            pin_action = menu.addAction(f"{pin_num}  고정추가")
+            pin_action = menu.addAction("고정추가")
             pin_action.triggered.connect(lambda: self.pin_item_requested.emit(item_id))
 
         menu.addSeparator()
 
-        delete_action = menu.addAction(f"{delete_num}  삭제")
+        delete_action = menu.addAction("삭제\tDel")
         delete_action.triggered.connect(lambda: self.delete_item_requested.emit(item_id))
 
         menu.exec(pos)
@@ -1496,13 +1491,28 @@ class ClipboardPanel(QWidget):
             event.accept()
             return
 
-        # ── Ctrl+C: 다중 선택 결합 복사 ──
-        if (key == Qt.Key.Key_C
-                and mods & Qt.KeyboardModifier.ControlModifier
-                and len(self._selected_ids) > 1):
-            combined = self._combine_selected_items()
-            if combined:
-                self.combine_copy_requested.emit(combined)
+        # ── Space: 포커스 항목 미리보기 ──
+        if key == Qt.Key.Key_Space:
+            self._kbd_preview()
+            event.accept()
+            return
+
+        # ── C: 포커스 항목 큐에 추가 ──
+        if key == Qt.Key.Key_C and not mods & Qt.KeyboardModifier.ControlModifier:
+            self._kbd_queue_toggle()
+            event.accept()
+            return
+
+        # ── Ctrl+C: 단일 복사 / 다중 결합 복사 ──
+        if key == Qt.Key.Key_C and mods & Qt.KeyboardModifier.ControlModifier:
+            if len(self._selected_ids) > 1:
+                combined = self._combine_selected_items()
+                if combined:
+                    self.combine_copy_requested.emit(combined)
+            else:
+                item = self._find_item(self._kbd_focus_id)
+                if item:
+                    self._do_copy(item)
             event.accept()
             return
 
@@ -1550,6 +1560,28 @@ class ClipboardPanel(QWidget):
         if item:
             self.paste_item_requested.emit(item)
 
+    def _kbd_preview(self):
+        """Space: 포커스 항목 미리보기"""
+        if self._kbd_focus_id is None:
+            return
+        item = self._find_item(self._kbd_focus_id)
+        if not item:
+            return
+        if item.content_type == "image":
+            self.preview_image_requested.emit(item.id, QCursor.pos())
+        else:
+            text = item.text_content or item.preview_text or ""
+            TextPreviewPopup.instance().toggle_preview(text, QCursor.pos())
+
+    def _kbd_queue_toggle(self):
+        """C: 포커스 항목 큐 추가/해제 토글 — 앵커 항목이면 해제, 아니면 교체"""
+        if self._kbd_focus_id is None:
+            return
+        if self._queue_item_ids and self._kbd_focus_id == self._queue_item_ids[0]:
+            self.queue_deselect_requested.emit(self._kbd_focus_id)
+        else:
+            self.queue_select_requested.emit(self._kbd_focus_id)
+
     def _kbd_delete(self):
         """Delete: 포커스 항목 삭제 후 포커스를 다음 항목으로 이동"""
         if self._kbd_focus_id is None:
@@ -1592,20 +1624,20 @@ class ClipboardPanel(QWidget):
             }}
         """)
 
-        close_action = menu.addAction("패널 숨기기")
+        close_action = menu.addAction("×  패널 숨기기")
         close_action.triggered.connect(self.hide)
 
         menu.addSeparator()
 
-        clear_action = menu.addAction("히스토리 초기화")
+        clear_action = menu.addAction("🗑  히스토리 초기화")
         clear_action.triggered.connect(self.clear_history_requested.emit)
 
         menu.addSeparator()
 
-        settings_action = menu.addAction("설정")
+        settings_action = menu.addAction("⚙  설정")
         settings_action.triggered.connect(self.open_settings_requested.emit)
 
-        quit_action = menu.addAction("PasteFlow 종료")
+        quit_action = menu.addAction("⏻  PasteFlow 종료")
         quit_action.triggered.connect(self.quit_requested.emit)
 
         menu.exec(event.globalPos())

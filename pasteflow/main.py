@@ -382,6 +382,7 @@ class PasteFlowApp:
         self._auto_hide_timer.timeout.connect(self._auto_hide_panel)
         self._panel_opened_by_paste = False  # 순차 붙여넣기로 열린 패널인지 추적
         self._saved_panel_geometry = None
+        self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
 
         # 코어 모듈
         db_path = os.path.join(os.path.dirname(__file__), "..", "pasteflow.db")
@@ -766,9 +767,15 @@ class PasteFlowApp:
         self._refresh_panel()
 
     def _on_preview_image(self, item_id: int, pos):
+        existing = self._image_preview_windows.pop(item_id, None)
+        if existing is not None:
+            existing.close()
+            return
         item = self.db.get_item(item_id)
         if item and item.image_data:
-            ImagePreviewPopup.open_new(item.image_data, pos)
+            popup = ImagePreviewPopup.open_new(item.image_data, pos)
+            self._image_preview_windows[item_id] = popup
+            popup.destroyed.connect(lambda: self._image_preview_windows.pop(item_id, None))
 
     def _on_clear_history(self):
         self.db.clear_history()
