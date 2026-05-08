@@ -22,8 +22,21 @@ from pasteflow.ui.panel import ClipboardPanel, PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT
 from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.tray import TrayIcon
 from pasteflow.ui.settings_dialog import SettingsDialog
+from pasteflow.ui.theme import COLORS
 
 # ── 드래그 붙여넣기 헬퍼 ──────────────────────────────────────────────────────
+
+_MSGBOX_DARK_STYLE = (
+    f"QMessageBox {{ background-color: {COLORS['base']}; color: {COLORS['text']}; }}"
+    f" QMessageBox QLabel {{ color: {COLORS['text']}; }}"
+    f" QMessageBox QPushButton {{"
+    f"   background-color: {COLORS['surface0']}; color: {COLORS['text']};"
+    f"   border: 1px solid {COLORS['surface1']}; border-radius: 4px;"
+    f"   padding: 4px 12px; min-width: 60px; }}"
+    f" QMessageBox QPushButton:hover {{ background-color: {COLORS['surface1']}; }}"
+    f" QTextEdit {{ background-color: {COLORS['surface0']}; color: {COLORS['text']};"
+    f"   border: 1px solid {COLORS['surface1']}; }}"
+)
 
 _CHROMIUM_CLASS_PREFIXES = (
     "Chrome_RenderWidgetHostHWND",
@@ -528,9 +541,15 @@ class PasteFlowApp:
                 from pasteflow.ocr_engine import OcrEngine
                 lang = self.db.get_setting("ocr_language", "ko")
                 engine_kind = self.db.get_setting("ocr_engine", "winrt")
-                api_key = self.db.get_setting("ocr_api_key", "")
-                base_url = self.db.get_setting("ocr_base_url", "")
-                engine = OcrEngine(kind=engine_kind, api_key=api_key, base_url=base_url, language=lang)
+                if engine_kind == "gemini":
+                    api_key = self.db.get_setting("ocr_gemini_api_key", "")
+                    base_url = self.db.get_setting("ocr_gemini_base_url", "")
+                    model = self.db.get_setting("ocr_gemini_model", "")
+                else:
+                    api_key = self.db.get_setting("ocr_api_key", "")
+                    base_url = self.db.get_setting("ocr_base_url", "")
+                    model = ""
+                engine = OcrEngine(kind=engine_kind, api_key=api_key, base_url=base_url, language=lang, model=model)
                 text = engine.recognize(pil_img)
                 self._bridge.ocr_done.emit(text)
             except Exception as e:
@@ -571,11 +590,12 @@ class PasteFlowApp:
             QTimer.singleShot(300, self._open_settings)
             return
 
-        # 언어팩 미설치 오류 → QMessageBox로 상세 안내 (60자 토스트로는 설치 경로 안내 불가)
-        if "언어팩" in msg or "language" in msg.lower():
-            from PyQt6.QtWidgets import QMessageBox, QPushButton
+        # WinRT 언어팩 미설치 오류 — "언어팩"은 _recognize_winrt에서만 발생
+        if "언어팩" in msg:
+            from PyQt6.QtWidgets import QMessageBox
             import os
             dlg = QMessageBox(self.panel)
+            dlg.setStyleSheet(_MSGBOX_DARK_STYLE)
             dlg.setWindowTitle("OCR 언어팩 미설치")
             dlg.setIcon(QMessageBox.Icon.Warning)
             dlg.setText("선택한 언어의 OCR 언어팩이 설치되지 않았습니다.")
@@ -587,8 +607,34 @@ class PasteFlowApp:
             dlg.exec()
             if dlg.clickedButton() == open_btn:
                 os.startfile("ms-settings:regionlanguage")
+        elif "미설치" in msg:
+            # AI OCR 패키지 미설치 (google-generativeai, anthropic, openai 등)
+            from PyQt6.QtWidgets import QMessageBox
+            import re
+            # "xxx 패키지 미설치: pip install yyy" 패턴에서 pip 명령 추출
+            m = re.search(r"(pip install \S+)", msg)
+            pip_cmd = m.group(1) if m else ""
+            body = "OCR에 필요한 패키지가 설치되지 않았습니다."
+            if pip_cmd:
+                body += f"\n\n터미널에서 실행하세요:\n  {pip_cmd}"
+            dlg = QMessageBox(self.panel)
+            dlg.setStyleSheet(_MSGBOX_DARK_STYLE)
+            dlg.setWindowTitle("OCR 패키지 미설치")
+            dlg.setIcon(QMessageBox.Icon.Information)
+            dlg.setText(body)
+            dlg.addButton(QMessageBox.StandardButton.Close)
+            dlg.exec()
         else:
-            ToastNotification(f"OCR 오류: {msg[:60]}")
+            from PyQt6.QtWidgets import QMessageBox
+            dlg = QMessageBox(self.panel)
+            dlg.setStyleSheet(_MSGBOX_DARK_STYLE)
+            dlg.setWindowTitle("OCR 오류")
+            dlg.setIcon(QMessageBox.Icon.Warning)
+            dlg.setText(msg[:200])
+            if len(msg) > 200:
+                dlg.setDetailedText(msg)
+            dlg.addButton(QMessageBox.StandardButton.Close)
+            dlg.exec()
 
     def _update_paste_ui(self):
         """메인 스레드에서 붙여넣기 UI 업데이트"""
@@ -835,6 +881,9 @@ class PasteFlowApp:
             "ocr_engine": self.db.get_setting("ocr_engine", "winrt"),
             "ocr_api_key": self.db.get_setting("ocr_api_key", ""),
             "ocr_base_url": self.db.get_setting("ocr_base_url", ""),
+            "ocr_gemini_api_key": self.db.get_setting("ocr_gemini_api_key", ""),
+            "ocr_gemini_base_url": self.db.get_setting("ocr_gemini_base_url", ""),
+            "ocr_gemini_model": self.db.get_setting("ocr_gemini_model", ""),
         }
         dlg = SettingsDialog(current, parent=self.panel)
         dlg.settings_changed.connect(self._on_settings_changed)

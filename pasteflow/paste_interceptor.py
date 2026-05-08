@@ -334,6 +334,8 @@ class PasteInterceptor:
                         and ctrl_pressed  == self._ocr_need_ctrl
                         and shift_pressed == self._ocr_need_shift
                         and alt_pressed   == self._ocr_need_alt):
+                    # 훅 스레드에서 포그라운드 잠금 해제 — 오버레이가 SetForegroundWindow 가능하도록
+                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
                     if self.on_ocr_trigger:
                         try:
                             self.on_ocr_trigger()

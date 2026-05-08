@@ -69,11 +69,13 @@ class OcrEngine:
         api_key: str = "",
         base_url: str = "",
         language: str = "ko",
+        model: str = "",
     ):
         self.kind: EngineKind = kind
         self.api_key = api_key
         self.base_url = base_url
         self.language = language
+        self.model = model
 
     def recognize(self, pil_image: Image.Image) -> str:
         """동기 OCR — 호출자가 워커 스레드에서 실행해야 UI 블로킹이 없다."""
@@ -219,6 +221,12 @@ class OcrEngine:
         api_key = self.api_key or os.environ.get("GOOGLE_API_KEY", "")
         if not api_key:
             raise RuntimeError("API 키가 설정되지 않았습니다. 설정에서 Gemini API 키를 입력하세요.")
+
+        if self.base_url:
+            # 학교 게이트웨이 등 OpenAI 호환 프록시 — base_url 지정 시
+            model_name = self.model or "gemini-2.0-flash"
+            return self._recognize_openai_compat(pil_image, api_key, self.base_url, model_name)
+
         try:
             import google.generativeai as genai
         except ImportError:
@@ -228,6 +236,38 @@ class OcrEngine:
         model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content([pil_image, _ocr_prompt(self.language)])
         return (response.text or "").strip()
+
+    # ── OpenAI 호환 게이트웨이 ──
+
+    def _recognize_openai_compat(self, pil_image: Image.Image, api_key: str, base_url: str, model: str) -> str:
+        """OpenAI 호환 게이트웨이/프록시를 통한 OCR.
+
+        학교 게이트웨이처럼 base_url + Bearer 토큰 방식의 프록시에 사용.
+        base_url은 '/chat/completions' 앞까지만 입력 (예: https://host/v1/gateway).
+        """
+        import io, base64
+        try:
+            import openai
+        except ImportError:
+            raise RuntimeError("openai 패키지 미설치: pip install openai")
+
+        buf = io.BytesIO()
+        pil_image.save(buf, format="PNG")
+        b64 = base64.standard_b64encode(buf.getvalue()).decode()
+
+        client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=2048,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                    {"type": "text", "text": _ocr_prompt(self.language)},
+                ],
+            }],
+        )
+        return (resp.choices[0].message.content or "").strip()
 
 
 # ── 단독 실행 검증 ────────────────────────────────────────────────────────

@@ -218,6 +218,9 @@ class SettingsDialog(QDialog):
     KEY_OCR_ENGINE = "ocr_engine"
     KEY_OCR_API_KEY = "ocr_api_key"
     KEY_OCR_BASE_URL = "ocr_base_url"
+    KEY_OCR_GEMINI_API_KEY = "ocr_gemini_api_key"
+    KEY_OCR_GEMINI_BASE_URL = "ocr_gemini_base_url"
+    KEY_OCR_GEMINI_MODEL = "ocr_gemini_model"
 
     def __init__(self, current_settings: dict, parent=None):
         super().__init__(parent)
@@ -228,7 +231,7 @@ class SettingsDialog(QDialog):
 
     def _setup_window(self):
         self.setWindowTitle("PasteFlow 설정")
-        self.setFixedSize(360, 660)
+        self.setFixedSize(360, 690)
         self.setWindowFlags(
             Qt.WindowType.Dialog
             | Qt.WindowType.WindowCloseButtonHint
@@ -308,6 +311,11 @@ class SettingsDialog(QDialog):
         self._base_url_edit.setPlaceholderText("https://... (공식 API 사용 시 비워두기)")
         ocr_form.addRow(self._base_url_label, self._base_url_edit)
 
+        self._model_label = QLabel("모델명:")
+        self._model_edit = QLineEdit()
+        self._model_edit.setPlaceholderText("기본값 사용 시 비워두기 (예: gemini-1.5-flash)")
+        ocr_form.addRow(self._model_label, self._model_edit)
+
         self._ocr_engine_combo.currentIndexChanged.connect(self._on_engine_changed)
 
         self._ocr_lang_combo = QComboBox()
@@ -367,12 +375,29 @@ class SettingsDialog(QDialog):
     def _on_engine_changed(self, _idx: int):
         engine = self._ocr_engine_combo.currentData()
         needs_key = engine in ("ai_api", "gemini")
-        is_claude = engine == "ai_api"
+        needs_url = engine in ("ai_api", "gemini")
+        needs_model = engine == "gemini"
         is_winrt = engine == "winrt"
         self._api_key_label.setVisible(needs_key)
         self._api_key_edit.setVisible(needs_key)
-        self._base_url_label.setVisible(is_claude)
-        self._base_url_edit.setVisible(is_claude)
+        self._base_url_label.setVisible(needs_url)
+        self._base_url_edit.setVisible(needs_url)
+        self._model_label.setVisible(needs_model)
+        self._model_edit.setVisible(needs_model)
+        # 엔진별 플레이스홀더 + 저장된 값 로드
+        if engine == "gemini":
+            self._api_key_edit.setPlaceholderText("게이트웨이 토큰 또는 Google AI Studio 키")
+            self._base_url_edit.setPlaceholderText(
+                "게이트웨이 Base URL (예: https://host/v1/gateway) — 공식 Google API 사용 시 비워두기"
+            )
+            self._api_key_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_API_KEY, ""))
+            self._base_url_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, ""))
+            self._model_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_MODEL, ""))
+        elif engine == "ai_api":
+            self._api_key_edit.setPlaceholderText("sk-ant-... 또는 게이트웨이 토큰")
+            self._base_url_edit.setPlaceholderText("https://... (공식 API 사용 시 비워두기)")
+            self._api_key_edit.setText(self._settings.get(self.KEY_OCR_API_KEY, ""))
+            self._base_url_edit.setText(self._settings.get(self.KEY_OCR_BASE_URL, ""))
         if hasattr(self, '_ocr_form'):
             self._ocr_form.setRowVisible(self._ocr_lang_combo, is_winrt)
 
@@ -387,8 +412,7 @@ class SettingsDialog(QDialog):
         engine = self._settings.get(self.KEY_OCR_ENGINE, "winrt")
         idx = self._ocr_engine_combo.findData(engine)
         self._ocr_engine_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self._api_key_edit.setText(self._settings.get(self.KEY_OCR_API_KEY, ""))
-        self._base_url_edit.setText(self._settings.get(self.KEY_OCR_BASE_URL, ""))
+        # key/url 텍스트는 _on_engine_changed 에서 엔진별로 로드
         self._on_engine_changed(self._ocr_engine_combo.currentIndex())
 
         lang = self._settings.get(self.KEY_OCR_LANG, "ko")
@@ -403,17 +427,24 @@ class SettingsDialog(QDialog):
 
     def _on_save(self):
         """저장 버튼 클릭 — 레지스트리 등록은 main._on_settings_changed에서 처리"""
+        engine = self._ocr_engine_combo.currentData()
         auto_start = self._auto_start_check.isChecked()
 
         new_settings = {
             self.KEY_PANEL_TOGGLE: self._panel_toggle_hotkey.value() or "ctrl+space",
             self.KEY_OCR_HOTKEY: self._ocr_hotkey.value() or "ctrl+shift+s",
             self.KEY_OCR_LANG: self._ocr_lang_combo.currentText(),
-            self.KEY_OCR_ENGINE: self._ocr_engine_combo.currentData(),
-            self.KEY_OCR_API_KEY: self._api_key_edit.text(),
-            self.KEY_OCR_BASE_URL: self._base_url_edit.text(),
+            self.KEY_OCR_ENGINE: engine,
             self.KEY_HISTORY_MAX: str(self._history_max_spin.value()),
             self.KEY_AUTO_START: "1" if auto_start else "0",
         }
+        # 엔진별 key/url 저장 (서로 덮어쓰지 않음)
+        if engine == "gemini":
+            new_settings[self.KEY_OCR_GEMINI_API_KEY] = self._api_key_edit.text()
+            new_settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
+            new_settings[self.KEY_OCR_GEMINI_MODEL] = self._model_edit.text()
+        elif engine == "ai_api":
+            new_settings[self.KEY_OCR_API_KEY] = self._api_key_edit.text()
+            new_settings[self.KEY_OCR_BASE_URL] = self._base_url_edit.text()
         self.settings_changed.emit(new_settings)
         self.accept()

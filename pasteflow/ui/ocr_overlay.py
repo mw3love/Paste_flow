@@ -9,9 +9,11 @@
 """
 from __future__ import annotations
 
+import ctypes
+
 from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal
-from PyQt6.QtGui import QPainter, QPixmap, QColor, QPen, QFont
+from PyQt6.QtGui import QPainter, QPixmap, QImage, QColor, QPen, QFont
 
 from pasteflow.ui.theme import TEAL
 
@@ -41,6 +43,7 @@ class OcrOverlay(QWidget):
         self._end: QPoint | None = None
         self._dragging = False
         self._hint_visible = True  # 드래그 시작 전까지 안내 텍스트 표시
+        self._debug_printed = False
 
     # ── public ──────────────────────────────────────────────────────────────
 
@@ -56,6 +59,7 @@ class OcrOverlay(QWidget):
         self._end = None
         self._dragging = False
         self._hint_visible = True
+        self._debug_printed = False
         self.hide()
         QApplication.processEvents()
 
@@ -63,27 +67,47 @@ class OcrOverlay(QWidget):
         vg = QApplication.primaryScreen().virtualGeometry()
         screens = QApplication.screens()
 
-        # 가장 높은 DPR 기준으로 합성 캔버스 생성
-        max_dpr = max((s.devicePixelRatio() for s in screens), default=1.0)
-        combined = QPixmap(int(vg.width() * max_dpr), int(vg.height() * max_dpr))
-        combined.setDevicePixelRatio(max_dpr)
-        combined.fill(Qt.GlobalColor.black)
+        print(f"[OCR-DBG] virtualGeometry: x={vg.x()} y={vg.y()} w={vg.width()} h={vg.height()}")
 
-        painter = QPainter(combined)
+        # QImage 기반 합성 — QImage는 DPR 개념 없이 명시적 물리 픽셀로만 동작해
+        # Qt 버전·플랫폼별 QPixmap DPR 처리 차이를 완전히 우회한다.
+        canvas = QImage(vg.width(), vg.height(), QImage.Format.Format_RGB32)
+        canvas.fill(Qt.GlobalColor.black)
+
+        painter = QPainter(canvas)
         for screen in screens:
             sg = screen.geometry()
-            pm = screen.grabWindow(0)  # 해당 화면 native 해상도
-            painter.drawPixmap(
-                QRect(sg.x() - vg.x(), sg.y() - vg.y(), sg.width(), sg.height()),
-                pm,
-            )
+            dpr = screen.devicePixelRatio()
+            pm = screen.grabWindow(0)
+            img = pm.toImage()  # 명시적 물리 픽셀 추출 (DPR 메타데이터 제거)
+            print(f"[OCR-DBG] screen '{screen.name()}': geo={sg.x()},{sg.y()} {sg.width()}x{sg.height()} dpr={dpr}")
+            print(f"[OCR-DBG]   grabWindow → pm={pm.width()}x{pm.height()} pm.dpr={pm.devicePixelRatio()}")
+            print(f"[OCR-DBG]   toImage   → img={img.width()}x{img.height()}")
+            # 물리 픽셀 크기가 논리 크기와 다를 경우 (DPR>1 화면) 리샘플
+            if img.width() != sg.width() or img.height() != sg.height():
+                img = img.scaled(
+                    sg.width(), sg.height(),
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                print(f"[OCR-DBG]   scaled    → img={img.width()}x{img.height()}")
+            dest = QRect(sg.x() - vg.x(), sg.y() - vg.y(), sg.width(), sg.height())
+            print(f"[OCR-DBG]   drawImage at dest={dest.x()},{dest.y()} {dest.width()}x{dest.height()}")
+            painter.drawImage(dest, img)
         painter.end()
 
+        print(f"[OCR-DBG] canvas={canvas.width()}x{canvas.height()}")
+
+        combined = QPixmap.fromImage(canvas)
+        combined.setDevicePixelRatio(1.0)
         self._screenshot = combined
         self.setGeometry(vg)
         self.show()
         self.raise_()
         self.activateWindow()
+        # activateWindow()만으로는 포그라운드 잠금에 막혀 포커스를 못 받을 수 있음
+        # AllowSetForegroundWindow 허용 후 SetForegroundWindow 직접 호출
+        ctypes.windll.user32.SetForegroundWindow(int(self.winId()))
         self.setFocus()
 
     # ── painting ─────────────────────────────────────────────────────────────
@@ -91,6 +115,11 @@ class OcrOverlay(QWidget):
     def paintEvent(self, event):
         if self._screenshot is None:
             return
+
+        if not self._debug_printed:
+            self._debug_printed = True
+            print(f"[OCR-DBG] paintEvent: widget={self.width()}x{self.height()} rect={self.rect()}")
+            print(f"[OCR-DBG] paintEvent: screenshot={self._screenshot.width()}x{self._screenshot.height()} dpr={self._screenshot.devicePixelRatio()}")
 
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
