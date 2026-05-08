@@ -238,8 +238,8 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description="OCR 단독 실행 검증")
         parser.add_argument("path", help="이미지 파일 경로")
         parser.add_argument("lang", nargs="?", default="ko", help="언어 코드 (기본: ko)")
-        parser.add_argument("--engine", default="winrt", choices=["winrt", "ai_api"])
-        parser.add_argument("--key", default="", help="AI API 키 (--engine ai_api 시 필요)")
+        parser.add_argument("--engine", default="winrt", choices=["winrt", "gemini"])
+        parser.add_argument("--key", default="", help="AI API 키 (--engine gemini 시 필요)")
         args = parser.parse_args()
 
         path = args.path
@@ -265,4 +265,4 @@ if __name__ == "__main__":
             sys.exit(1)
         print(f"\n[OCR] {path!r} ({lang}):\n{result_holder[0]}")
     else:
-        print("\n사용법: python -m pasteflow.ocr_engine <이미지경로> [언어=ko] [--engine winrt|ai_api] [--key <API키>]")
+        print("\n사용법: python -m pasteflow.ocr_engine <이미지경로> [언어=ko] [--engine winrt|gemini] [--key <API키>]")

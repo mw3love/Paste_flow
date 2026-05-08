@@ -136,10 +136,10 @@ class OcrOverlay(QWidget):
 
             # 3) 선택 영역: 마스크 없는 원본 스크린샷 복원
             src = QRect(
-                int(sel.x() * dpr),
-                int(sel.y() * dpr),
-                int(sel.width() * dpr),
-                int(sel.height() * dpr),
+                round(sel.x() * dpr),
+                round(sel.y() * dpr),
+                round(sel.width() * dpr),
+                round(sel.height() * dpr),
             )
             p.drawPixmap(sel, self._screenshot, src)
 

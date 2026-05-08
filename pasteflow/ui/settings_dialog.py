@@ -417,9 +417,11 @@ class SettingsDialog(QDialog):
         lang = self._settings.get(self.KEY_OCR_LANG, "ko")
         idx = self._ocr_lang_combo.findText(lang)
         self._ocr_lang_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self._history_max_spin.setValue(
-            int(self._settings.get(self.KEY_HISTORY_MAX, "50"))
-        )
+        try:
+            history_max = int(self._settings.get(self.KEY_HISTORY_MAX, "50"))
+        except (ValueError, TypeError):
+            history_max = 50
+        self._history_max_spin.setValue(history_max)
         self._auto_start_check.setChecked(
             self._settings.get(self.KEY_AUTO_START, "0") == "1"
         )

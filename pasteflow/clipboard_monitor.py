@@ -284,7 +284,8 @@ class ClipboardMonitor:
         if item.text_content:
             h.update(item.text_content.encode("utf-8"))
         if item.image_data:
-            h.update(item.image_data[:1024])  # 이미지는 앞부분만
+            h.update(item.image_data[:4096])
+            h.update(len(item.image_data).to_bytes(8, "little"))
         if item.html_content:
             h.update(item.html_content.encode("utf-8"))
         return h.hexdigest()

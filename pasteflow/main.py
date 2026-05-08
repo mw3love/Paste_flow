@@ -918,7 +918,11 @@ class PasteFlowApp:
         try:
             reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
             if enable:
-                winreg.SetValueEx(reg_key, "PasteFlow", 0, winreg.REG_SZ, f'"{sys.executable}"')
+                if getattr(sys, "frozen", False):
+                    cmd = f'"{sys.executable}"'
+                else:
+                    cmd = f'"{sys.executable}" -m pasteflow.main'
+                winreg.SetValueEx(reg_key, "PasteFlow", 0, winreg.REG_SZ, cmd)
             else:
                 try:
                     winreg.DeleteValue(reg_key, "PasteFlow")

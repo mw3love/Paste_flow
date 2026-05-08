@@ -471,7 +471,6 @@ class ClipboardPanel(QWidget):
         self._queue_item_ids: list[int] = []
         self._status_label: Optional[QLabel] = None
         self._drag_pos = None
-        self._drag_source_id = None       # 드래그 중인 고정 항목 ID (QDrag 잔재, 미사용)
         self._pin_drag_source_id = None   # 드래그 중인 고정 항목 ID (fake drag)
         self._pin_drag_target_id = None   # 드래그 중 하이라이트된 고정 타겟 ID
         self._hist_drag_source_id = None  # 드래그 중인 히스토리 항목 ID
