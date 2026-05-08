@@ -1,5 +1,5 @@
 @echo off
 chcp 65001 >nul 2>nul
-cd /d "h:\내 드라이브\A1. 개인 자료\A1. AI 연습\260322 Copy_Paste3"
-pyinstaller PasteFlow.spec
+cd /d "%~dp0"
+python -m PyInstaller PasteFlow.spec
 pause

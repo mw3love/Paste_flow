@@ -1107,10 +1107,10 @@ class ClipboardPanel(QWidget):
             edit_action.triggered.connect(lambda: self._on_edit_item(item))
 
         if item.is_pinned:
-            unpin_action = menu.addAction("고정 해제")
+            unpin_action = menu.addAction("고정 해제\tP")
             unpin_action.triggered.connect(lambda: self.unpin_item_requested.emit(item_id))
         else:
-            pin_action = menu.addAction("고정추가")
+            pin_action = menu.addAction("고정추가\tP")
             pin_action.triggered.connect(lambda: self.pin_item_requested.emit(item_id))
 
         menu.addSeparator()
@@ -1503,6 +1503,12 @@ class ClipboardPanel(QWidget):
             event.accept()
             return
 
+        # ── P: 포커스 항목 고정/해제 토글 ──
+        if key == Qt.Key.Key_P and not mods & Qt.KeyboardModifier.ControlModifier:
+            self._kbd_pin_toggle()
+            event.accept()
+            return
+
         # ── Ctrl+C: 단일 복사 / 다중 결합 복사 ──
         if key == Qt.Key.Key_C and mods & Qt.KeyboardModifier.ControlModifier:
             if len(self._selected_ids) > 1:
@@ -1581,6 +1587,18 @@ class ClipboardPanel(QWidget):
             self.queue_deselect_requested.emit(self._kbd_focus_id)
         else:
             self.queue_select_requested.emit(self._kbd_focus_id)
+
+    def _kbd_pin_toggle(self):
+        """P: 포커스 항목 고정/해제 토글"""
+        if self._kbd_focus_id is None:
+            return
+        item = self._find_item(self._kbd_focus_id)
+        if not item:
+            return
+        if item.is_pinned:
+            self.unpin_item_requested.emit(self._kbd_focus_id)
+        else:
+            self.pin_item_requested.emit(self._kbd_focus_id)
 
     def _kbd_delete(self):
         """Delete: 포커스 항목 삭제 후 포커스를 다음 항목으로 이동"""
