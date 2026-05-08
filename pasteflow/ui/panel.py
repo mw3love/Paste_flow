@@ -1483,8 +1483,10 @@ class ClipboardPanel(QWidget):
             event.accept()
             return
 
-        # ── Escape: 패널 닫기 ──
-        if key == Qt.Key.Key_Escape:
+        # ── Escape / Ctrl+W: 패널 닫기 ──
+        if key == Qt.Key.Key_Escape or (
+                key == Qt.Key.Key_W
+                and mods & Qt.KeyboardModifier.ControlModifier):
             self.hide()
             event.accept()
             return
