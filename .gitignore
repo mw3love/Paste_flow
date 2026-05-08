@@ -10,3 +10,4 @@ build/
 desktop.ini
 .env
 .claude/
+logs/
