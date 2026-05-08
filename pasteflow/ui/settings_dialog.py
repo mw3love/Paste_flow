@@ -216,8 +216,6 @@ class SettingsDialog(QDialog):
     KEY_OCR_HOTKEY = "hotkey_ocr_trigger"
     KEY_OCR_LANG = "ocr_language"
     KEY_OCR_ENGINE = "ocr_engine"
-    KEY_OCR_API_KEY = "ocr_api_key"
-    KEY_OCR_BASE_URL = "ocr_base_url"
     KEY_OCR_GEMINI_API_KEY = "ocr_gemini_api_key"
     KEY_OCR_GEMINI_BASE_URL = "ocr_gemini_base_url"
     KEY_OCR_GEMINI_MODEL = "ocr_gemini_model"
@@ -296,14 +294,13 @@ class SettingsDialog(QDialog):
         self._ocr_engine_combo = QComboBox()
         self._ocr_engine_combo.setStyleSheet(_combo_style)
         self._ocr_engine_combo.addItem("Windows WinRT (무료)", "winrt")
-        self._ocr_engine_combo.addItem("Claude AI (API 키 필요)", "ai_api")
-        self._ocr_engine_combo.addItem("Google Gemini (무료 티어 있음)", "gemini")
+        self._ocr_engine_combo.addItem("Google Gemini (API 키 필요)", "gemini")
         ocr_form.addRow("OCR 엔진:", self._ocr_engine_combo)
 
         self._api_key_label = QLabel("API 키:")
         self._api_key_edit = QLineEdit()
         self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._api_key_edit.setPlaceholderText("sk-ant-... 또는 프록시 토큰")
+        self._api_key_edit.setPlaceholderText("게이트웨이 토큰 또는 Google AI Studio 키")
         ocr_form.addRow(self._api_key_label, self._api_key_edit)
 
         self._base_url_label = QLabel("Base URL:")
@@ -312,9 +309,15 @@ class SettingsDialog(QDialog):
         ocr_form.addRow(self._base_url_label, self._base_url_edit)
 
         self._model_label = QLabel("모델명:")
-        self._model_edit = QLineEdit()
-        self._model_edit.setPlaceholderText("기본값 사용 시 비워두기 (예: gemini-1.5-flash)")
-        ocr_form.addRow(self._model_label, self._model_edit)
+        self._model_combo = QComboBox()
+        self._model_combo.setEditable(True)
+        self._model_combo.setStyleSheet(_combo_style)
+        for m in ("gemini-2.5-flash", "gemini-2.5-pro",
+                  "gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview",
+                  "gemini-3-flash-preview"):
+            self._model_combo.addItem(m)
+        self._model_combo.setCurrentIndex(0)
+        ocr_form.addRow(self._model_label, self._model_combo)
 
         self._ocr_engine_combo.currentIndexChanged.connect(self._on_engine_changed)
 
@@ -374,8 +377,8 @@ class SettingsDialog(QDialog):
 
     def _on_engine_changed(self, _idx: int):
         engine = self._ocr_engine_combo.currentData()
-        needs_key = engine in ("ai_api", "gemini")
-        needs_url = engine in ("ai_api", "gemini")
+        needs_key = engine == "gemini"
+        needs_url = engine == "gemini"
         needs_model = engine == "gemini"
         is_winrt = engine == "winrt"
         self._api_key_label.setVisible(needs_key)
@@ -383,7 +386,7 @@ class SettingsDialog(QDialog):
         self._base_url_label.setVisible(needs_url)
         self._base_url_edit.setVisible(needs_url)
         self._model_label.setVisible(needs_model)
-        self._model_edit.setVisible(needs_model)
+        self._model_combo.setVisible(needs_model)
         # 엔진별 플레이스홀더 + 저장된 값 로드
         if engine == "gemini":
             self._api_key_edit.setPlaceholderText("게이트웨이 토큰 또는 Google AI Studio 키")
@@ -392,12 +395,8 @@ class SettingsDialog(QDialog):
             )
             self._api_key_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_API_KEY, ""))
             self._base_url_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, ""))
-            self._model_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_MODEL, ""))
-        elif engine == "ai_api":
-            self._api_key_edit.setPlaceholderText("sk-ant-... 또는 게이트웨이 토큰")
-            self._base_url_edit.setPlaceholderText("https://... (공식 API 사용 시 비워두기)")
-            self._api_key_edit.setText(self._settings.get(self.KEY_OCR_API_KEY, ""))
-            self._base_url_edit.setText(self._settings.get(self.KEY_OCR_BASE_URL, ""))
+            saved_model = self._settings.get(self.KEY_OCR_GEMINI_MODEL, "gemini-2.5-flash")
+            self._model_combo.setCurrentText(saved_model or "gemini-2.5-flash")
         if hasattr(self, '_ocr_form'):
             self._ocr_form.setRowVisible(self._ocr_lang_combo, is_winrt)
 
@@ -442,9 +441,6 @@ class SettingsDialog(QDialog):
         if engine == "gemini":
             new_settings[self.KEY_OCR_GEMINI_API_KEY] = self._api_key_edit.text()
             new_settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
-            new_settings[self.KEY_OCR_GEMINI_MODEL] = self._model_edit.text()
-        elif engine == "ai_api":
-            new_settings[self.KEY_OCR_API_KEY] = self._api_key_edit.text()
-            new_settings[self.KEY_OCR_BASE_URL] = self._base_url_edit.text()
+            new_settings[self.KEY_OCR_GEMINI_MODEL] = self._model_combo.currentText()
         self.settings_changed.emit(new_settings)
         self.accept()

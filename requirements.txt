@@ -2,5 +2,4 @@ PyQt6
 pywin32
 Pillow
 winocr          # Windows WinRT OCR (winrt-* 패키지 포함, Python 3.14+ 지원)
-anthropic               # Claude Vision API OCR (lazy import)
 google-generativeai     # Google Gemini OCR (lazy import)

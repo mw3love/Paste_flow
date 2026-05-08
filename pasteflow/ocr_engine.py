@@ -1,6 +1,4 @@
-"""OCR 엔진 추상화 — Windows WinRT 기본, Claude Vision API 옵션.
-
-세션 1 범위: WinRT 동기 래퍼만 구현. AI API는 세션 4에서.
+"""OCR 엔진 추상화 — Windows WinRT 기본, Gemini 옵션.
 
 설계
 ----
@@ -15,7 +13,7 @@ from typing import Literal, Optional
 
 from PIL import Image
 
-EngineKind = Literal["winrt", "ai_api", "gemini"]
+EngineKind = Literal["winrt", "gemini"]
 
 # WinRT OcrEngine.MaxImageDimension (4096px 초과 이미지는 에러)
 _WINRT_MAX_DIM = 4096
@@ -81,8 +79,6 @@ class OcrEngine:
         """동기 OCR — 호출자가 워커 스레드에서 실행해야 UI 블로킹이 없다."""
         if self.kind == "winrt":
             return self._recognize_winrt(pil_image)
-        if self.kind == "ai_api":
-            return self._recognize_ai_api(pil_image)
         if self.kind == "gemini":
             return self._recognize_gemini(pil_image)
         raise ValueError(f"Unknown OCR engine kind: {self.kind!r}")
@@ -171,49 +167,6 @@ class OcrEngine:
                 "Windows 설정 → 시간 및 언어 → 언어 → 한국어 → 언어 옵션 → OCR 다운로드"
             ) from e
 
-    # ── AI API ──
-
-    def _recognize_ai_api(self, pil_image: Image.Image) -> str:
-        try:
-            import anthropic
-        except ImportError:
-            raise RuntimeError("anthropic 패키지 미설치: pip install anthropic")
-
-        import os, io, base64
-
-        # 설정 값 우선, 없으면 환경 변수(ANTHROPIC_AUTH_TOKEN → ANTHROPIC_API_KEY) 순으로 폴백
-        api_key = (
-            self.api_key
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-            or os.environ.get("ANTHROPIC_API_KEY", "")
-        )
-        if not api_key:
-            raise RuntimeError("API 키가 설정되지 않았습니다. 설정에서 API 키를 입력하세요.")
-
-        # 설정값 우선, 없으면 환경 변수 폴백
-        base_url = self.base_url or os.environ.get("ANTHROPIC_BASE_URL", "")
-        client_kwargs = {"api_key": api_key}
-        if base_url:
-            client_kwargs["base_url"] = base_url
-
-        buf = io.BytesIO()
-        pil_image.save(buf, format="PNG")
-        b64 = base64.standard_b64encode(buf.getvalue()).decode()
-
-        client = anthropic.Anthropic(**client_kwargs)
-        msg = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=2048,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
-                    {"type": "text", "text": _ocr_prompt(self.language)},
-                ],
-            }],
-        )
-        return (msg.content[0].text or "").strip()
-
     # ── Gemini ──
 
     def _recognize_gemini(self, pil_image: Image.Image) -> str:
@@ -224,7 +177,7 @@ class OcrEngine:
 
         if self.base_url:
             # 학교 게이트웨이 등 OpenAI 호환 프록시 — base_url 지정 시
-            model_name = self.model or "gemini-2.0-flash"
+            model_name = self.model or "gemini-2.5-flash"
             return self._recognize_openai_compat(pil_image, api_key, self.base_url, model_name)
 
         try:
@@ -233,7 +186,7 @@ class OcrEngine:
             raise RuntimeError("google-generativeai 패키지 미설치: pip install google-generativeai")
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         response = model.generate_content([pil_image, _ocr_prompt(self.language)])
         return (response.text or "").strip()
 

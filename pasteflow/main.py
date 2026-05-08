@@ -546,8 +546,8 @@ class PasteFlowApp:
                     base_url = self.db.get_setting("ocr_gemini_base_url", "")
                     model = self.db.get_setting("ocr_gemini_model", "")
                 else:
-                    api_key = self.db.get_setting("ocr_api_key", "")
-                    base_url = self.db.get_setting("ocr_base_url", "")
+                    api_key = ""
+                    base_url = ""
                     model = ""
                 engine = OcrEngine(kind=engine_kind, api_key=api_key, base_url=base_url, language=lang, model=model)
                 text = engine.recognize(pil_img)
@@ -608,7 +608,7 @@ class PasteFlowApp:
             if dlg.clickedButton() == open_btn:
                 os.startfile("ms-settings:regionlanguage")
         elif "미설치" in msg:
-            # AI OCR 패키지 미설치 (google-generativeai, anthropic, openai 등)
+            # AI OCR 패키지 미설치 (google-generativeai, openai 등)
             from PyQt6.QtWidgets import QMessageBox
             import re
             # "xxx 패키지 미설치: pip install yyy" 패턴에서 pip 명령 추출
@@ -879,8 +879,6 @@ class PasteFlowApp:
             "hotkey_ocr_trigger": self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s"),
             "ocr_language": self.db.get_setting("ocr_language", "ko"),
             "ocr_engine": self.db.get_setting("ocr_engine", "winrt"),
-            "ocr_api_key": self.db.get_setting("ocr_api_key", ""),
-            "ocr_base_url": self.db.get_setting("ocr_base_url", ""),
             "ocr_gemini_api_key": self.db.get_setting("ocr_gemini_api_key", ""),
             "ocr_gemini_base_url": self.db.get_setting("ocr_gemini_base_url", ""),
             "ocr_gemini_model": self.db.get_setting("ocr_gemini_model", ""),
