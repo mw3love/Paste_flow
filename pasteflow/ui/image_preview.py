@@ -129,6 +129,7 @@ class ImagePreviewPopup(QWidget):
         close_btn.clicked.connect(self.close)
         top_bar.addWidget(close_btn)
 
+        self._top_bar_frame = top_bar_frame
         root.addWidget(top_bar_frame)
 
         # ── 이미지 영역 ──
@@ -216,8 +217,10 @@ class ImagePreviewPopup(QWidget):
             Qt.TransformationMode.SmoothTransformation,
         )
         self._image_label.setPixmap(scaled)
-        self._image_label.adjustSize()
-        self.adjustSize()
+        self._image_label.setFixedSize(scaled.size())
+        self.setMinimumSize(0, 0)
+        top_bar_h = self._top_bar_frame.sizeHint().height()
+        self.resize(scaled.width() + 12, scaled.height() + 10 + top_bar_h)
         self._zoom_label.setText(f"{round(self._scale_factor * 100)}%")
 
     # ------------------------------------------------------------------
