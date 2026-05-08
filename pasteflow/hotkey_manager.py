@@ -134,6 +134,10 @@ class HotkeyManager:
         if self._hwnd:
             win32gui.DestroyWindow(self._hwnd)
             self._hwnd = None
+        try:
+            win32gui.UnregisterClass("PasteFlowHotkeyManager", win32api.GetModuleHandle(None))
+        except Exception:
+            pass
 
     def _parse_hotkey(self, hotkey_str: str) -> tuple[int, int]:
         """단축키 문자열 → (modifiers, virtual_key_code)"""

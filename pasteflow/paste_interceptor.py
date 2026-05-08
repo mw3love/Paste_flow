@@ -177,7 +177,7 @@ def _send_ctrl_v_plain():
 
 
 class PasteInterceptor:
-    """Ctrl+Shift+{V,C,X,Z} 감지 → 순차 붙여넣기 / 큐 관리 (저수준 키보드 훅)
+    """Ctrl+Shift+V / 패널 토글 / OCR 단축키 감지 (저수준 키보드 훅)
 
     keyboard 라이브러리 대신 Win32 SetWindowsHookEx를 직접 사용.
     전용 단축키만 suppress하고, 일반 Ctrl+V/C 에는 개입하지 않는다.
@@ -292,7 +292,7 @@ class PasteInterceptor:
     def _low_level_keyboard_proc(self, nCode, wParam, lParam):
         """저수준 키보드 훅 프로시저
 
-        Ctrl+Shift+{V,C,X,Z} 만 가로채고 suppress(return 1)한다.
+        Ctrl+Shift+V / 패널 토글 / OCR 단축키만 가로채고 suppress(return 1)한다.
         일반 Ctrl+C / Ctrl+V 에는 개입하지 않는다.
 
         중요: ctypes 콜백 안에서 예외가 C 레벨로 전파되면 프로세스 크래시.
@@ -409,9 +409,9 @@ class PasteInterceptor:
         _send_inputs(inputs)
 
     def direct_paste(self, item: ClipboardItem, target_hwnd=None):
-        """항목을 클립보드에 설정 후 SendInput으로 Ctrl+V 전송 (F5)
+        """항목을 클립보드에 설정 후 SendInput으로 Ctrl+V 전송
 
-        순차 큐 포인터에 영향 없음. Alt+1~9 또는 패널 더블클릭에서 사용.
+        순차 큐 포인터에 영향 없음. 더블클릭·드래그 경로에서 사용.
         target_hwnd가 주어지면 해당 윈도우에 포커스를 먼저 설정한다.
         """
         self._set_clipboard(item)
