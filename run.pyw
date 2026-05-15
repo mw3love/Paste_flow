@@ -1,5 +1,5 @@
 """PasteFlow 실행 스크립트 — CMD 창 없이 실행 (pythonw.exe)
-에러 발생 시 logs/error.log 에 기록.
+에러 발생 시 %LOCALAPPDATA%\\PasteFlow\\logs\\error.log 에 기록.
 """
 import traceback
 import os
@@ -11,7 +11,8 @@ try:
     from pasteflow.main import main
     main()
 except Exception:
-    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local")
+    log_dir = os.path.join(base, "PasteFlow", "logs")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "error.log")
     with open(log_path, "a", encoding="utf-8") as f:

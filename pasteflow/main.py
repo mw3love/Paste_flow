@@ -343,6 +343,87 @@ def _save_image_to_folder(image_data: bytes, folder: str) -> str:
     return path
 
 
+# ── 로컬 데이터 경로 (DB·로그) ────────────────────────────────────────────────
+
+
+def _get_local_data_dir() -> str:
+    """%LOCALAPPDATA%\\PasteFlow 폴더 경로. 없으면 생성.
+    Drive에 있는 코드와 별개로 PC별 로컬 데이터(DB·로그·설정 캐시)를 보관한다.
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local")
+    path = os.path.join(base, "PasteFlow")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _resolve_db_path() -> str:
+    """DB 경로 결정. 로컬에 없고 Drive에 기존 DB가 있으면 1회 마이그레이션."""
+    local_db = os.path.join(_get_local_data_dir(), "pasteflow.db")
+    if not os.path.exists(local_db):
+        legacy_db = os.path.join(os.path.dirname(__file__), "..", "pasteflow.db")
+        if os.path.exists(legacy_db):
+            try:
+                import shutil
+                shutil.copy2(legacy_db, local_db)
+            except Exception as e:
+                print(f"[DB] 레거시 DB 마이그레이션 실패: {e}")
+    return local_db
+
+
+# ── settings.json (Drive 공유 설정) ──────────────────────────────────────────
+# 5대 PC가 같은 코드(Drive)를 쓰면서 일부 설정만 공유하기 위한 화이트리스트.
+# 본질적으로 PC별인 키(auto_start=레지스트리 바인딩, panel_geometry=모니터 종속,
+# ocr_gemini_model_cache=네트워크 캐시)는 동기화하지 않는다.
+_SYNC_KEYS = frozenset({
+    "ocr_gemini_api_key",
+    "ocr_gemini_base_url",
+    "ocr_gemini_model",
+    "ocr_engine",
+    "ocr_language",
+    "hotkey_panel_toggle",
+    "hotkey_ocr_trigger",
+    "history_max",
+    "panel_auto_close",
+})
+
+
+def _settings_json_path() -> str:
+    """Drive 공유 settings.json 경로 (코드와 같은 위치 = project root)."""
+    return os.path.join(os.path.dirname(__file__), "..", "settings.json")
+
+
+def _load_shared_settings() -> dict:
+    """settings.json 읽어 dict 반환. 파일 없거나 파싱 실패 시 빈 dict."""
+    path = _settings_json_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f"[Settings] settings.json 로드 실패: {e}")
+        return {}
+
+
+def _save_shared_settings(updates: dict):
+    """settings.json에 화이트리스트 키만 병합 저장. 다른 키는 무시."""
+    path = _settings_json_path()
+    current = _load_shared_settings()
+    changed = False
+    for k, v in updates.items():
+        if k in _SYNC_KEYS and current.get(k) != v:
+            current[k] = v
+            changed = True
+    if not changed:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(current, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[Settings] settings.json 저장 실패: {e}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -385,7 +466,7 @@ class PasteFlowApp:
         self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
 
         # 코어 모듈
-        db_path = os.path.join(os.path.dirname(__file__), "..", "pasteflow.db")
+        db_path = _resolve_db_path()
         self.db = Database(db_path)
         self.queue = PasteQueue()
         self.monitor = ClipboardMonitor(
@@ -860,7 +941,15 @@ class PasteFlowApp:
     # ── 설정 ──
 
     def _apply_settings_from_db(self):
-        """DB에서 설정 로드 → UI/동작에 적용"""
+        """DB에서 설정 로드 → UI/동작에 적용.
+        DB 읽기 전에 Drive의 settings.json을 화이트리스트 기준으로 DB에 덮어써서
+        다른 PC에서 변경한 설정(API 키·단축키 등)을 이 PC에 반영한다.
+        """
+        shared = _load_shared_settings()
+        for k, v in shared.items():
+            if k in _SYNC_KEYS:
+                self.db.set_setting(k, str(v))
+
         # 레지스트리 실제 상태로 auto_start DB 동기화
         self._sync_auto_start_from_registry()
 
@@ -889,6 +978,7 @@ class PasteFlowApp:
             "ocr_gemini_api_key": self.db.get_setting("ocr_gemini_api_key", ""),
             "ocr_gemini_base_url": self.db.get_setting("ocr_gemini_base_url", ""),
             "ocr_gemini_model": self.db.get_setting("ocr_gemini_model", ""),
+            "ocr_gemini_model_cache": self.db.get_setting("ocr_gemini_model_cache", ""),
         }
         dlg = SettingsDialog(current, parent=self.panel)
         dlg.settings_changed.connect(self._on_settings_changed)
@@ -905,6 +995,9 @@ class PasteFlowApp:
         for key, value in new_settings.items():
             self.db.set_setting(key, value)
 
+        # 화이트리스트 키는 Drive의 settings.json에도 반영(다른 PC에서 다음 부팅 시 적용)
+        _save_shared_settings(new_settings)
+
         # 패널 토글 단축키 재설정
         new_hotkey = new_settings.get("hotkey_panel_toggle", "ctrl+space")
         if old_hotkey != new_hotkey:
@@ -919,6 +1012,26 @@ class PasteFlowApp:
         auto_start = new_settings.get("auto_start", "0") == "1"
         self._set_auto_start(auto_start)
 
+    # 부팅 후 Drive 마운트 대기 시간(초). 이 시간이 지난 뒤 launcher VBS가 PasteFlow를 실행한다.
+    _AUTOSTART_DRIVE_WAIT_SEC = 15
+
+    def _write_autostart_launcher_vbs(self, target_cmd: str) -> str:
+        """%LOCALAPPDATA%\\PasteFlow\\autostart_launcher.vbs 생성/갱신.
+        VBS는 _AUTOSTART_DRIVE_WAIT_SEC초 대기 후 target_cmd를 hidden으로 실행한다.
+        wscript.exe로 실행되므로 콘솔 창이 일절 뜨지 않는다.
+        """
+        wait_ms = self._AUTOSTART_DRIVE_WAIT_SEC * 1000
+        escaped = target_cmd.replace('"', '""')  # VBS 문자열 내 큰따옴표 이스케이프
+        vbs = (
+            f'WScript.Sleep {wait_ms}\r\n'
+            f'Set objShell = CreateObject("WScript.Shell")\r\n'
+            f'objShell.Run "{escaped}", 0, False\r\n'
+        )
+        path = os.path.join(_get_local_data_dir(), "autostart_launcher.vbs")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(vbs)
+        return path
+
     def _set_auto_start(self, enable: bool):
         import winreg
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -926,9 +1039,16 @@ class PasteFlowApp:
             reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
             if enable:
                 if getattr(sys, "frozen", False):
-                    cmd = f'"{sys.executable}"'
+                    target_cmd = f'"{sys.executable}"'
                 else:
-                    cmd = f'"{sys.executable}" -m pasteflow.main'
+                    pythonw = sys.executable
+                    if pythonw.lower().endswith("python.exe"):
+                        pythonw = pythonw[:-len("python.exe")] + "pythonw.exe"
+                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    run_pyw = os.path.join(project_root, "run.pyw")
+                    target_cmd = f'"{pythonw}" "{run_pyw}"'
+                vbs_path = self._write_autostart_launcher_vbs(target_cmd)
+                cmd = f'wscript.exe "{vbs_path}"'
                 winreg.SetValueEx(reg_key, "PasteFlow", 0, winreg.REG_SZ, cmd)
             else:
                 try:
