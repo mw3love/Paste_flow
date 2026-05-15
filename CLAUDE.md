@@ -99,7 +99,7 @@ tests/
 - **`toast.py`** — 토스트 알림. 시작 시 "PasteFlow 시작됨" 표시.
 - **`tray.py`** — 시스템 트레이. 좌클릭 시 `panel_toggle_requested` 시그널 emit → main이 패널 토글.
 - **`settings_dialog.py`** — 단축키 커스터마이징, 히스토리 제한, 자동 시작, 자동 닫기/숨기기 설정. OCR 언어 콤보는 `OcrEngine.winrt_supported_languages()`로 동적 채움(winocr 미설치 시 기본 목록 폴백). Gemini 모델 콤보 옆 ↻ **새로고침 버튼**(Qt 표준 아이콘 `SP_BrowserReload` — 폰트 무관 보장)으로 `OcrEngine.list_gemini_models()` 호출 → 결과를 콤보에 반영하고 `KEY_OCR_GEMINI_MODEL_CACHE`(JSON list)에 저장 → 다음 실행 시 캐시 로드. 네트워크 호출은 `threading.Thread` + 내부 시그널 `_models_fetched(list, str)`로 UI 스레드 안전 통신. 기본 모델 목록은 `_DEFAULT_GEMINI_MODELS = ("gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-2.5-pro")`. 콤보는 **가격 순 정렬**(`_model_cost_rank`: flash-lite=0 < flash=1 < pro=2)로 저렴한 모델이 항상 위에 표시. 콤보 바로 아래 회색 힌트 라벨(`_model_hint`)이 `💡 가장 저렴: {모델명}`을 안내하며 콤보 갱신 시 `_update_model_hint()`로 자동 동기화.
-- **`ocr_overlay.py`** — 전체 화면 덮는 반투명 영역 선택 오버레이. `start()`에서 각 QScreen별 `grabWindow(0)` → 가상 데스크톱 좌표로 합성(다중 모니터 DPI 배율 차이 대응). ESC/우클릭으로 취소. `region_captured(QPixmap)` 시그널로 main에 선택 영역 전달.
+- **`ocr_overlay.py`** — 모니터별 분리 오버레이. `OcrOverlay`는 매니저(QObject 베이스, QWidget 아님)이고 실제 위젯은 `_ScreenOverlay`로 각 QScreen마다 1개씩 생성. `start()` 호출 시 모니터 수만큼 `_ScreenOverlay`를 만들고 각각 자기 화면을 `screen.grabWindow(0, 0, 0, w, h)`로 캡처해 표시. 한 모니터에서 드래그 시작되면 `drag_started` 시그널로 매니저가 다른 오버레이를 `deactivate()`(마스크만 표시·입력 차단). ESC/우클릭은 어느 오버레이에서든 전체 취소. **다중 DPI 모니터 대응**: 가상 데스크톱 전체를 단일 위젯으로 덮으면 Qt 백킹 스토어 DPR이 하나로 고정돼, DPR이 다른 모니터에 진입할 때 좌표·크기가 어긋나 고DPI 노트북 화면이 좌상단 일부로 축소되는 증상이 발생한다. 모니터별 분리 위젯 + `setScreen()` 명시 바인딩으로 Qt가 모니터별 DPR을 독립 처리하므로 문제 자체가 발생하지 않는다. 공개 API(`region_captured(QPixmap)`, `cancelled()`, `start()`)는 호출부 변경 없이 유지.
 
 ### 단축키 체계
 
