@@ -15,6 +15,22 @@ from PIL import Image
 
 EngineKind = Literal["winrt", "gemini"]
 
+
+def _normalize_base_url(base_url: str) -> str:
+    """OpenAI 호환 게이트웨이 base_url 정규화.
+
+    사용자가 실수로 endpoint 전체 경로를 붙여넣어도 SDK 표준 형식으로 보정.
+    예: '.../v1/gateway/chat/completions' → '.../v1/gateway'
+    """
+    if not base_url:
+        return base_url
+    url = base_url.strip().rstrip("/")
+    for suffix in ("/chat/completions", "/completions", "/models", "/embeddings"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+            break
+    return url
+
 # WinRT OcrEngine.MaxImageDimension (4096px 초과 이미지는 에러)
 _WINRT_MAX_DIM = 4096
 # OCR 전 이미지 4방향 여백 — 한 줄짜리 좁은 이미지에서 WinRT 인식률 향상
@@ -105,6 +121,50 @@ class OcrEngine:
             return False
 
     @staticmethod
+    def list_gemini_models(api_key: str, base_url: str = "") -> list[str]:
+        """API에서 사용 가능한 Gemini 모델 ID 목록을 조회한다.
+
+        - base_url 있음: OpenAI 호환 게이트웨이의 `/v1/models` 엔드포인트 사용
+          (학교/사내 프록시 등). 응답 중 'gemini'가 포함된 모델 ID만 추출.
+        - base_url 없음: `google.generativeai.list_models()` 사용. generateContent를
+          지원하는 gemini-* 모델만 추출.
+
+        실패 시 RuntimeError. UI 블로킹 방지를 위해 호출자가 워커 스레드에서 실행해야 한다.
+        """
+        if not api_key:
+            raise RuntimeError("API 키가 비어 있습니다.")
+
+        if base_url:
+            try:
+                import openai
+            except ImportError as e:
+                raise RuntimeError("openai 패키지 미설치: pip install openai") from e
+            try:
+                client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
+                resp = client.models.list()
+                models = [m.id for m in resp.data if "gemini" in m.id.lower()]
+            except Exception as e:
+                raise RuntimeError(f"게이트웨이 모델 조회 실패: {e}") from e
+        else:
+            try:
+                import google.generativeai as genai
+            except ImportError as e:
+                raise RuntimeError("google-generativeai 패키지 미설치") from e
+            try:
+                genai.configure(api_key=api_key)
+                models = []
+                for m in genai.list_models():
+                    if "generateContent" not in getattr(m, "supported_generation_methods", []):
+                        continue
+                    name = m.name.split("/", 1)[-1] if "/" in m.name else m.name
+                    if "gemini" in name.lower():
+                        models.append(name)
+            except Exception as e:
+                raise RuntimeError(f"Google API 모델 조회 실패: {e}") from e
+
+        return sorted(set(models))
+
+    @staticmethod
     def winrt_supported_languages() -> list[str]:
         """OCR 가능한 언어 BCP-47 태그 목록 (주요 언어 탐색 방식).
 
@@ -177,7 +237,7 @@ class OcrEngine:
 
         if self.base_url:
             # 학교 게이트웨이 등 OpenAI 호환 프록시 — base_url 지정 시
-            model_name = self.model or "gemini-2.5-flash"
+            model_name = self.model or "gemini-3-flash-preview"
             return self._recognize_openai_compat(pil_image, api_key, self.base_url, model_name)
 
         try:
@@ -186,7 +246,8 @@ class OcrEngine:
             raise RuntimeError("google-generativeai 패키지 미설치: pip install google-generativeai")
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model_name = self.model or "gemini-2.5-flash"
+        model = genai.GenerativeModel(model_name)
         response = model.generate_content([pil_image, _ocr_prompt(self.language)])
         return (response.text or "").strip()
 
@@ -208,7 +269,7 @@ class OcrEngine:
         pil_image.save(buf, format="PNG")
         b64 = base64.standard_b64encode(buf.getvalue()).decode()
 
-        client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
         resp = client.chat.completions.create(
             model=model,
             max_tokens=2048,

@@ -6,6 +6,7 @@ import sys
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,
+    QStyle,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -219,6 +220,13 @@ class SettingsDialog(QDialog):
     KEY_OCR_GEMINI_API_KEY = "ocr_gemini_api_key"
     KEY_OCR_GEMINI_BASE_URL = "ocr_gemini_base_url"
     KEY_OCR_GEMINI_MODEL = "ocr_gemini_model"
+    KEY_OCR_GEMINI_MODEL_CACHE = "ocr_gemini_model_cache"
+
+    # Flash 티어가 가장 저렴 → 기본값으로 첫 번째에 배치
+    _DEFAULT_GEMINI_MODELS = ("gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-2.5-pro")
+
+    # 워커 스레드 → UI 안전 통신용 내부 시그널 (models, error_msg)
+    _models_fetched = pyqtSignal(list, str)
 
     def __init__(self, current_settings: dict, parent=None):
         super().__init__(parent)
@@ -226,6 +234,7 @@ class SettingsDialog(QDialog):
         self._setup_window()
         self._setup_ui()
         self._load_values()
+        self._models_fetched.connect(self._on_models_fetched)
 
     def _setup_window(self):
         self.setWindowTitle("PasteFlow 설정")
@@ -312,12 +321,33 @@ class SettingsDialog(QDialog):
         self._model_combo = QComboBox()
         self._model_combo.setEditable(True)
         self._model_combo.setStyleSheet(_combo_style)
-        for m in ("gemini-2.5-flash", "gemini-2.5-pro",
-                  "gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview",
-                  "gemini-3-flash-preview"):
-            self._model_combo.addItem(m)
+        self._populate_model_combo()
         self._model_combo.setCurrentIndex(0)
-        ocr_form.addRow(self._model_label, self._model_combo)
+
+        self._model_refresh_btn = QPushButton()
+        # Qt 내장 표준 아이콘 — 폰트 의존성 없이 모든 환경에서 보장
+        self._model_refresh_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
+        )
+        self._model_refresh_btn.setFixedWidth(34)
+        self._model_refresh_btn.setToolTip("API에서 사용 가능한 Gemini 모델 목록 가져오기")
+        self._model_refresh_btn.clicked.connect(self._on_refresh_models)
+
+        model_row = QHBoxLayout()
+        model_row.setContentsMargins(0, 0, 0, 0)
+        model_row.setSpacing(4)
+        model_row.addWidget(self._model_combo, 1)
+        model_row.addWidget(self._model_refresh_btn)
+        ocr_form.addRow(self._model_label, model_row)
+
+        # 가장 저렴 모델 안내 힌트 — 콤보 목록 변경 시 _update_model_hint()로 갱신
+        self._model_hint = QLabel()
+        self._model_hint.setStyleSheet(
+            f"color: {COLORS['subtext0']}; font-size: 11px;"
+        )
+        self._model_hint.setWordWrap(True)
+        ocr_form.addRow("", self._model_hint)
+        self._update_model_hint()
 
         self._ocr_engine_combo.currentIndexChanged.connect(self._on_engine_changed)
 
@@ -387,16 +417,19 @@ class SettingsDialog(QDialog):
         self._base_url_edit.setVisible(needs_url)
         self._model_label.setVisible(needs_model)
         self._model_combo.setVisible(needs_model)
+        self._model_refresh_btn.setVisible(needs_model)
+        if hasattr(self, "_model_hint"):
+            self._model_hint.setVisible(needs_model)
         # 엔진별 플레이스홀더 + 저장된 값 로드
         if engine == "gemini":
             self._api_key_edit.setPlaceholderText("게이트웨이 토큰 또는 Google AI Studio 키")
             self._base_url_edit.setPlaceholderText(
-                "게이트웨이 Base URL (예: https://host/v1/gateway) — 공식 Google API 사용 시 비워두기"
+                "예: https://factchat-cloud.mindlogic.ai/v1/gateway (끝에 /chat/completions 붙이지 말 것)"
             )
             self._api_key_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_API_KEY, ""))
             self._base_url_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, ""))
-            saved_model = self._settings.get(self.KEY_OCR_GEMINI_MODEL, "gemini-2.5-flash")
-            self._model_combo.setCurrentText(saved_model or "gemini-2.5-flash")
+            saved_model = self._settings.get(self.KEY_OCR_GEMINI_MODEL, "gemini-3-flash-preview")
+            self._model_combo.setCurrentText(saved_model or "gemini-3-flash-preview")
         if hasattr(self, '_ocr_form'):
             self._ocr_form.setRowVisible(self._ocr_lang_combo, is_winrt)
 
@@ -426,6 +459,106 @@ class SettingsDialog(QDialog):
             self._settings.get(self.KEY_AUTO_START, "0") == "1"
         )
 
+    @staticmethod
+    def _model_cost_rank(name: str) -> int:
+        """모델명에서 가격 티어를 추정한 정렬 키. 낮을수록 저렴."""
+        n = name.lower()
+        if "flash-lite" in n:
+            return 0
+        if "flash" in n:
+            return 1
+        if "pro" in n:
+            return 2
+        return 3  # 알 수 없는 티어는 맨 뒤
+
+    def _update_model_hint(self):
+        """콤보 항목 중 가장 저렴한 모델을 힌트 라벨에 표시."""
+        if not hasattr(self, "_model_hint"):
+            return
+        items = [self._model_combo.itemText(i) for i in range(self._model_combo.count())]
+        if not items:
+            self._model_hint.setText("")
+            return
+        cheapest = min(items, key=self._model_cost_rank)
+        self._model_hint.setText(f"💡 가장 저렴: {cheapest}")
+
+    def _populate_model_combo(self):
+        """캐시된 모델 목록이 있으면 사용, 없으면 기본 하드코딩 목록. 가격 순 정렬."""
+        import json
+        cache_str = self._settings.get(self.KEY_OCR_GEMINI_MODEL_CACHE, "")
+        models: list[str] = []
+        if cache_str:
+            try:
+                parsed = json.loads(cache_str)
+                if isinstance(parsed, list):
+                    models = [str(m) for m in parsed if m]
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+        if not models:
+            models = list(self._DEFAULT_GEMINI_MODELS)
+        models = sorted(set(models), key=self._model_cost_rank)
+        self._model_combo.clear()
+        for m in models:
+            self._model_combo.addItem(m)
+        self._update_model_hint()
+
+    def _on_refresh_models(self):
+        """🔄 버튼 — API에서 모델 목록 조회 (워커 스레드)."""
+        api_key = self._api_key_edit.text().strip()
+        if not api_key:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "API 키 필요",
+                                "먼저 API 키를 입력하세요.")
+            return
+        base_url = self._base_url_edit.text().strip()
+
+        self._model_refresh_btn.setEnabled(False)
+        # 로딩 중: 아이콘 제거 + "..." 텍스트 (단순/명확)
+        self._model_refresh_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserStop))
+
+        import threading
+        def _worker():
+            try:
+                from pasteflow.ocr_engine import OcrEngine
+                models = OcrEngine.list_gemini_models(api_key, base_url)
+                self._models_fetched.emit(models, "")
+            except Exception as e:
+                self._models_fetched.emit([], str(e))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_models_fetched(self, models: list, err: str):
+        """워커 스레드 결과 반영 (Qt 메인 스레드)."""
+        self._model_refresh_btn.setEnabled(True)
+        self._model_refresh_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
+        )
+
+        if err:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "모델 조회 실패",
+                                f"모델 목록을 가져오지 못했습니다.\n\n{err}")
+            return
+        if not models:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "결과 없음",
+                                    "API 응답에 Gemini 모델이 없습니다.\n게이트웨이 설정을 확인하세요.")
+            return
+
+        models = sorted(set(models), key=self._model_cost_rank)
+        current = self._model_combo.currentText()
+        self._model_combo.clear()
+        for m in models:
+            self._model_combo.addItem(m)
+        idx = self._model_combo.findText(current)
+        if idx >= 0:
+            self._model_combo.setCurrentIndex(idx)
+        elif current:
+            self._model_combo.setCurrentText(current)
+        self._update_model_hint()
+
+        import json
+        self._settings[self.KEY_OCR_GEMINI_MODEL_CACHE] = json.dumps(models)
+
     def _on_save(self):
         """저장 버튼 클릭 — 레지스트리 등록은 main._on_settings_changed에서 처리"""
         engine = self._ocr_engine_combo.currentData()
@@ -444,5 +577,9 @@ class SettingsDialog(QDialog):
             new_settings[self.KEY_OCR_GEMINI_API_KEY] = self._api_key_edit.text()
             new_settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
             new_settings[self.KEY_OCR_GEMINI_MODEL] = self._model_combo.currentText()
+            # 새로고침으로 갱신된 캐시가 있으면 DB에도 반영
+            cache = self._settings.get(self.KEY_OCR_GEMINI_MODEL_CACHE)
+            if cache:
+                new_settings[self.KEY_OCR_GEMINI_MODEL_CACHE] = cache
         self.settings_changed.emit(new_settings)
         self.accept()
