@@ -194,6 +194,12 @@ class PanelItemWidget(QWidget):
     def enterEvent(self, event):
         self._is_hovered = True
         self._apply_bg_style()
+        # hover된 항목을 키보드 포커스 타겟으로 — Space로 즉시 이 항목 미리보기가 열리도록
+        panel = self.parent()
+        while panel and not isinstance(panel, ClipboardPanel):
+            panel = panel.parent()
+        if panel is not None:
+            panel._kbd_focus_id = self.item_id
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -216,7 +222,7 @@ class PanelItemWidget(QWidget):
             if distance > 10:
                 self._did_drag = True
                 ImagePreviewPopup.close_all()
-                TextPreviewPopup.instance().hide_preview()
+                TextPreviewPopup.close_all()
 
                 if not self._is_pinned:
                     # 비고정 항목 → 패널 안: 재정렬 / 패널 밖: 외부 드래그
@@ -450,7 +456,8 @@ class ClipboardPanel(QWidget):
     pin_reorder_requested = pyqtSignal(list)
     history_reorder_requested = pyqtSignal(list)
     edit_item_requested = pyqtSignal(int, str)  # (item_id, new_text)
-    preview_image_requested = pyqtSignal(int, QPoint)  # (item_id, global_pos)
+    preview_image_requested = pyqtSignal(int)  # item_id — 위치는 main이 panel.geometry()로 계산
+    preview_text_requested = pyqtSignal(int)   # item_id — 동상
     open_settings_requested = pyqtSignal()
     quit_requested = pyqtSignal()
     clear_history_requested = pyqtSignal()
@@ -1081,13 +1088,12 @@ class ClipboardPanel(QWidget):
         if item.content_type == "image":
             preview_action = menu.addAction("미리보기\tSpace")
             preview_action.triggered.connect(
-                lambda: self.preview_image_requested.emit(item_id, pos)
+                lambda: self.preview_image_requested.emit(item_id)
             )
         else:
-            _text = item.text_content or item.preview_text or ""
             preview_action = menu.addAction("미리보기\tSpace")
             preview_action.triggered.connect(
-                lambda checked=False, t=_text: TextPreviewPopup.instance().toggle_preview(t, QCursor.pos())
+                lambda: self.preview_text_requested.emit(item_id)
             )
 
         if item_id in self._queue_item_ids:
@@ -1411,15 +1417,21 @@ class ClipboardPanel(QWidget):
     # ── F4-9: 외부 클릭 시 자동 닫기 ──
 
     def changeEvent(self, event):
-        """창 비활성화 시 자동 닫기 (핀 비활성 상태이고 사용자가 직접 연 경우만)"""
+        """창 비활성화 시 자동 닫기 (핀 비활성 상태이고 사용자가 직접 연 경우만).
+
+        새 활성 윈도우가 미리보기 팝업이면 패널을 닫지 않는다 — 미리보기 드래그·스크롤·
+        클릭 중에 패널이 사라지면 사용성이 망가진다.
+        """
         if (event.type() == QEvent.Type.ActivationChange
                 and self._auto_close
                 and self._user_activated
                 and not self._paste_in_progress
                 and not self._ext_drag_active
                 and not self.isActiveWindow()):
-            self._user_activated = False
-            self.hide()
+            active = QApplication.activeWindow()
+            if not isinstance(active, (ImagePreviewPopup, TextPreviewPopup)):
+                self._user_activated = False
+                self.hide()
         super().changeEvent(event)
 
     def showEvent(self, event):
@@ -1432,6 +1444,7 @@ class ClipboardPanel(QWidget):
         self._cursor_timer.stop()
         self.unsetCursor()
         ImagePreviewPopup.close_all()
+        TextPreviewPopup.close_all()
         super().hideEvent(event)
         self.panel_hidden.emit()
 
@@ -1574,10 +1587,9 @@ class ClipboardPanel(QWidget):
         if not item:
             return
         if item.content_type == "image":
-            self.preview_image_requested.emit(item.id, QCursor.pos())
+            self.preview_image_requested.emit(item.id)
         else:
-            text = item.text_content or item.preview_text or ""
-            TextPreviewPopup.instance().toggle_preview(text, QCursor.pos())
+            self.preview_text_requested.emit(item.id)
 
     def _kbd_queue_toggle(self):
         """C: 포커스 항목 큐 추가/해제 토글 — 앵커 항목이면 해제, 아니면 교체"""

@@ -1,21 +1,68 @@
-"""이미지 확대 미리보기 팝업 — 드래그 이동·휠 줌·닫기 버튼·다중 창 지원"""
+"""이미지 확대 미리보기 팝업 — 드래그 이동·휠 줌·다중 창 지원"""
 import io
 
 from PyQt6.QtWidgets import (
-    QWidget, QFrame, QLabel, QToolButton,
-    QVBoxLayout, QHBoxLayout, QApplication, QSizePolicy,
+    QWidget, QLabel, QVBoxLayout, QApplication, QMenu,
 )
-from PyQt6.QtCore import Qt, QPoint
+from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QEvent
 from PyQt6.QtGui import QPixmap
 
 from pasteflow.ui.theme import (
-    BASE as _BG, MANTLE as _MANTLE, CRUST as _CRUST,
-    SURFACE0 as _SURFACE0, SURFACE1 as _BORDER,
-    TEXT as _TEXT, PEACH as _PEACH, RED as _RED,
+    BASE as _BG, SURFACE0 as _SURFACE0, SURFACE1 as _BORDER,
+    SURFACE2 as _SURFACE2, TEXT as _TEXT, PEACH as _PEACH, BLUE as _BLUE,
 )
 
 PREVIEW_MAX_W = 640
 PREVIEW_MAX_H = 480
+_PREVIEW_MARGIN = 8
+_CASCADE_STEP = 24
+
+
+def compute_preview_pos(
+    panel_geom: QRect,
+    popup_size: QSize,
+    screen,
+    cascade_offset: int = 0,
+) -> QPoint:
+    """미리보기 팝업 위치 결정 — 패널 우측 우선, 부족하면 좌측, 그래도 안 되면 화면 내 fit.
+
+    cascade_offset: 같은 위치에 연속해서 띄울 때 (x, y) 양쪽으로 어긋나는 양(px).
+    """
+    avail = screen.availableGeometry()
+    w, h = popup_size.width(), popup_size.height()
+
+    def _clamp_y(y: int) -> int:
+        return max(avail.top(), min(y, avail.bottom() - h))
+
+    right_x = panel_geom.right() + _PREVIEW_MARGIN + cascade_offset
+    if right_x + w <= avail.right():
+        return QPoint(right_x, _clamp_y(panel_geom.top() + cascade_offset))
+
+    left_x = panel_geom.left() - _PREVIEW_MARGIN - w - cascade_offset
+    if left_x >= avail.left():
+        return QPoint(left_x, _clamp_y(panel_geom.top() + cascade_offset))
+
+    x = max(avail.left(), min(panel_geom.right() + _PREVIEW_MARGIN, avail.right() - w))
+    return QPoint(x, _clamp_y(panel_geom.top()))
+
+
+def _dark_menu_style() -> str:
+    return f"""
+        QMenu {{
+            background-color: {_SURFACE0};
+            color: {_TEXT};
+            border: 1px solid {_BORDER};
+            border-radius: 6px;
+            padding: 4px;
+        }}
+        QMenu::item {{
+            padding: 6px 16px;
+            border-radius: 4px;
+        }}
+        QMenu::item:selected {{
+            background-color: {_SURFACE2};
+        }}
+    """
 
 
 class ImagePreviewPopup(QWidget):
@@ -28,11 +75,15 @@ class ImagePreviewPopup(QWidget):
     # ------------------------------------------------------------------
 
     @classmethod
-    def open_new(cls, image_data: bytes, global_pos: QPoint) -> "ImagePreviewPopup":
-        """새 미리보기 창을 열고 인스턴스 목록에 등록한다."""
+    def open_new(cls, image_data: bytes, panel_geom: QRect) -> "ImagePreviewPopup":
+        """새 미리보기 창을 열고 인스턴스 목록에 등록한다.
+
+        panel_geom: 패널의 글로벌 geometry — 미리보기를 패널 옆에 배치하기 위한 기준.
+        """
+        cascade_offset = len(cls._instances) * _CASCADE_STEP
         popup = cls()
         cls._instances.append(popup)
-        popup.show_preview(image_data, global_pos)
+        popup.show_preview(image_data, panel_geom, cascade_offset)
         return popup
 
     @classmethod
@@ -52,8 +103,9 @@ class ImagePreviewPopup(QWidget):
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
         )
-        # 패널 포커스 보호 — 팝업이 열려도 패널이 비활성화되지 않음
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        # close() 시 즉시 destroy → destroyed 시그널 즉시 발동 → main dict 정리 즉시
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         self._drag_pos: QPoint | None = None
@@ -66,34 +118,10 @@ class ImagePreviewPopup(QWidget):
                 border: 1px solid {_BORDER};
                 border-radius: 6px;
             }}
-            QFrame#top_bar_frame {{
-                background-color: {_SURFACE0};
-                border: none;
-                border-bottom: 1px solid {_BORDER};
-                border-top-left-radius: 5px;
-                border-top-right-radius: 5px;
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
+            QWidget#popup_root[active="true"] {{
+                border: 2px solid {_BLUE};
             }}
             QWidget#img_wrapper {{
-                background: transparent;
-                border: none;
-            }}
-            QToolButton#close_btn {{
-                color: {_TEXT};
-                background: transparent;
-                border: none;
-                font-size: 16px;
-                font-weight: bold;
-                border-radius: 3px;
-            }}
-            QToolButton#close_btn:hover {{
-                background-color: {_RED};
-                color: {_CRUST};
-            }}
-            QLabel#zoom_label {{
-                color: {_TEXT};
-                font-size: 11px;
                 background: transparent;
                 border: none;
             }}
@@ -109,34 +137,10 @@ class ImagePreviewPopup(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── 상단 바: 다크 스트립 ──
-        top_bar_frame = QFrame()
-        top_bar_frame.setObjectName("top_bar_frame")
-        top_bar_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        top_bar = QHBoxLayout(top_bar_frame)
-        top_bar.setContentsMargins(8, 2, 4, 2)
-        top_bar.setSpacing(4)
-
-        self._zoom_label = QLabel("100%")
-        self._zoom_label.setObjectName("zoom_label")
-        top_bar.addWidget(self._zoom_label)
-        top_bar.addStretch()
-
-        close_btn = QToolButton()
-        close_btn.setObjectName("close_btn")
-        close_btn.setText("×")
-        close_btn.setFixedSize(28, 28)
-        close_btn.clicked.connect(self.close)
-        top_bar.addWidget(close_btn)
-
-        self._top_bar_frame = top_bar_frame
-        root.addWidget(top_bar_frame)
-
-        # ── 이미지 영역 ──
         img_wrapper = QWidget()
         img_wrapper.setObjectName("img_wrapper")
         img_layout = QVBoxLayout(img_wrapper)
-        img_layout.setContentsMargins(6, 4, 6, 6)
+        img_layout.setContentsMargins(6, 6, 6, 6)
         img_layout.setSpacing(0)
 
         self._image_label = QLabel()
@@ -152,8 +156,8 @@ class ImagePreviewPopup(QWidget):
     # 미리보기 표시
     # ------------------------------------------------------------------
 
-    def show_preview(self, image_data: bytes, global_pos: QPoint):
-        """이미지 데이터(DIB 또는 PNG)로 미리보기 표시"""
+    def show_preview(self, image_data: bytes, panel_geom: QRect, cascade_offset: int = 0):
+        """이미지 데이터(DIB 또는 PNG)로 미리보기 표시 — 패널 옆에 배치"""
         png_data = self._to_png(image_data)
         if not png_data:
             return
@@ -162,23 +166,13 @@ class ImagePreviewPopup(QWidget):
         if not pixmap.loadFromData(png_data):
             return
 
-        # 원본 픽스맵 보존 (휠 줌 기준점)
         self._original_pixmap = pixmap
         self._scale_factor = 1.0
-
         self._apply_scale()
 
-        # 커서 우측 하단에 배치, 화면 밖으로 나가지 않도록 조정
-        screen = QApplication.screenAt(global_pos) or QApplication.primaryScreen()
+        screen = QApplication.screenAt(panel_geom.center()) or QApplication.primaryScreen()
         if screen:
-            geom = screen.availableGeometry()
-            x = global_pos.x() + 16
-            y = global_pos.y() + 16
-            if x + self.width() > geom.right():
-                x = global_pos.x() - self.width() - 8
-            if y + self.height() > geom.bottom():
-                y = global_pos.y() - self.height() - 8
-            self.move(x, y)
+            self.move(compute_preview_pos(panel_geom, self.size(), screen, cascade_offset))
 
         self.show()
         self.raise_()
@@ -198,11 +192,10 @@ class ImagePreviewPopup(QWidget):
         self._apply_scale()
 
     def _apply_scale(self):
-        """현재 _scale_factor를 _original_pixmap에 적용하고 창 크기·위치를 갱신."""
+        """현재 _scale_factor를 _original_pixmap에 적용하고 창 크기를 갱신."""
         if self._original_pixmap is None:
             return
 
-        # 초기 표시 크기: PREVIEW_MAX 상한 이내로 맞춘 후 scale_factor 적용
         base = self._original_pixmap.scaled(
             PREVIEW_MAX_W, PREVIEW_MAX_H,
             Qt.AspectRatioMode.KeepAspectRatio,
@@ -219,12 +212,10 @@ class ImagePreviewPopup(QWidget):
         self._image_label.setPixmap(scaled)
         self._image_label.setFixedSize(scaled.size())
         self.setMinimumSize(0, 0)
-        top_bar_h = self._top_bar_frame.sizeHint().height()
-        self.resize(scaled.width() + 12, scaled.height() + 10 + top_bar_h)
-        self._zoom_label.setText(f"{round(self._scale_factor * 100)}%")
+        self.resize(scaled.width() + 12, scaled.height() + 12)
 
     # ------------------------------------------------------------------
-    # 드래그 이동
+    # 드래그 이동 (본문 영역 클릭 드래그)
     # ------------------------------------------------------------------
 
     def mousePressEvent(self, event):
@@ -250,7 +241,18 @@ class ImagePreviewPopup(QWidget):
             super().mouseDoubleClickEvent(event)
 
     # ------------------------------------------------------------------
-    # 키보드 (ESC — 창 클릭 후 포커스 획득 시 동작)
+    # 우클릭 메뉴 — 닫기
+    # ------------------------------------------------------------------
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        menu.setStyleSheet(_dark_menu_style())
+        close_action = menu.addAction("닫기")
+        close_action.triggered.connect(self.close)
+        menu.exec(event.globalPos())
+
+    # ------------------------------------------------------------------
+    # 키보드 (ESC)
     # ------------------------------------------------------------------
 
     def keyPressEvent(self, event):
@@ -258,6 +260,17 @@ class ImagePreviewPopup(QWidget):
             self.close()
         else:
             super().keyPressEvent(event)
+
+    # ------------------------------------------------------------------
+    # 활성화 외곽선 — 클릭으로 활성될 때 외곽 테두리 강조
+    # ------------------------------------------------------------------
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.ActivationChange:
+            self.setProperty("active", self.isActiveWindow())
+            self.style().unpolish(self)
+            self.style().polish(self)
+        super().changeEvent(event)
 
     # ------------------------------------------------------------------
     # 생명주기 — _instances 목록 정리

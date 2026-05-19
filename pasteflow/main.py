@@ -20,6 +20,7 @@ from pasteflow.paste_interceptor import PasteInterceptor
 from pasteflow.hotkey_manager import HotkeyManager
 from pasteflow.ui.panel import ClipboardPanel, PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT
 from pasteflow.ui.image_preview import ImagePreviewPopup
+from pasteflow.ui.text_preview import TextPreviewPopup
 from pasteflow.ui.tray import TrayIcon
 from pasteflow.ui.settings_dialog import SettingsDialog
 from pasteflow.ui.theme import COLORS
@@ -464,6 +465,7 @@ class PasteFlowApp:
         self._panel_opened_by_paste = False  # 순차 붙여넣기로 열린 패널인지 추적
         self._saved_panel_geometry = None
         self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
+        self._text_preview_windows: dict[int, TextPreviewPopup] = {}
 
         # 코어 모듈
         db_path = _resolve_db_path()
@@ -526,6 +528,7 @@ class PasteFlowApp:
         self.panel.history_reorder_requested.connect(self._on_hist_reorder)
         self.panel.edit_item_requested.connect(self._on_edit_item)
         self.panel.preview_image_requested.connect(self._on_preview_image)
+        self.panel.preview_text_requested.connect(self._on_preview_text)
         self.panel.open_settings_requested.connect(self._open_settings)
         self.panel.quit_requested.connect(self._quit)
         self.panel.clear_history_requested.connect(self._on_clear_history)
@@ -847,16 +850,29 @@ class PasteFlowApp:
         self.db.update_item_text(item_id, new_text)
         self._refresh_panel()
 
-    def _on_preview_image(self, item_id: int, pos):
+    def _on_preview_image(self, item_id: int):
         existing = self._image_preview_windows.pop(item_id, None)
         if existing is not None:
             existing.close()
             return
         item = self.db.get_item(item_id)
         if item and item.image_data:
-            popup = ImagePreviewPopup.open_new(item.image_data, pos)
+            popup = ImagePreviewPopup.open_new(item.image_data, self.panel.geometry())
             self._image_preview_windows[item_id] = popup
-            popup.destroyed.connect(lambda: self._image_preview_windows.pop(item_id, None))
+            popup.destroyed.connect(lambda _=None, iid=item_id: self._image_preview_windows.pop(iid, None))
+
+    def _on_preview_text(self, item_id: int):
+        existing = self._text_preview_windows.pop(item_id, None)
+        if existing is not None:
+            existing.close()
+            return
+        item = self.db.get_item(item_id)
+        if not item:
+            return
+        text = item.text_content or item.preview_text or ""
+        popup = TextPreviewPopup.open_new(text, self.panel.geometry())
+        self._text_preview_windows[item_id] = popup
+        popup.destroyed.connect(lambda _=None, iid=item_id: self._text_preview_windows.pop(iid, None))
 
     def _on_clear_history(self):
         self.db.clear_history()
