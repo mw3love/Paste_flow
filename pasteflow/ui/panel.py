@@ -458,6 +458,7 @@ class ClipboardPanel(QWidget):
     edit_item_requested = pyqtSignal(int, str)  # (item_id, new_text)
     preview_image_requested = pyqtSignal(int)  # item_id — 위치는 main이 panel.geometry()로 계산
     preview_text_requested = pyqtSignal(int)   # item_id — 동상
+    ocr_item_requested = pyqtSignal(int)       # item_id — 이미지 항목에 OCR 적용
     open_settings_requested = pyqtSignal()
     quit_requested = pyqtSignal()
     clear_history_requested = pyqtSignal()
@@ -1108,7 +1109,10 @@ class ClipboardPanel(QWidget):
         copy_action = menu.addAction("복사\tCtrl+C")
         copy_action.triggered.connect(lambda: self._do_copy(item))
 
-        if item.content_type != "image":
+        if item.content_type == "image":
+            ocr_action = menu.addAction("텍스트 추출(OCR)")
+            ocr_action.triggered.connect(lambda: self.ocr_item_requested.emit(item_id))
+        else:
             edit_action = menu.addAction("수정")
             edit_action.triggered.connect(lambda: self._on_edit_item(item))
 

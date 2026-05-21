@@ -72,7 +72,11 @@ class ToastNotification(QWidget):
     """우하단 스택에 쌓이는 알림 토스트."""
 
     def __init__(self, message: str, duration_ms: int = 3000,
-                 icon: str = "✓", badge: str = None):
+                 icon: str = "✓", badge: str = None,
+                 badge_position: str = "trailing"):
+        """
+        badge_position: "leading"(아이콘과 본문 사이) | "trailing"(본문 뒤, 기본)
+        """
         super().__init__(None, Qt.WindowType.FramelessWindowHint |
                          Qt.WindowType.WindowStaysOnTopHint |
                          Qt.WindowType.Tool |
@@ -92,17 +96,23 @@ class ToastNotification(QWidget):
             f"color: {COLORS['peach']}; font-size: 22px; background: transparent;")
         layout.addWidget(icon_lbl)
 
-        label = QLabel(message)
-        label.setStyleSheet(
-            f"color: {COLORS['text']}; font-size: 18px; background: transparent;")
-        layout.addWidget(label)
-
-        # 큐 개수 등 강조 배지 (선택)
+        # 큐 개수 등 강조 배지 (선택) — 본문 앞/뒤 배치 선택 가능
+        badge_lbl = None
         if badge:
             badge_lbl = QLabel(badge)
             badge_lbl.setStyleSheet(
                 f"color: {COLORS['peach']}; font-size: 16px; font-weight: 600;"
                 f" background: transparent;")
+
+        if badge_lbl is not None and badge_position == "leading":
+            layout.addWidget(badge_lbl)
+
+        label = QLabel(message)
+        label.setStyleSheet(
+            f"color: {COLORS['text']}; font-size: 18px; background: transparent;")
+        layout.addWidget(label)
+
+        if badge_lbl is not None and badge_position == "trailing":
             layout.addWidget(badge_lbl)
 
         self.setStyleSheet("background: transparent;")
@@ -182,11 +192,12 @@ def _elide(text: str, limit: int = 30) -> str:
 
 
 def show_copy_toast(item, queue_count: int) -> ToastNotification:
-    """복사 알림 토스트 — 미리보기 + 현재 큐 개수."""
+    """복사 알림 토스트 — 누적 큐 카운트(Q{n})를 본문 앞에 배치한 미리보기."""
     preview = _elide(getattr(item, "preview_text", None) or "클립보드 항목")
     return ToastNotification(
         preview,
         duration_ms=COPY_TOAST_DURATION_MS,
         icon="📋",
-        badge=f"큐 {queue_count}",
+        badge=f"Q{queue_count}",
+        badge_position="leading",
     )

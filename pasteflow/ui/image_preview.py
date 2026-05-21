@@ -4,7 +4,7 @@ import io
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QApplication, QMenu,
 )
-from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QEvent
+from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QEvent, pyqtSignal
 from PyQt6.QtGui import QPixmap
 
 from pasteflow.ui.theme import (
@@ -12,6 +12,7 @@ from pasteflow.ui.theme import (
     SURFACE2 as _SURFACE2, TEXT as _TEXT, BLUE as _BLUE,
     PEACH as _PEACH,
 )
+from pasteflow.models import ClipboardItem
 
 PREVIEW_MAX_W = 640
 PREVIEW_MAX_H = 480
@@ -71,20 +72,24 @@ class ImagePreviewPopup(QWidget):
 
     _instances: list["ImagePreviewPopup"] = []
 
+    # 우클릭 메뉴 → main 핸들러로 전달
+    copy_requested = pyqtSignal(object)  # ClipboardItem
+    ocr_requested = pyqtSignal(object)   # ClipboardItem
+
     # ------------------------------------------------------------------
     # 클래스 메서드
     # ------------------------------------------------------------------
 
     @classmethod
-    def open_new(cls, image_data: bytes, panel_geom: QRect) -> "ImagePreviewPopup":
+    def open_new(cls, item: ClipboardItem, panel_geom: QRect) -> "ImagePreviewPopup":
         """새 미리보기 창을 열고 인스턴스 목록에 등록한다.
 
         panel_geom: 패널의 글로벌 geometry — 미리보기를 패널 옆에 배치하기 위한 기준.
         """
         cascade_offset = len(cls._instances) * _CASCADE_STEP
-        popup = cls()
+        popup = cls(item)
         cls._instances.append(popup)
-        popup.show_preview(image_data, panel_geom, cascade_offset)
+        popup.show_preview(panel_geom, cascade_offset)
         return popup
 
     @classmethod
@@ -97,8 +102,9 @@ class ImagePreviewPopup(QWidget):
     # 인스턴스 초기화
     # ------------------------------------------------------------------
 
-    def __init__(self):
+    def __init__(self, item: ClipboardItem):
         super().__init__(None)
+        self._item = item
         self.setWindowFlags(
             Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
@@ -139,9 +145,11 @@ class ImagePreviewPopup(QWidget):
     # 미리보기 표시
     # ------------------------------------------------------------------
 
-    def show_preview(self, image_data: bytes, panel_geom: QRect, cascade_offset: int = 0):
-        """이미지 데이터(DIB 또는 PNG)로 미리보기 표시 — 패널 옆에 배치"""
-        png_data = self._to_png(image_data)
+    def show_preview(self, panel_geom: QRect, cascade_offset: int = 0):
+        """보유한 item의 이미지 데이터(DIB 또는 PNG)로 미리보기 표시 — 패널 옆에 배치"""
+        if not self._item.image_data:
+            return
+        png_data = self._to_png(self._item.image_data)
         if not png_data:
             return
 
@@ -225,14 +233,24 @@ class ImagePreviewPopup(QWidget):
             super().mouseDoubleClickEvent(event)
 
     # ------------------------------------------------------------------
-    # 우클릭 메뉴 — 닫기
+    # 우클릭 메뉴 — 복사 / 텍스트 추출(OCR) / 닫기
     # ------------------------------------------------------------------
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
         menu.setStyleSheet(_dark_menu_style())
+
+        copy_action = menu.addAction("복사")
+        copy_action.triggered.connect(lambda: self.copy_requested.emit(self._item))
+
+        ocr_action = menu.addAction("텍스트 추출(OCR)")
+        ocr_action.triggered.connect(lambda: self.ocr_requested.emit(self._item))
+
+        menu.addSeparator()
+
         close_action = menu.addAction("닫기")
         close_action.triggered.connect(self.close)
+
         menu.exec(event.globalPos())
 
     # ------------------------------------------------------------------

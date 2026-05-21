@@ -531,6 +531,7 @@ class PasteFlowApp:
         self.panel.edit_item_requested.connect(self._on_edit_item)
         self.panel.preview_image_requested.connect(self._on_preview_image)
         self.panel.preview_text_requested.connect(self._on_preview_text)
+        self.panel.ocr_item_requested.connect(self._on_ocr_image_by_id)
         self.panel.open_settings_requested.connect(self._open_settings)
         self.panel.quit_requested.connect(self._quit)
         self.panel.clear_history_requested.connect(self._on_clear_history)
@@ -602,18 +603,25 @@ class PasteFlowApp:
 
     def _on_ocr_region_captured(self, pixmap):
         """메인 스레드: 선택 영역 픽맵 → 워커 스레드에서 OCR"""
-        import io
-        from PIL import Image
-        from pasteflow.ui.toast import ToastNotification
-
         # QPixmap/QBuffer는 메인 스레드에서만 안전 — PNG 변환을 여기서 완료
         buf = QBuffer()
         buf.open(QBuffer.OpenModeFlag.WriteOnly)
         pixmap.save(buf, "PNG")
         png_bytes = bytes(buf.data())
         buf.close()
+        self._start_ocr_worker(png_bytes)
 
-        ToastNotification("OCR 인식 중…")
+    def _start_ocr_worker(self, png_bytes: bytes):
+        """공용 OCR 워커 — PNG bytes를 받아 백그라운드에서 OCR 수행.
+
+        영역 캡처 OCR과 이미지 항목 OCR이 공유. 결과/에러는
+        `_bridge.ocr_done` / `_bridge.ocr_error` 시그널로 메인 스레드에 통지.
+        """
+        import io
+        from PIL import Image
+        from pasteflow.ui.toast import ToastNotification
+
+        ToastNotification("인식 중…", icon="🔤")
 
         def _run():
             # 호출마다 COM 초기화/해제 — asyncio/WinRT 상태 오염 방지
@@ -642,12 +650,47 @@ class PasteFlowApp:
 
         threading.Thread(target=_run, daemon=True, name="ocr-worker").start()
 
+    def _on_ocr_image_item(self, item: ClipboardItem):
+        """이미지 항목 우클릭 OCR — image_data(DIB/PNG)를 PNG bytes로 변환 후 공용 워커 호출."""
+        import io
+        from PIL import Image
+        from pasteflow.ui.toast import ToastNotification
+
+        # summary 항목 등으로 image_data가 비어 있을 가능성 → DB에서 풀 로드 재시도
+        if not item.image_data:
+            full = self.db.get_item(item.id) if item.id else None
+            if full and full.image_data:
+                item = full
+            else:
+                ToastNotification("이미지 데이터를 찾을 수 없습니다", icon="🔤")
+                return
+
+        try:
+            img = Image.open(io.BytesIO(item.image_data))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            png_bytes = buf.getvalue()
+        except Exception as e:
+            ToastNotification(f"이미지 변환 실패 — {e}", icon="🔤")
+            return
+
+        self._start_ocr_worker(png_bytes)
+
+    def _on_ocr_image_by_id(self, item_id: int):
+        """패널 우클릭(item_id 기반) → DB에서 풀 로드 후 OCR 위임."""
+        from pasteflow.ui.toast import ToastNotification
+        item = self.db.get_item(item_id)
+        if not item:
+            ToastNotification("항목을 찾을 수 없습니다", icon="🔤")
+            return
+        self._on_ocr_image_item(item)
+
     def _on_ocr_done(self, text: str):
         """메인 스레드: OCR 결과 → 클립보드 + DB + 큐 + 토스트"""
         from pasteflow.ui.toast import ToastNotification
 
         if not text.strip():
-            ToastNotification("OCR: 텍스트를 인식하지 못했습니다")
+            ToastNotification("텍스트를 인식하지 못했습니다", icon="🔤")
             return
 
         item = ClipboardItem(
@@ -663,14 +706,14 @@ class PasteFlowApp:
 
         preview = text[:30].replace("\n", " ")
         suffix = "..." if len(text) > 30 else ""
-        ToastNotification(f"OCR: {preview}{suffix}")
+        ToastNotification(f"{preview}{suffix}", icon="🔤")
 
     def _on_ocr_error(self, msg: str):
         from pasteflow.ui.toast import ToastNotification
 
         # API 키 미설정 → 토스트 후 설정 다이얼로그 자동 열기
         if "API 키" in msg:
-            ToastNotification("OCR: API 키를 설정해 주세요")
+            ToastNotification("API 키를 설정해 주세요", icon="🔤")
             QTimer.singleShot(300, self._open_settings)
             return
 
@@ -855,7 +898,9 @@ class PasteFlowApp:
             return
         item = self.db.get_item(item_id)
         if item and item.image_data:
-            popup = ImagePreviewPopup.open_new(item.image_data, self.panel.geometry())
+            popup = ImagePreviewPopup.open_new(item, self.panel.geometry())
+            popup.copy_requested.connect(self._on_copy_item)
+            popup.ocr_requested.connect(self._on_ocr_image_item)
             self._image_preview_windows[item_id] = popup
             popup.destroyed.connect(lambda _=None, iid=item_id: self._image_preview_windows.pop(iid, None))
 
