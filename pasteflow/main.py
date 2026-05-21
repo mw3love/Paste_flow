@@ -24,6 +24,7 @@ from pasteflow.ui.panel import (
 from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.text_preview import TextPreviewPopup
 from pasteflow.ui.tray import TrayIcon
+from pasteflow.ui.paste_hud import PasteHud
 from pasteflow.ui.settings_dialog import SettingsDialog
 from pasteflow.ui.theme import COLORS
 
@@ -387,6 +388,7 @@ _SYNC_KEYS = frozenset({
     "hotkey_ocr_trigger",
     "history_max",
     "panel_auto_close",
+    "notify_on_copy",
 })
 
 
@@ -434,9 +436,9 @@ class _SignalBridge(QObject):
     """훅 스레드 → 메인 스레드 시그널 전달"""
     paste_happened     = pyqtSignal()
     new_item_saved     = pyqtSignal(object)  # 모든 복사 경로: DB + 큐 추가
+    copy_toast         = pyqtSignal(object, int)  # 복사 알림 토스트 (item, 큐 개수)
     panel_toggle       = pyqtSignal()        # 패널 토글 단축키 (훅 스레드 → 메인)
-    paste_queue_popped = pyqtSignal()        # 첫 순차 붙여넣기 발생 (패널 팝업용)
-    paste_queue_done   = pyqtSignal()        # 큐 소진 (패널 자동 숨기기용)
+    paste_queue_done   = pyqtSignal()        # 큐 소진 (붙여넣기 HUD fade-out용)
     ocr_requested      = pyqtSignal()        # 훅 스레드 → 메인: OCR 오버레이 띄우기
     ocr_done           = pyqtSignal(str)     # 워커 스레드 → 메인: OCR 결과 텍스트
     ocr_error          = pyqtSignal(str)     # 워커 스레드 → 메인: 에러 메시지
@@ -453,18 +455,13 @@ class PasteFlowApp:
         self._bridge = _SignalBridge()
         self._bridge.paste_happened.connect(self._update_paste_ui)
         self._bridge.new_item_saved.connect(self._on_new_item_ui)
+        self._bridge.copy_toast.connect(self._on_copy_toast)
         self._bridge.panel_toggle.connect(self._toggle_panel)
-        self._bridge.paste_queue_popped.connect(self._on_paste_queue_popped)
         self._bridge.paste_queue_done.connect(self._on_paste_queue_done)
         self._bridge.ocr_requested.connect(self._on_ocr_requested)
         self._bridge.ocr_done.connect(self._on_ocr_done)
         self._bridge.ocr_error.connect(self._on_ocr_error)
 
-        self._auto_hide_timer = QTimer()
-        self._auto_hide_timer.setSingleShot(True)
-        self._auto_hide_timer.setInterval(1000)
-        self._auto_hide_timer.timeout.connect(self._auto_hide_panel)
-        self._panel_opened_by_paste = False  # 순차 붙여넣기로 열린 패널인지 추적
         self._saved_panel_geometry = None
         self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
         self._text_preview_windows: dict[int, TextPreviewPopup] = {}
@@ -493,6 +490,10 @@ class PasteFlowApp:
         self.panel.winId()
         self.tray = TrayIcon()
 
+        # 순차 붙여넣기 진행 HUD (단일 인스턴스 재사용)
+        self.paste_hud = PasteHud()
+        self.paste_hud.winId()
+
         # OCR 오버레이
         from pasteflow.ui.ocr_overlay import OcrOverlay
         self._ocr_overlay = OcrOverlay()
@@ -519,7 +520,6 @@ class PasteFlowApp:
         self.tray.panel_toggle_requested.connect(self._toggle_panel)
         self.tray.settings_requested.connect(self._open_settings)
 
-        self.panel.panel_hidden.connect(self._on_panel_hidden)
         self.panel.paste_item_requested.connect(self._on_panel_paste)
         self.panel.copy_item_requested.connect(self._on_copy_item)
         self.panel.combine_copy_requested.connect(self._on_combine_copy)
@@ -546,54 +546,50 @@ class PasteFlowApp:
         self.interceptor.set_ocr_hotkey(ocr_hotkey)
 
 
-    def _on_new_clipboard_item(self, item: ClipboardItem):
-        """Ctrl+Shift+C 경로: DB 저장 + 큐 추가 — 백그라운드 스레드에서 호출됨."""
+    def _persist_clipboard_item(self, item: ClipboardItem) -> ClipboardItem:
+        """DB 저장 + 큐 추가 + 패널 갱신 시그널. 복사 토스트는 띄우지 않는다.
+
+        OCR 결과처럼 자체 알림이 있는 경로가 이 메서드를 직접 호출해
+        복사 토스트 중복을 피한다.
+        """
         saved = self.db.save_item(item)
         self.queue.add_item(saved)
         self._bridge.new_item_saved.emit(saved)
+        return saved
+
+    def _on_new_clipboard_item(self, item: ClipboardItem):
+        """클립보드 모니터 콜백 (실제 Ctrl+C) — 백그라운드 스레드. 저장 + 복사 토스트."""
+        saved = self._persist_clipboard_item(item)
+        if self._notify_on_copy:
+            _, total = self.queue.get_status()
+            self._bridge.copy_toast.emit(saved, total)
+
+    def _on_copy_toast(self, item: ClipboardItem, queue_count: int):
+        """메인 스레드: 복사 알림 토스트 표시"""
+        from pasteflow.ui.toast import show_copy_toast
+        show_copy_toast(item, queue_count)
 
     def _on_duplicate_clipboard_item(self):
         """중복 클립보드 콜백 — 무시 (중복은 큐/DB에 추가하지 않음)."""
         pass
 
     def _on_new_item_ui(self, saved: ClipboardItem):
-        """메인 스레드에서 UI 갱신 — 패널이 열려 있을 때만 갱신"""
+        """메인 스레드에서 UI 갱신 — 패널 갱신 + 진행 HUD 정리"""
         if self.panel.isVisible():
             self._refresh_panel()
+        # 새 복사가 발생하면 진행 중이던 붙여넣기 시퀀스는 무효 — HUD 정리
+        self.paste_hud.finish()
 
     def _on_paste_from_hook(self, item: ClipboardItem):
         """붙여넣기 콜백 — 훅 스레드에서 호출됨 → 시그널로 메인 스레드 전달"""
         self._bridge.paste_happened.emit()
         pointer, total = self.queue.get_status()
-        if pointer == 1:
-            self._bridge.paste_queue_popped.emit()
         if pointer >= total and total > 0:
             self._bridge.paste_queue_done.emit()
 
-    def _on_paste_queue_popped(self):
-        """첫 순차 붙여넣기 발생 — 패널이 닫혀 있으면 마우스 근처에 팝업"""
-        if not self.panel.isVisible():
-            self._panel_opened_by_paste = True
-            self._apply_saved_panel_size()
-            self.panel.show_near_cursor()
-            self._refresh_panel()
-
     def _on_paste_queue_done(self):
-        """큐 소진 — 순차 붙여넣기로 열린 패널이면 1초 후 숨기기"""
-        if self._panel_opened_by_paste and self.panel.isVisible():
-            self._auto_hide_timer.start()
-
-    def _auto_hide_panel(self):
-        """자동 숨기기 타이머 만료 — 패널 숨기기"""
-        if self._panel_opened_by_paste:
-            self._panel_opened_by_paste = False
-            if self.panel.isVisible():
-                self.panel.hide_immediate()
-
-    def _on_panel_hidden(self):
-        """패널이 닫힐 때 자동 숨기기 타이머 취소 및 플래그 초기화"""
-        self._auto_hide_timer.stop()
-        self._panel_opened_by_paste = False
+        """큐 소진 — 진행 HUD를 잠시 뒤 숨김"""
+        self.paste_hud.finish()
 
     def _on_auto_close_changed(self, value: bool):
         self.db.set_setting("panel_auto_close", "1" if value else "0")
@@ -662,7 +658,8 @@ class PasteFlowApp:
         # 클립보드 먼저 입력 — _set_clipboard가 내부에서 monitor._self_triggered를 설정해
         # 클립보드 모니터가 동일 항목을 재감지(큐 중복 추가)하지 않도록 함
         self.interceptor._set_clipboard(item)
-        self._on_new_clipboard_item(item)
+        # OCR은 아래에서 자체 토스트를 띄우므로 복사 토스트 없는 경로 사용
+        self._persist_clipboard_item(item)
 
         preview = text[:30].replace("\n", " ")
         suffix = "..." if len(text) > 30 else ""
@@ -729,17 +726,16 @@ class PasteFlowApp:
         self.tray.update_queue_status(pointer, total)
         if self.panel.isVisible():
             self.panel.update_queue_status(pointer, total)
+        if total > 0:
+            self.paste_hud.show_progress(self.queue.get_items(), pointer)
 
     def _toggle_panel(self):
         """패널 토글 — 단축키/트레이로 열 때 마우스 근처에 표시"""
         if self.panel.isVisible():
-            self._panel_opened_by_paste = False
-            self._auto_hide_timer.stop()
             self.panel.hide()
         else:
             # _prev_foreground_hwnd는 SetWinEventHook이 연속 추적 — 별도 캡처 불필요
             self.panel._user_activated = True
-            self._panel_opened_by_paste = False
             self._apply_saved_panel_size()
             self.panel.show_near_cursor()
             self._refresh_panel()
@@ -987,6 +983,8 @@ class PasteFlowApp:
         auto_close = self.db.get_setting("panel_auto_close", "1")
         self.panel.set_auto_close(auto_close == "1")
 
+        self._notify_on_copy = self.db.get_setting("notify_on_copy", "1") == "1"
+
         # 패널 위치/크기 — show_near_cursor() 시 적용하도록 저장만 해둠
         geo_json = self.db.get_setting("panel_geometry")
         if geo_json:
@@ -1010,6 +1008,7 @@ class PasteFlowApp:
             "ocr_gemini_base_url": self.db.get_setting("ocr_gemini_base_url", ""),
             "ocr_gemini_model": self.db.get_setting("ocr_gemini_model", ""),
             "ocr_gemini_model_cache": self.db.get_setting("ocr_gemini_model_cache", ""),
+            "notify_on_copy": self.db.get_setting("notify_on_copy", "1"),
         }
         dlg = SettingsDialog(current, parent=self.panel)
         dlg.settings_changed.connect(self._on_settings_changed)
@@ -1042,6 +1041,10 @@ class PasteFlowApp:
         # 자동 시작
         auto_start = new_settings.get("auto_start", "0") == "1"
         self._set_auto_start(auto_start)
+
+        # 복사 알림 토글
+        if "notify_on_copy" in new_settings:
+            self._notify_on_copy = new_settings["notify_on_copy"] == "1"
 
     # 부팅 후 Drive 마운트 대기 시간(초). 이 시간이 지난 뒤 launcher VBS가 PasteFlow를 실행한다.
     _AUTOSTART_DRIVE_WAIT_SEC = 15

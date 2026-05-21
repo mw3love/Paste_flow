@@ -40,7 +40,8 @@ pasteflow/
     ├── panel.py            # 전체 클립보드 패널
     ├── image_preview.py    # 이미지 미리보기 팝업 (다중 창 지원)
     ├── text_preview.py     # 텍스트 미리보기 팝업
-    ├── toast.py            # 토스트 알림 (시작 알림 등)
+    ├── toast.py            # 우하단 스택형 토스트 (복사 알림·시작·OCR)
+    ├── paste_hud.py        # 순차 붙여넣기 진행 HUD (큐 목록·포인터 실시간)
     ├── settings_dialog.py  # 설정 화면
     ├── ocr_overlay.py      # OCR 영역 선택 오버레이
     └── tray.py             # 시스템 트레이
@@ -58,13 +59,13 @@ tests/
 
 ### 모듈 역할
 
-- **`main.py`** — 오케스트레이션 레이어. 모든 모듈을 연결하고 클립보드 모니터 → DB → 큐 → UI 간 이벤트 흐름 관리. 단일 인스턴스 보장(Windows 뮤텍스), 시작 알림 토스트 표시. 순차 붙여넣기 첫 발생 시 패널 자동 팝업(`_on_paste_queue_popped`), 큐 소진 시 1초 후 자동 숨기기(`_auto_hide_timer`). 시작 시 HKCU `Run` 키 실제 등록 상태를 DB `auto_start`에 동기화(`_sync_auto_start_from_registry`). **자동 시작 등록 방식**: HKCU `Software\Microsoft\Windows\CurrentVersion\Run`에 `PasteFlow` 값을 등록(`_set_auto_start`). 등록되는 명령은 **항상 `wscript.exe "%LOCALAPPDATA%\PasteFlow\autostart_launcher.vbs"`** 한 형태로, 이 launcher VBS는 `_write_autostart_launcher_vbs()`가 매번 새로 생성하며 `WScript.Sleep _AUTOSTART_DRIVE_WAIT_SEC*1000`(기본 15초) 대기 후 실제 PasteFlow를 hidden 모드로 실행한다. 대기 목적은 Drive(코드가 위치한 곳)가 부팅 직후 마운트되기 전에 실행되어 실패하는 문제 방지. 실행 대상은 빌드 모드별로 분기: exe 빌드는 `sys.executable` 절대경로, 스크립트 모드는 `pythonw.exe` + `run.pyw` 절대경로 — `run.pyw`가 `os.chdir`로 working directory를 자기 위치로 설정하고 예외를 `%LOCALAPPDATA%\PasteFlow\logs\error.log`에 기록한다. **주의**: `python.exe`나 `-m pasteflow.main` 형태로 등록하면 (1) 콘솔 창이 뜨고 (2) Run 키의 working dir이 시스템 기본(`C:\Windows\System32` 등)이라 `ModuleNotFoundError`가 발생하므로 사용 금지. **로컬 데이터 경로**: DB(`pasteflow.db`)·로그·launcher VBS 모두 `%LOCALAPPDATA%\PasteFlow\` 아래 저장. `_resolve_db_path()`가 로컬 DB 부재 + 레거시 Drive DB 존재 시 1회 복사 마이그레이션 수행. **Drive 공유 설정(`settings.json`)**: 코드와 같은 Drive 위치에 `settings.json` 저장 — `_SYNC_KEYS` 화이트리스트(OCR API 키·base_url·모델·언어·엔진, 패널/OCR 단축키, history_max, panel_auto_close)만 양방향 동기화. 앱 시작 시 `_load_shared_settings()`가 화이트리스트 키를 DB에 덮어쓰고, 설정 변경 시 `_save_shared_settings()`가 화이트리스트 키만 JSON에 병합 저장. **동기화 제외 키**: `auto_start`(레지스트리 바인딩), `panel_geometry`(모니터 종속), `ocr_gemini_model_cache`(네트워크 캐시). Named Pipe IPC(`\\.\pipe\PasteFlow_IPC`) 서버 운영 — 두 번째 인스턴스 실행 시 패널 토글 신호 수신 후 해당 인스턴스 즉시 종료. **드래그 붙여넣기 헬퍼 함수** (panel.py의 `drag_to_app_requested` 시그널 처리): `_find_deepest_child()` — 커서 위치 최하위 자식 HWND 재귀 탐색; `_get_explorer_subfolder_at_cursor()` — SysListView32에서 커서 위치 서브폴더 경로 반환(크로스 프로세스 LVM_HITTEST); `_get_explorer_folder()` — CabinetWClass HWND → 드롭 대상 폴더 경로; `_get_desktop_path()` — 사용자 바탕화면 경로; `_save_image_to_folder()` — image_data를 폴더에 PNG 파일로 저장; `_activate_and_send_ctrl_v()` — AttachThreadInput으로 포그라운드 잠금 우회 후 SendInput(Ctrl+V). `_start_foreground_tracker()`는 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`으로 포그라운드 창을 연속 추적해 드래그 대상 창을 확인한다.
+- **`main.py`** — 오케스트레이션 레이어. 모든 모듈을 연결하고 클립보드 모니터 → DB → 큐 → UI 간 이벤트 흐름 관리. 단일 인스턴스 보장(Windows 뮤텍스), 시작 알림 토스트 표시. 순차 붙여넣기 시 진행 HUD(`PasteHud`)를 표시·실시간 갱신하고 큐 소진/중단 시 fade-out한다(`_update_paste_ui`/`_on_paste_queue_done`). 실제 복사(클립보드 모니터 경로) 시 우하단 스택 토스트 표시(`_on_copy_toast` — 설정 `notify_on_copy`로 on/off, OCR 결과는 자체 토스트가 있어 `_persist_clipboard_item`으로 우회). 시작 시 HKCU `Run` 키 실제 등록 상태를 DB `auto_start`에 동기화(`_sync_auto_start_from_registry`). **자동 시작 등록 방식**: HKCU `Software\Microsoft\Windows\CurrentVersion\Run`에 `PasteFlow` 값을 등록(`_set_auto_start`). 등록되는 명령은 **항상 `wscript.exe "%LOCALAPPDATA%\PasteFlow\autostart_launcher.vbs"`** 한 형태로, 이 launcher VBS는 `_write_autostart_launcher_vbs()`가 매번 새로 생성하며 `WScript.Sleep _AUTOSTART_DRIVE_WAIT_SEC*1000`(기본 15초) 대기 후 실제 PasteFlow를 hidden 모드로 실행한다. 대기 목적은 Drive(코드가 위치한 곳)가 부팅 직후 마운트되기 전에 실행되어 실패하는 문제 방지. 실행 대상은 빌드 모드별로 분기: exe 빌드는 `sys.executable` 절대경로, 스크립트 모드는 `pythonw.exe` + `run.pyw` 절대경로 — `run.pyw`가 `os.chdir`로 working directory를 자기 위치로 설정하고 예외를 `%LOCALAPPDATA%\PasteFlow\logs\error.log`에 기록한다. **주의**: `python.exe`나 `-m pasteflow.main` 형태로 등록하면 (1) 콘솔 창이 뜨고 (2) Run 키의 working dir이 시스템 기본(`C:\Windows\System32` 등)이라 `ModuleNotFoundError`가 발생하므로 사용 금지. **로컬 데이터 경로**: DB(`pasteflow.db`)·로그·launcher VBS 모두 `%LOCALAPPDATA%\PasteFlow\` 아래 저장. `_resolve_db_path()`가 로컬 DB 부재 + 레거시 Drive DB 존재 시 1회 복사 마이그레이션 수행. **Drive 공유 설정(`settings.json`)**: 코드와 같은 Drive 위치에 `settings.json` 저장 — `_SYNC_KEYS` 화이트리스트(OCR API 키·base_url·모델·언어·엔진, 패널/OCR 단축키, history_max, panel_auto_close, notify_on_copy)만 양방향 동기화. 앱 시작 시 `_load_shared_settings()`가 화이트리스트 키를 DB에 덮어쓰고, 설정 변경 시 `_save_shared_settings()`가 화이트리스트 키만 JSON에 병합 저장. **동기화 제외 키**: `auto_start`(레지스트리 바인딩), `panel_geometry`(모니터 종속), `ocr_gemini_model_cache`(네트워크 캐시). Named Pipe IPC(`\\.\pipe\PasteFlow_IPC`) 서버 운영 — 두 번째 인스턴스 실행 시 패널 토글 신호 수신 후 해당 인스턴스 즉시 종료. **드래그 붙여넣기 헬퍼 함수** (panel.py의 `drag_to_app_requested` 시그널 처리): `_find_deepest_child()` — 커서 위치 최하위 자식 HWND 재귀 탐색; `_get_explorer_subfolder_at_cursor()` — SysListView32에서 커서 위치 서브폴더 경로 반환(크로스 프로세스 LVM_HITTEST); `_get_explorer_folder()` — CabinetWClass HWND → 드롭 대상 폴더 경로; `_get_desktop_path()` — 사용자 바탕화면 경로; `_save_image_to_folder()` — image_data를 폴더에 PNG 파일로 저장; `_activate_and_send_ctrl_v()` — AttachThreadInput으로 포그라운드 잠금 우회 후 SendInput(Ctrl+V). `_start_foreground_tracker()`는 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`으로 포그라운드 창을 연속 추적해 드래그 대상 창을 확인한다.
 - **`models.py`** — `ClipboardItem` 데이터클래스 (id, content_type, text_content, image_data, html_content, rtf_content, preview_text, thumbnail, created_at, is_pinned, pin_order, extra_formats). `extra_formats`는 `{format_id: bytes}` dict — 노션 등 앱 전용 포맷 보존.
 - **`database.py`** — SQLite(`pasteflow.db`). `clipboard_items`(50개 FIFO 히스토리)와 `settings` 두 테이블. 고정(pin) 항목은 50개 제한에서 제외. `history_order`는 DB 전용 컬럼(ClipboardItem 필드 아님) — 비고정 항목 표시 순서 관리.
 - **`clipboard_monitor.py`** — `WM_CLIPBOARDUPDATE` Windows 이벤트 기반 백그라운드 감시. 텍스트, 이미지, HTML, RTF 캡처. `_self_triggered` 플래그로 자체 트리거 방지. `_compute_hash()`로 콘텐츠 해시를 계산해 직전 항목과 동일하면 중복 추가 방지(`content_hash == _last_hash` 비교). `_create_thumbnail()`로 DIB/PNG 데이터에서 썸네일 생성.
 - **`paste_queue.py`** — 순차 붙여넣기 큐 관리. 붙여넣기 진행 중(pointer>0) 새 복사 → 큐 리셋 후 새 항목부터 시작. 붙여넣기 전 연속 복사 → 누적. 소진 시 None 반환. 추가 공개 메서드: `set_queue(items, pointer=0)` — 패널에서 특정 항목부터 시작할 때 큐를 직접 교체; `undo_last()` — 포인터를 1 감소시켜 마지막 붙여넣기를 1단계 되돌리기; `clear()` — 큐 및 포인터 초기화.
 - **`paste_interceptor.py`** — WH_KEYBOARD_LL 저수준 키보드 훅으로 단축키 감지:
-  - **Ctrl+Shift+V**: 큐에서 다음 항목 가져오기 → 클립보드 교체 → `_send_clean_key(VK_V)` 호출(현재 눌린 수정키 해제 → Ctrl+V SendInput → 수정키 복원) (suppress). 붙여넣기 직전 summary 항목이면 DB에서 전체 데이터 로드(인터셉터 생성 시 주입된 `get_full_item` 콜백 호출 → 실제 DB 메서드는 `db.get_item`).
+  - **Ctrl+Shift+V**: 큐에서 다음 항목 가져오기 → 클립보드 교체 → `_send_clean_key(VK_V)` 호출(현재 눌린 수정키 해제 → Ctrl+V SendInput → 수정키 복원) (suppress). `_send_clean_key`는 수정키 해제 직전·복원 직후 미할당 키 `VK_MASK`(0xE8)를 톡 쳐서, V가 suppress돼 "벌거벗은 Ctrl+Shift"로 오인되어 Windows 입력기 전환(한컴↔MS) 팝업이 뜨는 것을 막는다. 붙여넣기 직전 summary 항목이면 DB에서 전체 데이터 로드(인터셉터 생성 시 주입된 `get_full_item` 콜백 호출 → 실제 DB 메서드는 `db.get_item`).
   - **패널 토글 단축키** (기본 `ctrl+space`, 설정 가능): 패널 열기/닫기. `set_panel_hotkey()`로 런타임 변경 가능. RegisterHotKey 대신 WH_KEYBOARD_LL을 사용하므로 탐색기 등 모든 포그라운드 앱에서 동작.
   - **절대 일반 Ctrl+V 키 이벤트를 차단하지 않음.**
   - 추가 공개 메서드: `direct_paste(item)` — 순차 큐 포인터 변경 없이 즉시 붙여넣기(더블클릭·드래그 경로 사용); `send_ctrl_v_to(hwnd)` — 대상 윈도우 포커스 후 Ctrl+V 전송.
@@ -89,9 +90,9 @@ tests/
   - 고정 항목 **드래그 → 재정렬**: fake drag 방식 (QDrag 미사용). 커서 아래 고정 항목 하이라이트 후 마우스 업 시 순서 교환.
   - 히스토리 항목 **드래그 → 재정렬**: `history_reorder_requested` 시그널 → main이 DB 업데이트.
   - **`update_queue_highlight()`**: 위젯 재생성 없이 색상만 업데이트하는 빠른 경로 (큐 상태 변경 시 사용).
-  - **`show_near_cursor()`**: 마우스 커서 우하단 +16px에 패널 표시. 화면 경계 초과 시 반전. 단축키/트레이/순차 붙여넣기 자동 팝업 모두 이 메서드 사용.
+  - **`show_near_cursor()`**: 마우스 커서 우하단 +16px에 패널 표시. 화면 경계 초과 시 반전. 단축키/트레이로 패널을 열 때 사용.
   - **자동 닫기 토글 버튼(📌)**: 헤더 우측에 배치. ctypes `SetWindowPos(HWND_TOPMOST/NOTOPMOST)`로 TOPMOST 플래그만 변경(창 재생성·깜빡임 없음). 기본값: 자동 닫기 OFF(항상 위에 ON). `_auto_close` 플래그로 관리 — `False`이면 포커스를 잃어도 자동 닫히지 않음(`changeEvent` 조건: `not self._auto_close`). DB `settings`에 저장. `set_auto_close(value)` 메서드로 외부에서 설정.
-  - **`panel_hidden` 시그널**: `hideEvent`에서 emit → main이 자동 숨기기 타이머 취소 및 `_panel_opened_by_paste` 플래그 초기화.
+  - **`panel_hidden` 시그널**: `hideEvent`에서 emit. (패널 자동 팝업이 제거되어 현재 main에서 소비하지 않음 — 향후 훅 용도로 시그널만 유지.)
   - **`auto_close_changed(bool)` 시그널**: 버튼 클릭 시 emit → main이 DB 저장.
   - **각 항목(PanelItemWidget)은 최대 5줄까지 표시**한다. 높이는 `label_h = visual_lines * fm.lineSpacing() + 8`, `widget_h = label_h + 12` 공식으로 계산. 창 리사이즈 시 `resizeEvent` + `_adjust_text_height()`로 동적 재계산. **레이블과 위젯 모두에 `setFixedHeight`를 명시적으로 설정**해야 한다(위젯에만 설정하면 레이블 높이가 따라오지 않아 클리핑 발생).
 - **`image_preview.py`** — 이미지 미리보기 팝업. 다중 창 동시 표시 지원(`open_new()`로 생성). 휠 줌, 드래그 이동, 더블클릭 닫기, ESC 닫기. 커서가 있는 모니터에 배치(`screenAt()`). **활성/비활성 테두리**: 비활성 시 주황(`PEACH`)으로 창 존재 상시 노출, 클릭으로 활성될 때 파랑(`BLUE`)으로 강조 — QSS 동적 프로퍼티가 런타임에 재반영 안 돼 `_apply_active_style(active)`에서 스타일시트 직접 교체.
@@ -104,9 +105,10 @@ tests/
   - **우클릭 메뉴**: `전체 복사` / `수정` / `닫기` (패널 메뉴와 동일 명칭). 시그널 `copy_requested(ClipboardItem)` → main의 `_on_copy_item`, `edit_requested(item_id)` → main의 `_on_preview_edit_request`(`EditItemDialog` 띄우고 `_on_edit_item`으로 위임). QPlainTextEdit 기본 우클릭 메뉴는 `setContextMenuPolicy(NoContextMenu)`로 차단.
   - **활성/비활성 테두리**: 이미지 미리보기와 동일 정책(비활성 주황, 활성 파랑). 프레임리스 최상위 위젯에 건 테두리가 자식에 가려지는 문제를 피하기 위해 내부 `popup_container`에 적용.
   - **`_clamp_to_screen(avail)`**: resize 후 popup이 화면 밖으로 나가면 안쪽으로 끌어들임.
-- **`toast.py`** — 토스트 알림. 시작 시 "PasteFlow 시작됨" 표시.
+- **`toast.py`** — 우하단 토스트 알림. `_ToastStack` 싱글턴이 활성 토스트를 코너 기준 위로 스택(최신=맨 아래)하고 닫힐 때 재정렬, 최대 5개 동시 표시(초과 시 가장 오래된 것 즉시 제거). `ToastNotification`(아이콘+메시지+선택적 배지), `show_copy_toast(item, queue_count)`(복사 알림 — 미리보기+큐 개수 배지, 2초), `reserve_bottom(px)`(HUD 등 우하단 위젯을 위해 스택 하단 여백 확보). 시작 알림·OCR 알림도 이 스택을 공유한다.
+- **`paste_hud.py`** — 순차 붙여넣기 진행 HUD. 우하단 비활성 창(`WA_ShowWithoutActivating` — 포커스 미탈취), 큐 항목 목록을 `✓`(완료·흐림)·`▶`(다음·강조)·`·`(대기)로 표시하고 헤더에 `순차 붙여넣기 n/total`. 단일 인스턴스 재사용 — `show_progress(items, pointer)`로 표시·갱신, `finish()`로 1.2초 후 fade-out. 큐 10개 초과 시 "외 N개"로 축약. 표시 중 `toast.reserve_bottom()`을 호출해 복사 토스트가 HUD 위로 쌓이게 한다.
 - **`tray.py`** — 시스템 트레이. 좌클릭 시 `panel_toggle_requested` 시그널 emit → main이 패널 토글.
-- **`settings_dialog.py`** — 단축키 커스터마이징, 히스토리 제한, 자동 시작, 자동 닫기/숨기기 설정. OCR 언어 콤보는 `OcrEngine.winrt_supported_languages()`로 동적 채움(winocr 미설치 시 기본 목록 폴백). Gemini 모델 콤보 옆 ↻ **새로고침 버튼**(Qt 표준 아이콘 `SP_BrowserReload` — 폰트 무관 보장)으로 `OcrEngine.list_gemini_models()` 호출 → 결과를 콤보에 반영하고 `KEY_OCR_GEMINI_MODEL_CACHE`(JSON list)에 저장 → 다음 실행 시 캐시 로드. 네트워크 호출은 `threading.Thread` + 내부 시그널 `_models_fetched(list, str)`로 UI 스레드 안전 통신. 기본 모델 목록은 `_DEFAULT_GEMINI_MODELS = ("gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-2.5-pro")`. 콤보는 **가격 순 정렬**(`_model_cost_rank`: flash-lite=0 < flash=1 < pro=2)로 저렴한 모델이 항상 위에 표시. 콤보 바로 아래 회색 힌트 라벨(`_model_hint`)이 `💡 가장 저렴: {모델명}`을 안내하며 콤보 갱신 시 `_update_model_hint()`로 자동 동기화.
+- **`settings_dialog.py`** — 단축키 커스터마이징, 히스토리 제한, 자동 시작, 복사 알림 on/off(`notify_on_copy`) 설정. OCR 언어 콤보는 `OcrEngine.winrt_supported_languages()`로 동적 채움(winocr 미설치 시 기본 목록 폴백). Gemini 모델 콤보 옆 ↻ **새로고침 버튼**(Qt 표준 아이콘 `SP_BrowserReload` — 폰트 무관 보장)으로 `OcrEngine.list_gemini_models()` 호출 → 결과를 콤보에 반영하고 `KEY_OCR_GEMINI_MODEL_CACHE`(JSON list)에 저장 → 다음 실행 시 캐시 로드. 네트워크 호출은 `threading.Thread` + 내부 시그널 `_models_fetched(list, str)`로 UI 스레드 안전 통신. 기본 모델 목록은 `_DEFAULT_GEMINI_MODELS = ("gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-2.5-pro")`. 콤보는 **가격 순 정렬**(`_model_cost_rank`: flash-lite=0 < flash=1 < pro=2)로 저렴한 모델이 항상 위에 표시. 콤보 바로 아래 회색 힌트 라벨(`_model_hint`)이 `💡 가장 저렴: {모델명}`을 안내하며 콤보 갱신 시 `_update_model_hint()`로 자동 동기화.
 - **`ocr_overlay.py`** — 모니터별 분리 오버레이. `OcrOverlay`는 매니저(QObject 베이스, QWidget 아님)이고 실제 위젯은 `_ScreenOverlay`로 각 QScreen마다 1개씩 생성. `start()` 호출 시 모니터 수만큼 `_ScreenOverlay`를 만들고 각각 자기 화면을 `screen.grabWindow(0, 0, 0, w, h)`로 캡처해 표시. 한 모니터에서 드래그 시작되면 `drag_started` 시그널로 매니저가 다른 오버레이를 `deactivate()`(마스크만 표시·입력 차단). ESC/우클릭은 어느 오버레이에서든 전체 취소. **다중 DPI 모니터 대응**: 가상 데스크톱 전체를 단일 위젯으로 덮으면 Qt 백킹 스토어 DPR이 하나로 고정돼, DPR이 다른 모니터에 진입할 때 좌표·크기가 어긋나 고DPI 노트북 화면이 좌상단 일부로 축소되는 증상이 발생한다. 모니터별 분리 위젯 + `setScreen()` 명시 바인딩으로 Qt가 모니터별 DPR을 독립 처리하므로 문제 자체가 발생하지 않는다. 공개 API(`region_captured(QPixmap)`, `cancelled()`, `start()`)는 호출부 변경 없이 유지.
 
 ### 단축키 체계
@@ -126,18 +128,18 @@ tests/
 사용자 복사 → WM_CLIPBOARDUPDATE → ClipboardMonitor
   → database.save(item)
   → paste_queue.add_item(item) → 진행 중이면 큐 리셋, 아니면 누적 + 포인터 0
-  → panel이 열려 있으면 갱신
+  → panel이 열려 있으면 갱신 · 복사 토스트 표시(notify_on_copy 시) · 진행 HUD 정리
 
 사용자 Ctrl+Shift+V (키다운) → PasteInterceptor._on_ctrl_shift_v()
   → paste_queue.get_next()
   → 큐 소진이면 → 아무것도 안 함 (suppress만, OS 기본 동작 없음)
   → 항목 있으면 → (필요 시 DB에서 전체 데이터 로드) → win32clipboard로 클립보드 교체
                 → Ctrl+V SendInput 주입 → OS 기본 Ctrl+V가 교체된 내용 붙여넣기
-  → _on_paste_from_hook() → pointer==1이면 paste_queue_popped 시그널 emit
+  → _on_paste_from_hook() → paste_happened 시그널 emit
                            → pointer>=total이면 paste_queue_done 시그널 emit
 
-paste_queue_popped → 패널이 닫혀 있으면 show_near_cursor()로 팝업, _panel_opened_by_paste=True
-paste_queue_done  → _panel_opened_by_paste이면 _auto_hide_timer(1초) 시작 → 패널 자동 숨기기
+paste_happened   → _update_paste_ui() → PasteHud.show_progress()로 진행 HUD 표시·갱신
+paste_queue_done → PasteHud.finish() → 1.2초 후 HUD fade-out
 ```
 
 ### 설계 규칙

@@ -37,6 +37,7 @@ VK_C = 0x43
 VK_CONTROL = 0x11
 VK_SHIFT = 0x10
 VK_MENU = 0x12  # Alt
+VK_MASK = 0xE8  # 미할당 가상 키 — Ctrl+Shift 조합을 더럽혀 입력기 전환 팝업 방지
 
 # SendInput 관련 상수
 INPUT_KEYBOARD = 1
@@ -384,13 +385,26 @@ class PasteInterceptor:
         수정키를 복원하지 않으면 SendInput의 가상 key-up 이벤트가 남아
         사용자가 Ctrl+Shift를 계속 누른 채 V를 반복할 때 두 번째 입력부터
         GetAsyncKeyState가 수정키 미입력으로 반환해 훅이 가로채지 못한다.
+
+        Ctrl+Shift 마스킹: V를 suppress하면 Windows는 "벌거벗은 Ctrl+Shift"로
+        인식해 키보드 입력기 전환(한컴↔MS) 팝업을 띄운다. 미할당 키(VK_MASK)를
+        Ctrl+Shift가 눌린 상태에서 한 번 눌러 조합을 더럽히면 이후 Ctrl+Shift up이
+        전환 제스처로 해석되지 않는다. 해제 직전·복원 직후 두 번 넣어 우리가
+        주입하는 해제와 사용자의 실제 해제 양쪽을 모두 막는다.
         """
         # 현재 눌려 있는 수정키 확인 (Ctrl 포함 — Ctrl+V 전송 후 Ctrl-up 때문에 복원 필요)
         held_ctrl  = bool(_user32.GetAsyncKeyState(VK_CONTROL) & 0x8000)
         held_shift = bool(_user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
         held_alt   = bool(_user32.GetAsyncKeyState(VK_MENU) & 0x8000)
 
+        # Ctrl+Shift가 함께 눌려 있을 때만 입력기 전환 마스킹이 필요
+        need_mask = held_ctrl and held_shift
+
         inputs = []
+        # 0) 해제 직전 마스킹 — 곧 주입할 Ctrl+Shift 해제가 전환으로 해석되는 것 방지
+        if need_mask:
+            inputs += [_make_key_input(VK_MASK),
+                       _make_key_input(VK_MASK, KEYEVENTF_KEYUP)]
         # 1) 모든 수정키 해제 (순수 Ctrl+key만 앱에 전달하기 위해)
         if held_alt:   inputs.append(_make_key_input(VK_MENU,    KEYEVENTF_KEYUP))
         if held_shift: inputs.append(_make_key_input(VK_SHIFT,   KEYEVENTF_KEYUP))
@@ -406,6 +420,10 @@ class PasteInterceptor:
         if held_ctrl:  inputs.append(_make_key_input(VK_CONTROL))
         if held_shift: inputs.append(_make_key_input(VK_SHIFT))
         if held_alt:   inputs.append(_make_key_input(VK_MENU))
+        # 4) 복원 직후 마스킹 — 사용자가 나중에 Ctrl+Shift를 뗄 때도 전환 방지
+        if need_mask:
+            inputs += [_make_key_input(VK_MASK),
+                       _make_key_input(VK_MASK, KEYEVENTF_KEYUP)]
         _send_inputs(inputs)
 
     def direct_paste(self, item: ClipboardItem, target_hwnd=None):

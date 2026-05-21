@@ -214,6 +214,7 @@ class SettingsDialog(QDialog):
     KEY_PANEL_TOGGLE = "hotkey_panel_toggle"
     KEY_HISTORY_MAX = "history_max"
     KEY_AUTO_START = "auto_start"
+    KEY_NOTIFY_ON_COPY = "notify_on_copy"
     KEY_OCR_HOTKEY = "hotkey_ocr_trigger"
     KEY_OCR_LANG = "ocr_language"
     KEY_OCR_ENGINE = "ocr_engine"
@@ -238,7 +239,7 @@ class SettingsDialog(QDialog):
 
     def _setup_window(self):
         self.setWindowTitle("PasteFlow 설정")
-        self.setFixedSize(360, 690)
+        self.setFixedSize(360, 720)
         self.setWindowFlags(
             Qt.WindowType.Dialog
             | Qt.WindowType.WindowCloseButtonHint
@@ -387,6 +388,9 @@ class SettingsDialog(QDialog):
         self._auto_start_check = QCheckBox("Windows 시작 시 자동 실행")
         general_form.addRow(self._auto_start_check)
 
+        self._notify_copy_check = QCheckBox("복사 시 우하단 알림 표시")
+        general_form.addRow(self._notify_copy_check)
+
         layout.addWidget(general_group)
 
         # ── 버튼 ──
@@ -457,6 +461,9 @@ class SettingsDialog(QDialog):
         self._history_max_spin.setValue(history_max)
         self._auto_start_check.setChecked(
             self._settings.get(self.KEY_AUTO_START, "0") == "1"
+        )
+        self._notify_copy_check.setChecked(
+            self._settings.get(self.KEY_NOTIFY_ON_COPY, "1") == "1"
         )
 
     @staticmethod
@@ -571,6 +578,7 @@ class SettingsDialog(QDialog):
             self.KEY_OCR_ENGINE: engine,
             self.KEY_HISTORY_MAX: str(self._history_max_spin.value()),
             self.KEY_AUTO_START: "1" if auto_start else "0",
+            self.KEY_NOTIFY_ON_COPY: "1" if self._notify_copy_check.isChecked() else "0",
         }
         # 엔진별 key/url 저장 (서로 덮어쓰지 않음)
         if engine == "gemini":
