@@ -81,7 +81,7 @@ tests/
 - **`panel.py`** — 고정 섹션 + 히스토리 패널 (검색 기능 없음 — 의도적으로 제거).
   - 항목 **단일 좌클릭**: 선택(하이라이트)만. Ctrl+클릭/Shift+클릭으로 다중 선택.
   - 항목 **더블클릭**: `paste_item_requested` → 즉시 붙여넣기.
-  - **우클릭 컨텍스트 메뉴**: "큐에 추가"(`queue_select_requested`) / 고정·해제 / 복사 / 수정(텍스트만) / 삭제 / 미리보기(이미지→`preview_image_requested` emit, 텍스트→`TextPreviewPopup.instance().toggle_preview()` 직접 호출).
+  - **우클릭 컨텍스트 메뉴**: "큐에 추가"(`queue_select_requested`) / 고정·해제 / 복사 / 수정(텍스트만) / 삭제 / 미리보기(이미지→`preview_image_requested` emit, 텍스트→`preview_text_requested` emit). 둘 다 main에서 받아 `ImagePreviewPopup.open_new(...)` / `TextPreviewPopup.open_new(item, ...)` 호출 (동일 패턴).
   - 항목 **드래그 → 외부 앱**: fake drag(DragCopyCursor) 방식으로 붙여넣기.
     - **이미지 + Explorer(`CabinetWClass`) / 바탕화면(`Progman`, `WorkerW`)**: PNG 파일로 저장(`_save_image_to_folder()`). 서브폴더 아이콘 위에 드롭 시 해당 폴더에 저장.
     - **Win32/WinUI3 앱**: `WM_PASTE`.
@@ -94,8 +94,16 @@ tests/
   - **`panel_hidden` 시그널**: `hideEvent`에서 emit → main이 자동 숨기기 타이머 취소 및 `_panel_opened_by_paste` 플래그 초기화.
   - **`auto_close_changed(bool)` 시그널**: 버튼 클릭 시 emit → main이 DB 저장.
   - **각 항목(PanelItemWidget)은 최대 5줄까지 표시**한다. 높이는 `label_h = visual_lines * fm.lineSpacing() + 8`, `widget_h = label_h + 12` 공식으로 계산. 창 리사이즈 시 `resizeEvent` + `_adjust_text_height()`로 동적 재계산. **레이블과 위젯 모두에 `setFixedHeight`를 명시적으로 설정**해야 한다(위젯에만 설정하면 레이블 높이가 따라오지 않아 클리핑 발생).
-- **`image_preview.py`** — 이미지 미리보기 팝업. 다중 창 동시 표시 지원(`open_new()`로 생성). 휠 줌, 드래그 이동, 닫기 버튼, 더블클릭 닫기. 커서가 있는 모니터에 배치(`screenAt()`).
-- **`text_preview.py`** — 텍스트 미리보기 팝업. 싱글턴(`instance()`). `toggle_preview()` 호출 시 `isVisible()` 기반 단순 토글 (동일 항목 여부 미구분).
+- **`image_preview.py`** — 이미지 미리보기 팝업. 다중 창 동시 표시 지원(`open_new()`로 생성). 휠 줌, 드래그 이동, 더블클릭 닫기, ESC 닫기. 커서가 있는 모니터에 배치(`screenAt()`). **활성/비활성 테두리**: 비활성 시 주황(`PEACH`)으로 창 존재 상시 노출, 클릭으로 활성될 때 파랑(`BLUE`)으로 강조 — QSS 동적 프로퍼티가 런타임에 재반영 안 돼 `_apply_active_style(active)`에서 스타일시트 직접 교체.
+- **`text_preview.py`** — 텍스트 미리보기 팝업. 다중 창 동시 표시 지원(`open_new(item, panel_geom)` — `ClipboardItem` 전체를 받아 우클릭 메뉴의 복사·수정에 활용).
+  - **표시 위젯**: `QPlainTextEdit` (QLabel+QScrollArea 아님). `setWordWrapMode(WrapAtWordBoundaryOrAnywhere)`로 공백 없는 긴 URL/해시도 문자 단위 wrap. QLabel은 word-boundary 없는 토큰을 절대 잘라주지 않아 폐기.
+  - **"한 번에 다 보임" 정책**: 양쪽 스크롤바 영구 차단(`ScrollBarAlwaysOff`) + editor `FocusPolicy.NoFocus` — QPlainTextEdit 내부 가짜 vScroll(`vScrollMax≥1`)이 키보드(스페이스/PageDown)로 노출돼 빈 영역이 보이던 문제 차단. width는 `PREVIEW_INITIAL_MAX_W * scale` (zoom과 비례 확장, 화면 너비 cap), height는 화면 한계까지 자유 확장하여 모든 줄 표시.
+  - **`LineWrapMode` 동적 전환**: 자연 너비가 popup width cap 안에 들어오면 `NoWrap` 강제 (QPlainTextEdit의 viewport에 내부 padding이 있어 textWidth를 맞춰도 sub-pixel 차이로 wrap이 새는 경우 발생 — 휠 줌마다 1↔2줄 깜빡임의 원인). 초과 시에만 `WidgetWidth` wrap.
+  - **크기 계산**: 자연 너비/높이 측정에 독립 `QTextDocument` 사용 — QPlainTextEdit의 자체 document는 lazy layout이라 `setTextWidth` 직후 `size()`가 갱신 안 됨. `math.ceil(idealWidth())`로 sub-pixel 부족분 보정.
+  - **전체 창 드래그**: 텍스트 부분 선택 미지원(`NoTextInteraction`). 부분 텍스트가 필요하면 우클릭 메뉴 `수정`으로 편집 다이얼로그에서 자연스럽게 선택. viewport + popup 본체 양쪽 모두에서 left-drag 이동 처리.
+  - **우클릭 메뉴**: `전체 복사` / `수정` / `닫기` (패널 메뉴와 동일 명칭). 시그널 `copy_requested(ClipboardItem)` → main의 `_on_copy_item`, `edit_requested(item_id)` → main의 `_on_preview_edit_request`(`EditItemDialog` 띄우고 `_on_edit_item`으로 위임). QPlainTextEdit 기본 우클릭 메뉴는 `setContextMenuPolicy(NoContextMenu)`로 차단.
+  - **활성/비활성 테두리**: 이미지 미리보기와 동일 정책(비활성 주황, 활성 파랑). 프레임리스 최상위 위젯에 건 테두리가 자식에 가려지는 문제를 피하기 위해 내부 `popup_container`에 적용.
+  - **`_clamp_to_screen(avail)`**: resize 후 popup이 화면 밖으로 나가면 안쪽으로 끌어들임.
 - **`toast.py`** — 토스트 알림. 시작 시 "PasteFlow 시작됨" 표시.
 - **`tray.py`** — 시스템 트레이. 좌클릭 시 `panel_toggle_requested` 시그널 emit → main이 패널 토글.
 - **`settings_dialog.py`** — 단축키 커스터마이징, 히스토리 제한, 자동 시작, 자동 닫기/숨기기 설정. OCR 언어 콤보는 `OcrEngine.winrt_supported_languages()`로 동적 채움(winocr 미설치 시 기본 목록 폴백). Gemini 모델 콤보 옆 ↻ **새로고침 버튼**(Qt 표준 아이콘 `SP_BrowserReload` — 폰트 무관 보장)으로 `OcrEngine.list_gemini_models()` 호출 → 결과를 콤보에 반영하고 `KEY_OCR_GEMINI_MODEL_CACHE`(JSON list)에 저장 → 다음 실행 시 캐시 로드. 네트워크 호출은 `threading.Thread` + 내부 시그널 `_models_fetched(list, str)`로 UI 스레드 안전 통신. 기본 모델 목록은 `_DEFAULT_GEMINI_MODELS = ("gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-2.5-pro")`. 콤보는 **가격 순 정렬**(`_model_cost_rank`: flash-lite=0 < flash=1 < pro=2)로 저렴한 모델이 항상 위에 표시. 콤보 바로 아래 회색 힌트 라벨(`_model_hint`)이 `💡 가장 저렴: {모델명}`을 안내하며 콤보 갱신 시 `_update_model_hint()`로 자동 동기화.

@@ -9,7 +9,8 @@ from PyQt6.QtGui import QPixmap
 
 from pasteflow.ui.theme import (
     BASE as _BG, SURFACE0 as _SURFACE0, SURFACE1 as _BORDER,
-    SURFACE2 as _SURFACE2, TEXT as _TEXT, PEACH as _PEACH, BLUE as _BLUE,
+    SURFACE2 as _SURFACE2, TEXT as _TEXT, BLUE as _BLUE,
+    PEACH as _PEACH,
 )
 
 PREVIEW_MAX_W = 640
@@ -112,26 +113,8 @@ class ImagePreviewPopup(QWidget):
         self._original_pixmap: QPixmap | None = None
         self._scale_factor: float = 1.0
 
-        self.setStyleSheet(f"""
-            QWidget#popup_root {{
-                background-color: {_BG};
-                border: 1px solid {_BORDER};
-                border-radius: 6px;
-            }}
-            QWidget#popup_root[active="true"] {{
-                border: 2px solid {_BLUE};
-            }}
-            QWidget#img_wrapper {{
-                background: transparent;
-                border: none;
-            }}
-            QLabel#image_label {{
-                background: transparent;
-                border: 2px solid {_PEACH};
-            }}
-        """)
-
         self.setObjectName("popup_root")
+        self._apply_active_style(False)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -220,6 +203,7 @@ class ImagePreviewPopup(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            self.activateWindow()  # 클릭 시 활성화 → 테두리 표시 트리거
             self._drag_pos = (
                 event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             )
@@ -265,11 +249,33 @@ class ImagePreviewPopup(QWidget):
     # 활성화 외곽선 — 클릭으로 활성될 때 외곽 테두리 강조
     # ------------------------------------------------------------------
 
+    def _apply_active_style(self, active: bool):
+        """활성 상태에 따라 이미지 테두리를 직접 갱신.
+
+        QSS 동적 프로퍼티([active="true"]) + unpolish/polish 방식은
+        런타임에 재반영되지 않아, 스타일시트를 직접 교체한다.
+        비활성 시에는 주황 테두리로 창 존재를 상시 알리고,
+        클릭으로 활성될 때 파란 테두리로 강조한다.
+        """
+        border = _BLUE if active else _PEACH
+        self.setStyleSheet(f"""
+            QWidget#popup_root {{
+                background-color: {_BG};
+                border-radius: 6px;
+            }}
+            QWidget#img_wrapper {{
+                background: transparent;
+                border: none;
+            }}
+            QLabel#image_label {{
+                background: transparent;
+                border: 2px solid {border};
+            }}
+        """)
+
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange:
-            self.setProperty("active", self.isActiveWindow())
-            self.style().unpolish(self)
-            self.style().polish(self)
+            self._apply_active_style(self.isActiveWindow())
         super().changeEvent(event)
 
     # ------------------------------------------------------------------

@@ -18,7 +18,9 @@ from pasteflow.paste_queue import PasteQueue
 from pasteflow.clipboard_monitor import ClipboardMonitor
 from pasteflow.paste_interceptor import PasteInterceptor
 from pasteflow.hotkey_manager import HotkeyManager
-from pasteflow.ui.panel import ClipboardPanel, PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT
+from pasteflow.ui.panel import (
+    ClipboardPanel, EditItemDialog, PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT,
+)
 from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.text_preview import TextPreviewPopup
 from pasteflow.ui.tray import TrayIcon
@@ -869,10 +871,23 @@ class PasteFlowApp:
         item = self.db.get_item(item_id)
         if not item:
             return
-        text = item.text_content or item.preview_text or ""
-        popup = TextPreviewPopup.open_new(text, self.panel.geometry())
+        popup = TextPreviewPopup.open_new(item, self.panel.geometry())
+        popup.copy_requested.connect(self._on_copy_item)
+        popup.edit_requested.connect(self._on_preview_edit_request)
         self._text_preview_windows[item_id] = popup
         popup.destroyed.connect(lambda _=None, iid=item_id: self._text_preview_windows.pop(iid, None))
+
+    def _on_preview_edit_request(self, item_id: int):
+        """텍스트 미리보기 우클릭 메뉴 `수정` → 편집 다이얼로그 → 변경 시 기존 _on_edit_item으로 위임."""
+        from PyQt6.QtWidgets import QDialog
+        item = self.db.get_item(item_id)
+        if not item:
+            return
+        dialog = EditItemDialog(item.text_content or "", self.panel)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_text = dialog.get_text()
+            if new_text != (item.text_content or ""):
+                self._on_edit_item(item_id, new_text)
 
     def _on_clear_history(self):
         self.db.clear_history()
