@@ -42,7 +42,7 @@ class PanelItemWidget(QWidget):
     clicked = pyqtSignal(int, object)
     double_clicked = pyqtSignal(int)
     context_menu_requested = pyqtSignal(int, object)
-    external_drag_paste = pyqtSignal(int, QPoint)
+    external_drag_paste = pyqtSignal(int, QPoint, bool)  # (item_id, cursor_pos, alt_held)
 
     def __init__(
         self,
@@ -304,7 +304,10 @@ class PanelItemWidget(QWidget):
                         panel._ext_drag_active = False
                 self._apply_bg_style()  # 드래그 소스 강조 해제
                 if not self.window().geometry().contains(cursor_pos):
-                    self.external_drag_paste.emit(self.item_id, cursor_pos)
+                    alt_held = bool(
+                        QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier
+                    )
+                    self.external_drag_paste.emit(self.item_id, cursor_pos, alt_held)
                 elif self._is_pinned and panel:
                     panel._do_pin_reorder(self.item_id, panel._pin_drag_target_id)
                     panel._clear_pin_drag_highlight()
@@ -459,10 +462,11 @@ class ClipboardPanel(QWidget):
     preview_image_requested = pyqtSignal(int)  # item_id — 위치는 main이 panel.geometry()로 계산
     preview_text_requested = pyqtSignal(int)   # item_id — 동상
     ocr_item_requested = pyqtSignal(int)       # item_id — 이미지 항목에 OCR 적용
+    copy_image_as_path_requested = pyqtSignal(int)  # item_id — 이미지를 임시 PNG로 저장 후 경로를 클립보드에 텍스트로 복사
     open_settings_requested = pyqtSignal()
     quit_requested = pyqtSignal()
     clear_history_requested = pyqtSignal()
-    drag_to_app_requested = pyqtSignal(int, QPoint)
+    drag_to_app_requested = pyqtSignal(int, QPoint, bool)  # (item_id, cursor_pos, alt_held)
     queue_select_requested = pyqtSignal(int)    # item_id — 해당 항목부터 최신까지 큐 설정
     queue_deselect_requested = pyqtSignal(int)  # item_id — 큐 해제
     panel_hidden = pyqtSignal()  # 패널 숨겨질 때 emit
@@ -995,8 +999,8 @@ class ClipboardPanel(QWidget):
         widget.context_menu_requested.connect(self._on_item_context_menu)
         widget.external_drag_paste.connect(self._on_item_external_drag_paste)
 
-    def _on_item_external_drag_paste(self, item_id: int, cursor_pos: QPoint):
-        self.drag_to_app_requested.emit(item_id, cursor_pos)
+    def _on_item_external_drag_paste(self, item_id: int, cursor_pos: QPoint, alt_held: bool):
+        self.drag_to_app_requested.emit(item_id, cursor_pos, alt_held)
 
     # ── 이벤트 핸들러 ──
 
@@ -1112,6 +1116,8 @@ class ClipboardPanel(QWidget):
         if item.content_type == "image":
             ocr_action = menu.addAction("텍스트 추출(OCR)")
             ocr_action.triggered.connect(lambda: self.ocr_item_requested.emit(item_id))
+            path_action = menu.addAction("파일로 저장 후 경로 복사")
+            path_action.triggered.connect(lambda: self.copy_image_as_path_requested.emit(item_id))
         else:
             edit_action = menu.addAction("수정")
             edit_action.triggered.connect(lambda: self._on_edit_item(item))

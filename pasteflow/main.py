@@ -347,6 +347,17 @@ def _save_image_to_folder(image_data: bytes, folder: str) -> str:
     return path
 
 
+def _save_image_to_drop_temp(image_data: bytes) -> str:
+    """image_data를 %TEMP%\\PasteFlow\\ 아래 PNG로 저장하고 절대경로 반환.
+    Alt+드래그·우클릭 "파일로 저장 후 경로 복사"에서 공유 사용한다.
+    Claude Code CLI 등 "경로 텍스트"를 첨부로 받는 앱에 넘기기 위한 임시 파일.
+    """
+    import tempfile
+    folder = os.path.join(tempfile.gettempdir(), "PasteFlow")
+    os.makedirs(folder, exist_ok=True)
+    return _save_image_to_folder(image_data, folder)
+
+
 # ── 로컬 데이터 경로 (DB·로그) ────────────────────────────────────────────────
 
 
@@ -532,6 +543,7 @@ class PasteFlowApp:
         self.panel.preview_image_requested.connect(self._on_preview_image)
         self.panel.preview_text_requested.connect(self._on_preview_text)
         self.panel.ocr_item_requested.connect(self._on_ocr_image_by_id)
+        self.panel.copy_image_as_path_requested.connect(self._on_copy_image_as_path)
         self.panel.open_settings_requested.connect(self._open_settings)
         self.panel.quit_requested.connect(self._quit)
         self.panel.clear_history_requested.connect(self._on_clear_history)
@@ -684,6 +696,29 @@ class PasteFlowApp:
             ToastNotification("항목을 찾을 수 없습니다", icon="🔤")
             return
         self._on_ocr_image_item(item)
+
+    def _on_copy_image_as_path(self, item_id: int):
+        """우클릭 "파일로 저장 후 경로 복사" — 임시 PNG 저장 후 절대경로를 클립보드에 텍스트로 복사.
+        Claude CLI 등 "경로 텍스트"를 첨부로 받는 앱에 사용자가 직접 Ctrl+V로 붙여넣기 위한 경로.
+        """
+        from pasteflow.ui.toast import ToastNotification
+        item = self.db.get_item(item_id)
+        if not item or not item.image_data:
+            ToastNotification("이미지 데이터를 찾을 수 없습니다", icon="🔤")
+            return
+        try:
+            saved_path = _save_image_to_drop_temp(item.image_data)
+        except Exception as e:
+            ToastNotification(f"임시 파일 저장 실패 — {e}", icon="🔤")
+            return
+        path_item = ClipboardItem(
+            content_type="text",
+            text_content=saved_path,
+            preview_text=saved_path[:200],
+        )
+        # _set_clipboard가 monitor._self_triggered를 설정해 히스토리 자동 추가 방지
+        self.interceptor._set_clipboard(path_item)
+        ToastNotification(f"경로 복사됨: {os.path.basename(saved_path)}", icon="🔤")
 
     def _on_ocr_done(self, text: str):
         """메인 스레드: OCR 결과 → 클립보드 + DB + 큐 + 토스트"""
@@ -936,8 +971,9 @@ class PasteFlowApp:
         self.tray.update_queue_status(0, 0)
         self._refresh_panel()
 
-    def _on_drag_to_app(self, item_id: int, cursor_pos):
+    def _on_drag_to_app(self, item_id: int, cursor_pos, alt_held: bool = False):
         """패널 항목 드래그 → 외부 앱 붙여넣기.
+        - Alt+드래그 + 이미지: 임시 PNG로 저장 후 경로 텍스트 붙여넣기 (Claude CLI 등)
         - 이미지 + Explorer/바탕화면: PNG 파일로 저장
         - Win32/WinUI3: 재귀 탐색으로 찾은 최하위 컨트롤에 WM_PASTE
         - Electron/Chromium: AttachThreadInput + SetForegroundWindow + SendInput(Ctrl+V)
@@ -961,6 +997,25 @@ class PasteFlowApp:
             root_class = win32gui.GetClassName(root_hwnd)
         except Exception:
             pass
+
+        # Alt+드래그 + 이미지 → 임시 PNG 저장 + 경로 텍스트 클립보드 + SendInput(Ctrl+V)
+        # Windows Terminal의 claude CLI 등 "파일 경로 텍스트"를 첨부로 받는 앱 대응.
+        # WM_PASTE는 터미널이 무시하므로 무조건 SendInput 경로로 통일.
+        if alt_held and full_item.image_data and full_item.content_type == "image":
+            from pasteflow.ui.toast import ToastNotification
+            try:
+                saved_path = _save_image_to_drop_temp(full_item.image_data)
+            except Exception as e:
+                ToastNotification(f"임시 파일 저장 실패 — {e}", icon="🔤")
+                return
+            path_item = ClipboardItem(
+                content_type="text",
+                text_content=saved_path,
+                preview_text=saved_path[:200],
+            )
+            self.interceptor._set_clipboard(path_item)
+            _activate_and_send_ctrl_v(root_hwnd)
+            return
 
         # 이미지 항목 + Explorer/바탕화면 → PNG 파일 저장
         if full_item.image_data and full_item.content_type == "image":
