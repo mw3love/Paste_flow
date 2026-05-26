@@ -1,33 +1,71 @@
 """순차 붙여넣기 큐 & 포인터 관리"""
 import threading
+import time
 from typing import Optional
 from pasteflow.models import ClipboardItem
+
+# 마지막 복사로부터 이 시간(초) 이상 지난 새 복사는 큐 전체를 버리고 새 큐로 시작.
+# 사용자가 잠시 다른 일을 한 뒤 새 작업을 시작할 때 이전 큐가 잔존하는 것을 방지.
+DEFAULT_IDLE_RESET_SEC = 10.0
 
 
 class PasteQueue:
     """FIFO 순차 붙여넣기 큐 (스레드 안전)
 
-    - add_item(): 새 항목 추가, 포인터 0으로 리셋
-    - get_next(): 다음 항목 반환, 포인터 전진. 소진 시 None
+    두 가지 큐 초기화 트리거:
+      A. mark_plain_paste(): 일반 Ctrl+V 발생 → 즉시 clear()
+      B. idle timeout: 마지막 복사로부터 idle_reset_sec 초 이상 경과한 새 복사 →
+         이전 큐를 버리고 새 항목 1개로 시작
+
+    공개 메서드:
+      - add_item(): 새 항목 추가 (idle 만료 또는 pointer>0이면 리셋 후 추가, 아니면 누적)
+      - get_next(): 다음 항목 반환, 포인터 전진. 소진 시 None
+      - mark_plain_paste(): 일반 Ctrl+V 알림 (paste_interceptor가 훅에서 호출)
+      - set_idle_reset_sec(seconds): idle timeout 값 변경 (설정 다이얼로그에서 호출)
     """
 
-    def __init__(self):
+    def __init__(self, idle_reset_sec: float = DEFAULT_IDLE_RESET_SEC):
         self._items: list[ClipboardItem] = []
         self.pointer: int = 0
         self._lock = threading.Lock()
+        self._last_copy_time: float = 0.0
+        self.idle_reset_sec: float = float(idle_reset_sec)
+
+    def set_idle_reset_sec(self, seconds: float):
+        """idle timeout 값 변경 (런타임 설정 변경 시 호출)"""
+        with self._lock:
+            self.idle_reset_sec = float(seconds)
+
+    def _reset_unlocked(self):
+        """lock을 이미 잡은 상태에서 큐를 비운다 (내부 헬퍼)"""
+        self._items.clear()
+        self.pointer = 0
+        self._last_copy_time = 0.0
+
+    def mark_plain_paste(self):
+        """일반 Ctrl+V 발생 → 큐 즉시 비우기 (트리거 A)"""
+        with self._lock:
+            self._reset_unlocked()
 
     def add_item(self, item: ClipboardItem):
         """새 항목 추가
 
-        PRD F2-6: 붙여넣기 진행 전(pointer==0)이면 누적,
-        붙여넣기 진행 중(pointer>0)이면 큐 리셋 후 새 항목부터 시작.
-        히스토리(DB)에는 모든 항목이 유지됨.
+        리셋 조건:
+          1) 순차 붙여넣기 진행 중(pointer>0) — 기존 PRD F2-6
+          2) idle timeout 만료 (마지막 복사로부터 idle_reset_sec 초 경과)
+        그 외에는 누적. 히스토리(DB)에는 모든 항목이 유지됨.
         """
         with self._lock:
-            if self.pointer > 0:
+            now = time.monotonic()
+            idle_expired = (
+                self._last_copy_time > 0.0
+                and (now - self._last_copy_time) >= self.idle_reset_sec
+            )
+            if self.pointer > 0 or idle_expired:
                 self._items.clear()
             self._items.append(item)
             self.pointer = 0
+            self._last_copy_time = now
 
     def get_next(self) -> Optional[ClipboardItem]:
         """다음 붙여넣기 항목 반환. 소진 시 None"""
@@ -72,7 +110,6 @@ class PasteQueue:
             self.pointer = pointer
 
     def clear(self):
-        """큐 및 포인터 초기화"""
+        """큐 및 포인터 초기화 (사용자 명시적 호출 — 패널 우클릭 큐 해제 등)"""
         with self._lock:
-            self._items.clear()
-            self.pointer = 0
+            self._reset_unlocked()

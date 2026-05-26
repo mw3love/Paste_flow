@@ -400,6 +400,7 @@ _SYNC_KEYS = frozenset({
     "history_max",
     "panel_auto_close",
     "notify_on_copy",
+    "queue_idle_reset_sec",
 })
 
 
@@ -450,6 +451,7 @@ class _SignalBridge(QObject):
     copy_toast         = pyqtSignal(object, int)  # 복사 알림 토스트 (item, 큐 개수)
     panel_toggle       = pyqtSignal()        # 패널 토글 단축키 (훅 스레드 → 메인)
     paste_queue_done   = pyqtSignal()        # 큐 소진 (붙여넣기 HUD fade-out용)
+    plain_paste        = pyqtSignal()        # 일반 Ctrl+V 감지 (훅 스레드 → 메인: 큐 clear + UI 갱신)
     ocr_requested      = pyqtSignal()        # 훅 스레드 → 메인: OCR 오버레이 띄우기
     ocr_done           = pyqtSignal(str)     # 워커 스레드 → 메인: OCR 결과 텍스트
     ocr_error          = pyqtSignal(str)     # 워커 스레드 → 메인: 에러 메시지
@@ -461,6 +463,15 @@ class PasteFlowApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
+        # 다크 테마용 툴팁 스타일 (시스템 기본은 다크 배경 위 어두운 글자라 가독성 0)
+        self.app.setStyleSheet(
+            f"QToolTip {{"
+            f" background-color: {COLORS['mantle']};"
+            f" color: {COLORS['text']};"
+            f" border: 1px solid {COLORS['surface1']};"
+            f" padding: 4px 6px;"
+            f"}}"
+        )
 
         # 스레드 안전 시그널 브릿지
         self._bridge = _SignalBridge()
@@ -472,6 +483,7 @@ class PasteFlowApp:
         self._bridge.ocr_requested.connect(self._on_ocr_requested)
         self._bridge.ocr_done.connect(self._on_ocr_done)
         self._bridge.ocr_error.connect(self._on_ocr_error)
+        self._bridge.plain_paste.connect(self._on_plain_paste)
 
         self._saved_panel_geometry = None
         self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
@@ -492,6 +504,7 @@ class PasteFlowApp:
             get_full_item=self.db.get_item,
             on_toggle_panel=self._bridge.panel_toggle.emit,
             on_ocr_trigger=self._bridge.ocr_requested.emit,
+            on_plain_paste=self._bridge.plain_paste.emit,
         )
         self.hotkey_manager = HotkeyManager()
 
@@ -895,6 +908,12 @@ class PasteFlowApp:
         self.tray.update_queue_status(0, 0)
         self.panel.update_queue_highlight(0, 0, [])
 
+    def _on_plain_paste(self):
+        """일반 Ctrl+V 감지 → 큐 즉시 비우기 + UI 갱신 (훅 스레드 시그널 → 메인)"""
+        self.queue.mark_plain_paste()
+        self.tray.update_queue_status(0, 0)
+        self.panel.update_queue_highlight(0, 0, [])
+
     def _on_combine_copy(self, item: ClipboardItem):
         """F6: 다중 선택 결합 복사 → DB 저장 + 클립보드 + 큐"""
         saved = self.db.save_item(item)
@@ -1085,6 +1104,13 @@ class PasteFlowApp:
 
         self._notify_on_copy = self.db.get_setting("notify_on_copy", "1") == "1"
 
+        # 큐 idle timeout (마지막 복사로부터 N초 지나면 다음 새 복사가 큐 첫 항목)
+        try:
+            idle_sec = float(self.db.get_setting("queue_idle_reset_sec", "10"))
+        except (ValueError, TypeError):
+            idle_sec = 10.0
+        self.queue.set_idle_reset_sec(idle_sec)
+
         # 패널 위치/크기 — show_near_cursor() 시 적용하도록 저장만 해둠
         geo_json = self.db.get_setting("panel_geometry")
         if geo_json:
@@ -1109,6 +1135,7 @@ class PasteFlowApp:
             "ocr_gemini_model": self.db.get_setting("ocr_gemini_model", ""),
             "ocr_gemini_model_cache": self.db.get_setting("ocr_gemini_model_cache", ""),
             "notify_on_copy": self.db.get_setting("notify_on_copy", "1"),
+            "queue_idle_reset_sec": self.db.get_setting("queue_idle_reset_sec", "10"),
         }
         dlg = SettingsDialog(current, parent=self.panel)
         dlg.settings_changed.connect(self._on_settings_changed)
@@ -1145,6 +1172,13 @@ class PasteFlowApp:
         # 복사 알림 토글
         if "notify_on_copy" in new_settings:
             self._notify_on_copy = new_settings["notify_on_copy"] == "1"
+
+        # 큐 idle timeout 변경 즉시 반영
+        if "queue_idle_reset_sec" in new_settings:
+            try:
+                self.queue.set_idle_reset_sec(float(new_settings["queue_idle_reset_sec"]))
+            except (ValueError, TypeError):
+                pass
 
     # 부팅 후 Drive 마운트 대기 시간(초). 이 시간이 지난 뒤 launcher VBS가 PasteFlow를 실행한다.
     _AUTOSTART_DRIVE_WAIT_SEC = 15

@@ -69,4 +69,6 @@ python -m PyInstaller PasteFlow.spec --clean
 
 ## 버전
 
+**v1.1.0** — 순차 큐 자동 초기화 트리거 2종 추가 (마지막 복사로부터 idle timeout / 일반 Ctrl+V 시 즉시 비우기), 설정 다이얼로그에 idle 시간 노출, 다크 테마 툴팁 스타일.
+
 **v1.0.0** — 최초 릴리즈

@@ -222,6 +222,7 @@ class SettingsDialog(QDialog):
     KEY_OCR_GEMINI_BASE_URL = "ocr_gemini_base_url"
     KEY_OCR_GEMINI_MODEL = "ocr_gemini_model"
     KEY_OCR_GEMINI_MODEL_CACHE = "ocr_gemini_model_cache"
+    KEY_QUEUE_IDLE_RESET = "queue_idle_reset_sec"
 
     # Flash 티어가 가장 저렴 → 기본값으로 첫 번째에 배치
     _DEFAULT_GEMINI_MODELS = ("gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-2.5-pro")
@@ -385,6 +386,16 @@ class SettingsDialog(QDialog):
         self._history_max_spin.setValue(50)
         general_form.addRow("히스토리 최대 개수:", self._history_max_spin)
 
+        self._queue_idle_spin = QSpinBox()
+        self._queue_idle_spin.setRange(1, 3600)
+        self._queue_idle_spin.setSuffix(" 초")
+        self._queue_idle_spin.setValue(10)
+        self._queue_idle_spin.setToolTip(
+            "마지막 복사로부터 이 시간이 지나면 다음 복사는 큐의 첫 항목으로 시작합니다.\n"
+            "(일반 Ctrl+V는 시간과 무관하게 즉시 큐를 비웁니다.)"
+        )
+        general_form.addRow("순차 큐 자동 초기화:", self._queue_idle_spin)
+
         self._auto_start_check = QCheckBox("Windows 시작 시 자동 실행")
         general_form.addRow(self._auto_start_check)
 
@@ -459,6 +470,11 @@ class SettingsDialog(QDialog):
         except (ValueError, TypeError):
             history_max = 50
         self._history_max_spin.setValue(history_max)
+        try:
+            queue_idle = int(float(self._settings.get(self.KEY_QUEUE_IDLE_RESET, "10")))
+        except (ValueError, TypeError):
+            queue_idle = 10
+        self._queue_idle_spin.setValue(max(1, queue_idle))
         self._auto_start_check.setChecked(
             self._settings.get(self.KEY_AUTO_START, "0") == "1"
         )
@@ -577,6 +593,7 @@ class SettingsDialog(QDialog):
             self.KEY_OCR_LANG: self._ocr_lang_combo.currentText(),
             self.KEY_OCR_ENGINE: engine,
             self.KEY_HISTORY_MAX: str(self._history_max_spin.value()),
+            self.KEY_QUEUE_IDLE_RESET: str(self._queue_idle_spin.value()),
             self.KEY_AUTO_START: "1" if auto_start else "0",
             self.KEY_NOTIFY_ON_COPY: "1" if self._notify_copy_check.isChecked() else "0",
         }

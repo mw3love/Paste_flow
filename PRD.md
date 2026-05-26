@@ -114,7 +114,7 @@ Windows에서 복사한 항목들을 **복사한 순서대로 자동으로 순�
 | 2 | **클립보드 교체는 키다운 시점에 즉시 실행** | 키업이 아닌 키다운(key_down) 시점에 클립보드 내용을 교체해야 OS가 올바른 내용을 붙여넣음 |
 | 3 | **클립보드 교체 시 자체 트리거 방지** | PasteFlow가 클립보드에 쓸 때 자신의 모니터가 이를 새 복사로 인식하지 않도록 내부 플래그 처리 |
 | 4 | **모든 클립보드 형식 보존** | 텍스트뿐 아니라 HTML, RTF, 이미지 등 원본 형식 그대로 클립보드에 복원 |
-| 5 | **큐 리셋은 붙여넣기 진행 중 새 복사 시** | 붙여넣기 전 연속 복사는 누적, 붙여넣기 진행 중(pointer>0) 새 복사 시 큐 리셋 후 새 항목부터 시작 |
+| 5 | **큐 리셋 트리거 3종** | (a) 붙여넣기 진행 중(pointer>0) 새 복사, (b) 마지막 복사로부터 idle timeout(`queue_idle_reset_sec`, 기본 10초) 경과한 새 복사 → 이전 큐 버리고 새 항목 1개로 시작, (c) 일반 Ctrl+V 감지 시 즉시 큐 비우기. 그 외(idle 내 연속 복사)는 누적 |
 
 ---
 
@@ -174,7 +174,7 @@ Windows에서 복사한 항목들을 **복사한 순서대로 자동으로 순�
 | F2-3 | **클립보드 교체 방식** — Ctrl+Shift+V 키다운 감지 시 클립보드 내용을 큐의 현재 포인터 항목으로 교체한 뒤, 키 이벤트를 그대로 통과시킴 |
 | F2-4 | **큐 포인터** — 붙여넣기할 때마다 포인터가 1 전진 |
 | F2-5 | **큐 소진 후** — 포인터가 큐 길이 이상이면 개입하지 않음. 마지막 항목이 클립보드에 남아 OS 기본 동작으로 반복 붙여넣기 |
-| F2-6 | **큐 리셋** — 붙여넣기 진행 중(pointer>0) 새 복사 시 큐를 비우고 새 항목부터 시작. 붙여넣기 전(pointer==0) 연속 복사는 큐에 누적. 히스토리(DB)에는 모든 항목 유지 |
+| F2-6 | **큐 리셋 트리거** — 다음 3가지 중 하나에서 큐를 비우고 새 항목부터 시작: (1) 붙여넣기 진행 중(pointer>0) 새 복사, (2) 마지막 복사로부터 `queue_idle_reset_sec`(기본 10초) 경과한 새 복사, (3) 일반 Ctrl+V 감지 시 즉시 큐 비우기(LLKHF_INJECTED로 자체 주입분은 제외). 그 외(idle 내 연속 복사)는 큐 누적. 히스토리(DB)에는 모든 항목 유지 |
 | F2-7 | **패널에 진행 상태 표시** — 히스토리 섹션 헤더에 현재 포인터 위치와 전체 큐 크기 (예: "붙여넣기 1/3") |
 | F2-8 | **모든 클립보드 형식 보존** — 텍스트, HTML, RTF, 이미지 등 원본 형식 그대로 클립보드에 복원하여 붙여넣기 |
 
@@ -471,17 +471,31 @@ CREATE TABLE settings (
 
 ```python
 class PasteQueue:
-    """순차 붙여넣기 큐 관리"""
-    def __init__(self):
-        self.queue = []      # ClipboardItem 리스트
-        self.pointer = 0     # 다음 붙여넣기할 인덱스
+    """순차 붙여넣기 큐 관리 — 리셋 트리거 3종"""
+    def __init__(self, idle_reset_sec=10.0):
+        self.queue = []                   # ClipboardItem 리스트
+        self.pointer = 0                  # 다음 붙여넣기할 인덱스
+        self._last_copy_time = 0.0        # 마지막 add_item 시각 (monotonic)
+        self.idle_reset_sec = idle_reset_sec
 
     def add_item(self, item):
-        """새 항목 추가 — 진행 중이면 큐 리셋, 아니면 누적"""
-        if self.pointer > 0:
-            self.queue.clear()  # 붙여넣기 진행 중 → 큐 리셋
+        """새 항목 추가 — pointer>0 또는 idle 만료면 리셋, 아니면 누적"""
+        now = time.monotonic()
+        idle_expired = (
+            self._last_copy_time > 0.0
+            and (now - self._last_copy_time) >= self.idle_reset_sec
+        )
+        if self.pointer > 0 or idle_expired:
+            self.queue.clear()
         self.queue.append(item)
         self.pointer = 0
+        self._last_copy_time = now
+
+    def mark_plain_paste(self):
+        """일반 Ctrl+V 감지 시 즉시 큐 비우기 (paste_interceptor가 호출)"""
+        self.queue.clear()
+        self.pointer = 0
+        self._last_copy_time = 0.0
 
     def get_next(self):
         """다음 붙여넣기 항목 반환. 소진 시 None"""
@@ -565,11 +579,16 @@ class PasteInterceptor:
 ```json
 {
   "hotkey_panel_toggle": "ctrl+space",
+  "hotkey_ocr_trigger": "ctrl+shift+s",
   "history_max": 50,
+  "queue_idle_reset_sec": 10,
   "auto_start": false,
   "panel_auto_close": true,
   "panel_always_on_top": true,
-  "panel_geometry": null
+  "panel_geometry": null,
+  "notify_on_copy": true,
+  "ocr_engine": "winrt",
+  "ocr_language": "ko"
 }
 ```
 

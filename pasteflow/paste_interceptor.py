@@ -38,6 +38,18 @@ VK_CONTROL = 0x11
 VK_SHIFT = 0x10
 VK_MENU = 0x12  # Alt
 VK_MASK = 0xE8  # 미할당 가상 키 — Ctrl+Shift 조합을 더럽혀 입력기 전환 팝업 방지
+LLKHF_INJECTED = 0x10  # KBDLLHOOKSTRUCT.flags 비트 — SendInput 등으로 주입된 키
+
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    """저수준 키보드 훅 구조체 — flags(LLKHF_INJECTED 등) 검사용"""
+    _fields_ = [
+        ("vkCode",      ctypes.wintypes.DWORD),
+        ("scanCode",    ctypes.wintypes.DWORD),
+        ("flags",       ctypes.wintypes.DWORD),
+        ("time",        ctypes.wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_void_p),
+    ]
 
 # SendInput 관련 상수
 INPUT_KEYBOARD = 1
@@ -192,6 +204,7 @@ class PasteInterceptor:
         get_full_item: Optional[Callable[[int], Optional[ClipboardItem]]] = None,
         on_toggle_panel: Optional[Callable[[], None]] = None,
         on_ocr_trigger: Optional[Callable[[], None]] = None,
+        on_plain_paste: Optional[Callable[[], None]] = None,
     ):
         self.queue = paste_queue
         self.monitor = clipboard_monitor
@@ -199,6 +212,7 @@ class PasteInterceptor:
         self.get_full_item = get_full_item
         self.on_toggle_panel = on_toggle_panel
         self.on_ocr_trigger = on_ocr_trigger
+        self.on_plain_paste = on_plain_paste
         self._hook = None
         self._thread: Optional[threading.Thread] = None
         self._hook_thread_id: int = 0
@@ -317,6 +331,20 @@ class PasteInterceptor:
                         self._last_paste_time = now
                         self._on_ctrl_shift_v()
                         return 1  # suppress — Ctrl+Shift+V를 앱에 전달하지 않음
+
+                # 일반 Ctrl+V 관찰 (suppress 안 함 — 그대로 통과)
+                # PasteFlow 자체 주입(SendInput)은 LLKHF_INJECTED 플래그로 제외해
+                # Ctrl+Shift+V / direct_paste 경로의 Ctrl+V를 잘못 잡지 않는다.
+                if (vk_code == VK_V
+                        and ctrl_pressed and not shift_pressed and not alt_pressed
+                        and self.on_plain_paste):
+                    kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                    if not (kbd.flags & LLKHF_INJECTED):
+                        try:
+                            self.on_plain_paste()
+                        except Exception:
+                            pass
+                    # fall through → CallNextHookEx로 통과
 
                 # 패널 토글 단축키 감지 (RegisterHotKey 대체 — 탐색기 등 모든 앱에서 동작)
                 if (self._panel_vk and vk_code == self._panel_vk
