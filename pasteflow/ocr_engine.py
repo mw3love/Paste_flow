@@ -237,7 +237,8 @@ class OcrEngine:
 
         if self.base_url:
             # 학교 게이트웨이 등 OpenAI 호환 프록시 — base_url 지정 시
-            model_name = self.model or "gemini-3-flash-preview"
+            # 폴백 기본은 reasoning 토큰을 거의 사용하지 않는 flash-lite (가장 저렴·안정).
+            model_name = self.model or "gemini-3.1-flash-lite"
             return self._recognize_openai_compat(pil_image, api_key, self.base_url, model_name)
 
         try:
@@ -270,9 +271,14 @@ class OcrEngine:
         b64 = base64.standard_b64encode(buf.getvalue()).decode()
 
         client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
+        # max_tokens=16384: 게이트웨이가 reasoning(thinking) 토큰을 같은 max_tokens 예산에서
+        # 차감하므로 작게 잡으면 thinking 모델(pro·preview 계열)에서 본문이 0~200자로 잘림.
+        # 2048에서는 gemini-2.5-pro가 본문 0자, 3-flash-preview/3.5-flash/3.1-pro-preview가
+        # finish_reason=length로 잘렸음. 16384면 6종 모델 전부 finish_reason=stop으로 정상 종료.
+        # 청구는 실제 사용 토큰 기준이라 비용 영향은 미세하다.
         resp = client.chat.completions.create(
             model=model,
-            max_tokens=2048,
+            max_tokens=16384,
             messages=[{
                 "role": "user",
                 "content": [

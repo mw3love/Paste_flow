@@ -225,8 +225,11 @@ class SettingsDialog(QDialog):
     KEY_OCR_GEMINI_MODEL_CACHE = "ocr_gemini_model_cache"
     KEY_QUEUE_IDLE_RESET = "queue_idle_reset_sec"
 
-    # Flash 티어가 가장 저렴 → 기본값으로 첫 번째에 배치
-    _DEFAULT_GEMINI_MODELS = ("gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-2.5-pro")
+    # Flash 티어가 가장 저렴 → 기본값으로 첫 번째에 배치.
+    # reasoning(thinking) 토큰을 거의 안 쓰는 모델 위주 — pro/preview 계열은 본문이 잘릴 위험이
+    # 있어 캐시 갱신 시에만 노출(↻ 새로고침). _recognize_openai_compat의 max_tokens=16384와 함께
+    # 작동해 본문 잘림은 거의 없으나, 가벼운 OCR엔 flash 계열이 비용·속도 면에서 안정적이다.
+    _DEFAULT_GEMINI_MODELS = ("gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash")
 
     # 워커 스레드 → UI 안전 통신용 내부 시그널 (models, error_msg)
     _models_fetched = pyqtSignal(list, str)
@@ -452,8 +455,8 @@ class SettingsDialog(QDialog):
             )
             self._api_key_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_API_KEY, ""))
             self._base_url_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, ""))
-            saved_model = self._settings.get(self.KEY_OCR_GEMINI_MODEL, "gemini-3-flash-preview")
-            self._model_combo.setCurrentText(saved_model or "gemini-3-flash-preview")
+            saved_model = self._settings.get(self.KEY_OCR_GEMINI_MODEL, "gemini-3.1-flash-lite")
+            self._model_combo.setCurrentText(saved_model or "gemini-3.1-flash-lite")
         if hasattr(self, '_ocr_form'):
             self._ocr_form.setRowVisible(self._ocr_lang_combo, is_winrt)
 
