@@ -216,6 +216,7 @@ class SettingsDialog(QDialog):
     KEY_AUTO_START = "auto_start"
     KEY_NOTIFY_ON_COPY = "notify_on_copy"
     KEY_OCR_HOTKEY = "hotkey_ocr_trigger"
+    KEY_IMAGE_TO_PATH_HOTKEY = "hotkey_image_to_path"
     KEY_OCR_LANG = "ocr_language"
     KEY_OCR_ENGINE = "ocr_engine"
     KEY_OCR_GEMINI_API_KEY = "ocr_gemini_api_key"
@@ -258,6 +259,14 @@ class SettingsDialog(QDialog):
 
         self._panel_toggle_hotkey = HotkeyEdit()
         hotkey_form.addRow("패널 토글:", self._panel_toggle_hotkey)
+
+        self._image_to_path_hotkey = HotkeyEdit()
+        self._image_to_path_hotkey.setToolTip(
+            "현재 클립보드 이미지를 임시 PNG로 저장하고 절대경로를 클립보드 텍스트로 교체합니다.\n"
+            "이어서 포그라운드 창에 Ctrl+V를 자동 전송합니다.\n"
+            "Claude Code CLI 등 '파일 경로 텍스트'를 첨부로 받는 앱에 한 키로 붙여넣기 위한 단축키."
+        )
+        hotkey_form.addRow("이미지→경로:", self._image_to_path_hotkey)
 
         layout.addWidget(hotkey_group)
 
@@ -456,6 +465,9 @@ class SettingsDialog(QDialog):
         self._ocr_hotkey.set_value(
             self._settings.get(self.KEY_OCR_HOTKEY, "ctrl+shift+s")
         )
+        self._image_to_path_hotkey.set_value(
+            self._settings.get(self.KEY_IMAGE_TO_PATH_HOTKEY, "ctrl+shift+p")
+        )
         engine = self._settings.get(self.KEY_OCR_ENGINE, "winrt")
         idx = self._ocr_engine_combo.findData(engine)
         self._ocr_engine_combo.setCurrentIndex(idx if idx >= 0 else 0)
@@ -590,6 +602,7 @@ class SettingsDialog(QDialog):
         new_settings = {
             self.KEY_PANEL_TOGGLE: self._panel_toggle_hotkey.value() or "ctrl+space",
             self.KEY_OCR_HOTKEY: self._ocr_hotkey.value() or "ctrl+shift+s",
+            self.KEY_IMAGE_TO_PATH_HOTKEY: self._image_to_path_hotkey.value() or "ctrl+shift+p",
             self.KEY_OCR_LANG: self._ocr_lang_combo.currentText(),
             self.KEY_OCR_ENGINE: engine,
             self.KEY_HISTORY_MAX: str(self._history_max_spin.value()),

@@ -358,6 +358,37 @@ def _save_image_to_drop_temp(image_data: bytes) -> str:
     return _save_image_to_folder(image_data, folder)
 
 
+def _read_image_from_clipboard() -> bytes | None:
+    """현재 클립보드에서 이미지 bytes를 읽는다(PNG 우선, 없으면 CF_DIB raw).
+
+    반환값은 그대로 ``_save_image_to_drop_temp`` 에 넘길 수 있다(PNG·DIB 둘 다 처리).
+    이미지가 없거나 OpenClipboard 실패 시 None.
+    """
+    import win32clipboard
+    cf_png = win32clipboard.RegisterClipboardFormat("PNG")
+    for _ in range(3):
+        try:
+            win32clipboard.OpenClipboard()
+            break
+        except Exception:
+            time.sleep(0.01)
+    else:
+        return None
+    try:
+        if win32clipboard.IsClipboardFormatAvailable(cf_png):
+            return win32clipboard.GetClipboardData(cf_png)
+        if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_DIB):
+            return win32clipboard.GetClipboardData(win32clipboard.CF_DIB)
+        return None
+    except Exception:
+        return None
+    finally:
+        try:
+            win32clipboard.CloseClipboard()
+        except Exception:
+            pass
+
+
 # ── 로컬 데이터 경로 (DB·로그) ────────────────────────────────────────────────
 
 
@@ -397,6 +428,7 @@ _SYNC_KEYS = frozenset({
     "ocr_language",
     "hotkey_panel_toggle",
     "hotkey_ocr_trigger",
+    "hotkey_image_to_path",
     "history_max",
     "panel_auto_close",
     "notify_on_copy",
@@ -455,6 +487,7 @@ class _SignalBridge(QObject):
     ocr_requested      = pyqtSignal()        # 훅 스레드 → 메인: OCR 오버레이 띄우기
     ocr_done           = pyqtSignal(str)     # 워커 스레드 → 메인: OCR 결과 텍스트
     ocr_error          = pyqtSignal(str)     # 워커 스레드 → 메인: 에러 메시지
+    image_to_path      = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 경로 텍스트로 교체 후 Ctrl+V
 
 
 class PasteFlowApp:
@@ -484,6 +517,7 @@ class PasteFlowApp:
         self._bridge.ocr_done.connect(self._on_ocr_done)
         self._bridge.ocr_error.connect(self._on_ocr_error)
         self._bridge.plain_paste.connect(self._on_plain_paste)
+        self._bridge.image_to_path.connect(self._on_image_to_path_hotkey)
 
         self._saved_panel_geometry = None
         self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
@@ -505,6 +539,7 @@ class PasteFlowApp:
             on_toggle_panel=self._bridge.panel_toggle.emit,
             on_ocr_trigger=self._bridge.ocr_requested.emit,
             on_plain_paste=self._bridge.plain_paste.emit,
+            on_image_to_path=self._bridge.image_to_path.emit,
         )
         self.hotkey_manager = HotkeyManager()
 
@@ -570,6 +605,9 @@ class PasteFlowApp:
 
         ocr_hotkey = self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s")
         self.interceptor.set_ocr_hotkey(ocr_hotkey)
+
+        img2path_hotkey = self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p")
+        self.interceptor.set_image_to_path_hotkey(img2path_hotkey)
 
 
     def _persist_clipboard_item(self, item: ClipboardItem) -> ClipboardItem:
@@ -732,6 +770,43 @@ class PasteFlowApp:
         # _set_clipboard가 monitor._self_triggered를 설정해 히스토리 자동 추가 방지
         self.interceptor._set_clipboard(path_item)
         ToastNotification(f"경로 복사됨: {os.path.basename(saved_path)}", icon="🔤")
+
+    def _on_image_to_path_hotkey(self):
+        """이미지→경로 단축키(기본 Ctrl+Shift+P) — 현재 클립보드 이미지를 임시 PNG로 저장 후
+        절대경로 텍스트로 클립보드 교체 → 단축키를 누른 포그라운드 창에 자동 Ctrl+V.
+
+        Claude Code CLI 등 "이미지 파일 경로를 첨부로 받는" 앱에 한 키로 바로 붙여넣기 위한 경로.
+
+        주의: 발화 시점에 사용자가 Ctrl+Shift를 여전히 누르고 있으므로 `_send_ctrl_v_plain`
+        (수정키 처리 없는 단순 Ctrl+V)을 그대로 쓰면 OS가 Ctrl+Shift+V로 인식해 실패한다.
+        Ctrl+Shift+V 순차 붙여넣기와 동일하게 `_send_clean_key(VK_V)`로 수정키 해제·복원·
+        입력기 전환 마스킹을 거쳐 주입해야 한다.
+        """
+        from pasteflow.ui.toast import ToastNotification
+        from pasteflow.paste_interceptor import VK_V
+
+        image_bytes = _read_image_from_clipboard()
+        if not image_bytes:
+            ToastNotification("클립보드에 이미지가 없습니다", icon="🔤")
+            return
+
+        try:
+            saved_path = _save_image_to_drop_temp(image_bytes)
+        except Exception as e:
+            ToastNotification(f"임시 파일 저장 실패 — {e}", icon="🔤")
+            return
+
+        path_item = ClipboardItem(
+            content_type="text",
+            text_content=saved_path,
+            preview_text=saved_path[:200],
+        )
+        # _set_clipboard가 monitor._self_triggered를 설정해 히스토리 자동 추가 방지
+        self.interceptor._set_clipboard(path_item)
+
+        # 50ms 후 Ctrl+V 주입 — _send_clean_key가 사용자 Ctrl/Shift 해제 → Ctrl+V → 복원
+        QTimer.singleShot(50, lambda: self.interceptor._send_clean_key(VK_V))
+        ToastNotification(f"경로 붙여넣음: {os.path.basename(saved_path)}", icon="🔤")
 
     def _on_ocr_done(self, text: str):
         """메인 스레드: OCR 결과 → 클립보드 + DB + 큐 + 토스트"""
@@ -1128,6 +1203,7 @@ class PasteFlowApp:
             "history_max": self.db.get_setting("history_max", "50"),
             "auto_start": self.db.get_setting("auto_start", "0"),
             "hotkey_ocr_trigger": self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s"),
+            "hotkey_image_to_path": self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p"),
             "ocr_language": self.db.get_setting("ocr_language", "ko"),
             "ocr_engine": self.db.get_setting("ocr_engine", "winrt"),
             "ocr_gemini_api_key": self.db.get_setting("ocr_gemini_api_key", ""),
@@ -1148,6 +1224,7 @@ class PasteFlowApp:
         # 단축키 비교는 DB 저장 전에 이전 값을 먼저 읽어야 함
         old_hotkey = self.db.get_setting("hotkey_panel_toggle", "ctrl+space")
         old_ocr_hotkey = self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s")
+        old_img2path_hotkey = self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p")
 
         for key, value in new_settings.items():
             self.db.set_setting(key, value)
@@ -1164,6 +1241,11 @@ class PasteFlowApp:
         new_ocr_hotkey = new_settings.get("hotkey_ocr_trigger", "ctrl+shift+s")
         if old_ocr_hotkey != new_ocr_hotkey:
             self.interceptor.set_ocr_hotkey(new_ocr_hotkey)
+
+        # 이미지→경로 단축키 재설정
+        new_img2path_hotkey = new_settings.get("hotkey_image_to_path", "ctrl+shift+p")
+        if old_img2path_hotkey != new_img2path_hotkey:
+            self.interceptor.set_image_to_path_hotkey(new_img2path_hotkey)
 
         # 자동 시작
         auto_start = new_settings.get("auto_start", "0") == "1"

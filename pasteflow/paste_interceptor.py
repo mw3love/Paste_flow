@@ -1,9 +1,12 @@
-"""Ctrl+Shift+V / 패널 토글 감지 → 순차 붙여넣기 / 패널 열닫기
+"""Ctrl+Shift+V / 패널 토글 / OCR / 이미지→경로 단축키 감지
 
 단축키 체계:
   Ctrl+Shift+V — 순차 붙여넣기 (suppress + 클립보드 교체 + Ctrl+V 주입)
   패널 토글    — 설정 가능 (기본 Ctrl+Space). RegisterHotKey 대신 WH_KEYBOARD_LL로
                  감지하여 Windows 탐색기 등 모든 포그라운드 앱에서 동작 보장.
+  OCR 트리거   — 설정 가능 (기본 Ctrl+Shift+S).
+  이미지→경로 — 설정 가능 (기본 Ctrl+Shift+P). 현재 클립보드 이미지를 임시 PNG로
+                 저장 → 경로 텍스트로 교체 → 자동 Ctrl+V (Claude CLI 등 경로 첨부 앱용).
 
 일반 Ctrl+C는 모든 복사를 큐에 추가한다. PasteFlow가 Ctrl+C에 개입하지 않는다.
 """
@@ -205,6 +208,7 @@ class PasteInterceptor:
         on_toggle_panel: Optional[Callable[[], None]] = None,
         on_ocr_trigger: Optional[Callable[[], None]] = None,
         on_plain_paste: Optional[Callable[[], None]] = None,
+        on_image_to_path: Optional[Callable[[], None]] = None,
     ):
         self.queue = paste_queue
         self.monitor = clipboard_monitor
@@ -213,6 +217,7 @@ class PasteInterceptor:
         self.on_toggle_panel = on_toggle_panel
         self.on_ocr_trigger = on_ocr_trigger
         self.on_plain_paste = on_plain_paste
+        self.on_image_to_path = on_image_to_path
         self._hook = None
         self._thread: Optional[threading.Thread] = None
         self._hook_thread_id: int = 0
@@ -229,6 +234,11 @@ class PasteInterceptor:
         self._ocr_need_ctrl: bool = False
         self._ocr_need_shift: bool = False
         self._ocr_need_alt: bool = False
+        # 이미지→경로 단축키 (패널 토글과 동일 구조)
+        self._img2path_vk: int = 0
+        self._img2path_need_ctrl: bool = False
+        self._img2path_need_shift: bool = False
+        self._img2path_need_alt: bool = False
         # 콜백 참조 유지 (GC 방지)
         self._hook_proc = HOOKPROC(self._low_level_keyboard_proc)
 
@@ -257,6 +267,20 @@ class PasteInterceptor:
             self._ocr_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._ocr_vk = 0
+
+    def set_image_to_path_hotkey(self, hotkey_str: str):
+        """이미지→경로 단축키 설정 — 현재 클립보드 이미지를 임시 PNG로 저장 후
+        절대경로를 클립보드 텍스트로 교체하고 자동 Ctrl+V."""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._img2path_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._img2path_need_shift = "shift" in parts
+        self._img2path_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._img2path_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._img2path_vk = 0
 
     def start(self):
         """저수준 키보드 훅 시작 (별도 스레드)"""
@@ -368,6 +392,18 @@ class PasteInterceptor:
                     if self.on_ocr_trigger:
                         try:
                             self.on_ocr_trigger()
+                        except Exception:
+                            pass
+                    return 1  # suppress
+
+                # 이미지→경로 단축키 감지
+                if (self._img2path_vk and vk_code == self._img2path_vk
+                        and ctrl_pressed  == self._img2path_need_ctrl
+                        and shift_pressed == self._img2path_need_shift
+                        and alt_pressed   == self._img2path_need_alt):
+                    if self.on_image_to_path:
+                        try:
+                            self.on_image_to_path()
                         except Exception:
                             pass
                     return 1  # suppress
