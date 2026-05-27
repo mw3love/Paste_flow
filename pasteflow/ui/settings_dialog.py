@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QStyle,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor
 
 from pasteflow.ui.theme import COLORS, TEAL_HOVER
 
@@ -224,12 +225,6 @@ class SettingsDialog(QDialog):
     KEY_OCR_GEMINI_MODEL = "ocr_gemini_model"
     KEY_OCR_GEMINI_MODEL_CACHE = "ocr_gemini_model_cache"
     KEY_QUEUE_IDLE_RESET = "queue_idle_reset_sec"
-
-    # Flash 티어가 가장 저렴 → 기본값으로 첫 번째에 배치.
-    # reasoning(thinking) 토큰을 거의 안 쓰는 모델 위주 — pro/preview 계열은 본문이 잘릴 위험이
-    # 있어 캐시 갱신 시에만 노출(↻ 새로고침). _recognize_openai_compat의 max_tokens=16384와 함께
-    # 작동해 본문 잘림은 거의 없으나, 가벼운 OCR엔 flash 계열이 비용·속도 면에서 안정적이다.
-    _DEFAULT_GEMINI_MODELS = ("gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash")
 
     # 워커 스레드 → UI 안전 통신용 내부 시그널 (models, error_msg)
     _models_fetched = pyqtSignal(list, str)
@@ -497,48 +492,62 @@ class SettingsDialog(QDialog):
             self._settings.get(self.KEY_NOTIFY_ON_COPY, "1") == "1"
         )
 
-    @staticmethod
-    def _model_cost_rank(name: str) -> int:
-        """모델명에서 가격 티어를 추정한 정렬 키. 낮을수록 저렴."""
-        n = name.lower()
-        if "flash-lite" in n:
-            return 0
-        if "flash" in n:
-            return 1
-        if "pro" in n:
-            return 2
-        return 3  # 알 수 없는 티어는 맨 뒤
+    def _backend_for_url(self, base_url: str) -> str:
+        """base_url 유무로 backend 결정. 공식 API ↔ 게이트웨이는 라인업이 달라 분리한다."""
+        return "gateway" if (base_url or "").strip() else "official"
+
+    def _fill_model_combo(self, verified: list[str], unverified: list[str]):
+        """콤보를 검증 모델(상단) + 구분선 + 미검증 모델(하단, 회색)로 채운다."""
+        self._verified_models = verified
+        self._model_combo.clear()
+        for name in verified:
+            self._model_combo.addItem(name)
+        if verified and unverified:
+            self._model_combo.insertSeparator(self._model_combo.count())
+        gray = QColor(COLORS['subtext0'])
+        for name in unverified:
+            self._model_combo.addItem(name)
+            idx = self._model_combo.count() - 1
+            self._model_combo.setItemData(idx, gray, Qt.ItemDataRole.ForegroundRole)
+            self._model_combo.setItemData(
+                idx,
+                "PasteFlow가 검증하지 않은 모델 — 게이트웨이가 광고하지만 호출 실패 가능",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self._update_model_hint()
 
     def _update_model_hint(self):
-        """콤보 항목 중 가장 저렴한 모델을 힌트 라벨에 표시."""
+        """검증 모델 중 가장 저렴한 것(verified[0])을 힌트 라벨에 표시."""
         if not hasattr(self, "_model_hint"):
             return
-        items = [self._model_combo.itemText(i) for i in range(self._model_combo.count())]
-        if not items:
-            self._model_hint.setText("")
+        verified = getattr(self, "_verified_models", [])
+        if not verified:
+            self._model_hint.setText("(검증된 모델 없음 — ↻ 새로고침을 시도하세요)")
             return
-        cheapest = min(items, key=self._model_cost_rank)
-        self._model_hint.setText(f"💡 가장 저렴: {cheapest}")
+        self._model_hint.setText(f"💡 가장 저렴: {verified[0]}")
 
     def _populate_model_combo(self):
-        """캐시된 모델 목록이 있으면 사용, 없으면 기본 하드코딩 목록. 가격 순 정렬."""
+        """캐시된 모델 목록이 있으면 화이트리스트와 분류, 없으면 화이트리스트 기본값."""
         import json
+        from pasteflow.ocr_engine import sort_models_with_whitelist, whitelist_model_names
+
         cache_str = self._settings.get(self.KEY_OCR_GEMINI_MODEL_CACHE, "")
-        models: list[str] = []
+        cached: list[str] = []
         if cache_str:
             try:
                 parsed = json.loads(cache_str)
                 if isinstance(parsed, list):
-                    models = [str(m) for m in parsed if m]
+                    cached = [str(m) for m in parsed if m]
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass
-        if not models:
-            models = list(self._DEFAULT_GEMINI_MODELS)
-        models = sorted(set(models), key=self._model_cost_rank)
-        self._model_combo.clear()
-        for m in models:
-            self._model_combo.addItem(m)
-        self._update_model_hint()
+
+        backend = self._backend_for_url(self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, ""))
+        if cached:
+            verified, unverified = sort_models_with_whitelist(cached, backend)
+        else:
+            verified = whitelist_model_names(backend)
+            unverified = []
+        self._fill_model_combo(verified, unverified)
 
     def _on_refresh_models(self):
         """🔄 버튼 — API에서 모델 목록 조회 (워커 스레드)."""
@@ -582,20 +591,21 @@ class SettingsDialog(QDialog):
                                     "API 응답에 Gemini 모델이 없습니다.\n게이트웨이 설정을 확인하세요.")
             return
 
-        models = sorted(set(models), key=self._model_cost_rank)
+        from pasteflow.ocr_engine import sort_models_with_whitelist
+        backend = self._backend_for_url(self._base_url_edit.text())
+        unique = sorted(set(models))
+        verified, unverified = sort_models_with_whitelist(unique, backend)
+
         current = self._model_combo.currentText()
-        self._model_combo.clear()
-        for m in models:
-            self._model_combo.addItem(m)
+        self._fill_model_combo(verified, unverified)
         idx = self._model_combo.findText(current)
         if idx >= 0:
             self._model_combo.setCurrentIndex(idx)
         elif current:
             self._model_combo.setCurrentText(current)
-        self._update_model_hint()
 
         import json
-        self._settings[self.KEY_OCR_GEMINI_MODEL_CACHE] = json.dumps(models)
+        self._settings[self.KEY_OCR_GEMINI_MODEL_CACHE] = json.dumps(unique)
 
     def _on_save(self):
         """저장 버튼 클릭 — 레지스트리 등록은 main._on_settings_changed에서 처리"""

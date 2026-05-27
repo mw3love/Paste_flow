@@ -580,6 +580,7 @@ class PasteInterceptor:
 {
   "hotkey_panel_toggle": "ctrl+space",
   "hotkey_ocr_trigger": "ctrl+shift+s",
+  "hotkey_image_to_path": "ctrl+shift+p",
   "history_max": 50,
   "queue_idle_reset_sec": 10,
   "auto_start": false,
@@ -645,6 +646,8 @@ class PasteInterceptor:
 |------|------------|------|
 | 순차 붙여넣기 | `Ctrl+Shift+V` | 고정 단축키 |
 | 전체 패널 토글 | `ctrl+space` | 설정에서 변경 가능 |
+| 화면 OCR 영역 선택 | `ctrl+shift+s` | 설정에서 변경 가능 |
+| 이미지→임시 파일 경로 자동 붙여넣기 | `ctrl+shift+p` | 설정에서 변경 가능 (Claude CLI 워크플로용) |
 | ~~항목 1~9번 즉시 붙여넣기~~ | ~~`Alt+1`~`Alt+9`~~ | *(의도적으로 제거됨)* |
 
 ---

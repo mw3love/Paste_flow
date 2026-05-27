@@ -31,6 +31,102 @@ def _normalize_base_url(base_url: str) -> str:
             break
     return url
 
+# ── Gemini 모델 화이트리스트 ────────────────────────────────────────────────
+# 코드 작성자가 명시적으로 검증한 모델만 등재한다. ↻ 새로고침으로 받은 게이트웨이
+# 라인업 정렬과 OCR 실패 시 폴백 후보 선정에 사용. 게이트웨이가 모델 라인업을
+# 바꾸면 이 목록을 갱신하면 된다. 알 수 없는 모델은 콤보에 "(미검증)" 태그로
+# 노출되어 사용자가 명시적으로 선택할 수 있다.
+#
+# 필드: (name, tier_rank, on_official, on_gateway)
+#   - tier_rank   가격 티어. 0=flash-lite, 1=flash, 2=pro. 낮을수록 저렴.
+#   - on_official 공식 Google AI Studio API에서 사용 가능 (확인된 것만 True)
+#   - on_gateway  factchat-cloud 게이트웨이에서 사용 가능 (확인된 것만 True)
+_VERIFIED_MODELS: tuple[tuple[str, int, bool, bool], ...] = (
+    ("gemini-3.1-flash-lite", 0, False, True),   # 게이트웨이 확인 2026-05-27
+    ("gemini-2.5-flash",      1, True,  True),   # 공식+게이트웨이 모두 검증
+    ("gemini-3.5-flash",      1, False, True),   # 게이트웨이 확인 2026-05-27
+    ("gemini-2.5-pro",        2, True,  True),   # 공식+게이트웨이 모두 검증
+)
+
+# 어느 backend에서든 호출되리라 신뢰하는 최종 안전망 폴백 모델
+_FALLBACK_DEFAULT = "gemini-2.5-flash"
+
+
+def _backend_compat(entry: tuple, backend: str) -> bool:
+    _name, _tier, on_official, on_gateway = entry
+    if backend == "official":
+        return on_official
+    if backend == "gateway":
+        return on_gateway
+    raise ValueError(f"Unknown backend: {backend!r}")
+
+
+def sort_models_with_whitelist(
+    candidates: list[str], backend: str
+) -> tuple[list[str], list[str]]:
+    """↻ 새로고침 결과를 화이트리스트와 머지해 분류한다.
+
+    Returns
+    -------
+    (verified, unverified)
+        verified   — 화이트리스트 ∩ candidates, tier_rank 오름차순 (저렴한 것 먼저).
+        unverified — candidates − 화이트리스트, 알파벳순.
+    """
+    wl = {e[0]: e[1] for e in _VERIFIED_MODELS if _backend_compat(e, backend)}
+    verified = sorted((n for n in candidates if n in wl), key=lambda n: (wl[n], n))
+    unverified = sorted(n for n in candidates if n not in wl)
+    return verified, unverified
+
+
+def whitelist_model_names(backend: str) -> list[str]:
+    """backend 호환 화이트리스트 모델 이름 목록 (tier_rank 오름차순).
+
+    캐시가 비어 있는 첫 실행에서 콤보 초기값으로 사용.
+    """
+    return [
+        e[0] for e in sorted(
+            (e for e in _VERIFIED_MODELS if _backend_compat(e, backend)),
+            key=lambda e: (e[1], e[0]),
+        )
+    ]
+
+
+def _is_model_not_found(exc: Exception) -> bool:
+    """OCR 호출 예외가 '존재하지 않는 모델'을 의미하는지 휴리스틱 판정.
+
+    OpenAI 호환 게이트웨이는 404 본문에 'model ... not found'를 담아 보내고,
+    공식 google.generativeai는 NotFound·INVALID_ARGUMENT 형태로 던진다. SDK·게이트웨이
+    버전마다 예외 타입이 달라 메시지 내용 기반 판정이 가장 안정적.
+    """
+    msg = str(exc).lower()
+    if "not found" in msg:
+        return True
+    if "model_not_found" in msg:
+        return True
+    # 게이트웨이는 본문 자체에 "Error code: 404"를 포함시킴
+    if "404" in msg and "model" in msg:
+        return True
+    return False
+
+
+def select_fallback_model(failed_model: str, backend: str) -> Optional[str]:
+    """OCR 호출이 실패한 모델에 대해 backend 호환 폴백 후보 1개.
+
+    선정 규칙: backend 호환 화이트리스트 모델 중 _FALLBACK_DEFAULT 우선,
+    실패 모델이 마침 _FALLBACK_DEFAULT면 같은 backend의 다른 화이트리스트 모델 1개.
+    적합한 후보가 없으면 None.
+    """
+    compatible = [
+        e[0] for e in _VERIFIED_MODELS
+        if _backend_compat(e, backend) and e[0] != failed_model
+    ]
+    if not compatible:
+        return None
+    if _FALLBACK_DEFAULT in compatible:
+        return _FALLBACK_DEFAULT
+    return compatible[0]
+
+
 # WinRT OcrEngine.MaxImageDimension (4096px 초과 이미지는 에러)
 _WINRT_MAX_DIM = 4096
 # OCR 전 이미지 4방향 여백 — 한 줄짜리 좁은 이미지에서 WinRT 인식률 향상
@@ -90,6 +186,11 @@ class OcrEngine:
         self.base_url = base_url
         self.language = language
         self.model = model
+        # OCR 호출이 끝났을 때 main이 토스트로 안내할 수 있도록 남기는 상태:
+        # last_used_model    — 실제 응답을 만든 모델 (폴백 발생 시 폴백 모델)
+        # last_fallback_from — 원래 시도했다가 실패한 모델 (폴백 없으면 None)
+        self.last_used_model: str = ""
+        self.last_fallback_from: Optional[str] = None
 
     def recognize(self, pil_image: Image.Image) -> str:
         """동기 OCR — 호출자가 워커 스레드에서 실행해야 UI 블로킹이 없다."""
@@ -235,11 +336,17 @@ class OcrEngine:
         if not api_key:
             raise RuntimeError("API 키가 설정되지 않았습니다. 설정에서 Gemini API 키를 입력하세요.")
 
+        # 매 호출마다 폴백 상태 리셋 (이번 호출이 폴백 없이 끝났는지 main이 구별)
+        self.last_fallback_from = None
+
         if self.base_url:
-            # 학교 게이트웨이 등 OpenAI 호환 프록시 — base_url 지정 시
-            # 폴백 기본은 reasoning 토큰을 거의 사용하지 않는 flash-lite (가장 저렴·안정).
+            # 게이트웨이 폴백 기본은 가장 저렴한 flash-lite
             model_name = self.model or "gemini-3.1-flash-lite"
-            return self._recognize_openai_compat(pil_image, api_key, self.base_url, model_name)
+            return self._call_with_fallback(
+                model_name,
+                backend="gateway",
+                call=lambda m: self._openai_compat_call(pil_image, api_key, self.base_url, m),
+            )
 
         try:
             import google.generativeai as genai
@@ -248,18 +355,57 @@ class OcrEngine:
 
         genai.configure(api_key=api_key)
         model_name = self.model or "gemini-2.5-flash"
-        model = genai.GenerativeModel(model_name)
+        return self._call_with_fallback(
+            model_name,
+            backend="official",
+            call=lambda m: self._google_genai_call(genai, pil_image, m),
+        )
+
+    # ── 폴백 공통 래퍼 ──
+
+    def _call_with_fallback(self, model: str, backend: str, call) -> str:
+        """1차 호출 실패가 model_not_found 류면 화이트리스트의 다음 안전 모델로 1회 재시도."""
+        self.last_used_model = model
+        try:
+            return call(model)
+        except Exception as exc:
+            if not _is_model_not_found(exc):
+                raise
+            fallback = select_fallback_model(model, backend)
+            if not fallback or fallback == model:
+                raise
+            # 폴백 진행 — main이 토스트로 표시
+            self.last_fallback_from = model
+            self.last_used_model = fallback
+            return call(fallback)
+
+    # ── 공식 Google API 단일 호출 ──
+
+    def _google_genai_call(self, genai_module, pil_image: Image.Image, model_name: str) -> str:
+        model = genai_module.GenerativeModel(model_name)
         response = model.generate_content([pil_image, _ocr_prompt(self.language)])
         return (response.text or "").strip()
 
     # ── OpenAI 호환 게이트웨이 ──
 
     def _recognize_openai_compat(self, pil_image: Image.Image, api_key: str, base_url: str, model: str) -> str:
-        """OpenAI 호환 게이트웨이/프록시를 통한 OCR.
+        """OpenAI 호환 게이트웨이/프록시를 통한 OCR (폴백 포함).
 
         학교 게이트웨이처럼 base_url + Bearer 토큰 방식의 프록시에 사용.
         base_url은 '/chat/completions' 앞까지만 입력 (예: https://host/v1/gateway).
+
+        직접 호출되는 일은 거의 없고 _recognize_gemini에서 사용되지만, 외부에서
+        직접 호출하는 경로(테스트 등)를 위해 폴백 래퍼를 거치도록 통일.
         """
+        self.last_fallback_from = None
+        return self._call_with_fallback(
+            model,
+            backend="gateway",
+            call=lambda m: self._openai_compat_call(pil_image, api_key, base_url, m),
+        )
+
+    def _openai_compat_call(self, pil_image: Image.Image, api_key: str, base_url: str, model: str) -> str:
+        """OpenAI 호환 게이트웨이 단일 호출 (폴백 없음)."""
         import io, base64
         try:
             import openai

@@ -487,6 +487,7 @@ class _SignalBridge(QObject):
     ocr_requested      = pyqtSignal()        # 훅 스레드 → 메인: OCR 오버레이 띄우기
     ocr_done           = pyqtSignal(str)     # 워커 스레드 → 메인: OCR 결과 텍스트
     ocr_error          = pyqtSignal(str)     # 워커 스레드 → 메인: 에러 메시지
+    ocr_fallback       = pyqtSignal(str, str)  # 워커 스레드 → 메인: (실패 모델, 폴백 모델) 자동 폴백 알림
     image_to_path      = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 경로 텍스트로 교체 후 Ctrl+V
 
 
@@ -516,6 +517,7 @@ class PasteFlowApp:
         self._bridge.ocr_requested.connect(self._on_ocr_requested)
         self._bridge.ocr_done.connect(self._on_ocr_done)
         self._bridge.ocr_error.connect(self._on_ocr_error)
+        self._bridge.ocr_fallback.connect(self._on_ocr_fallback)
         self._bridge.plain_paste.connect(self._on_plain_paste)
         self._bridge.image_to_path.connect(self._on_image_to_path_hotkey)
 
@@ -705,6 +707,8 @@ class PasteFlowApp:
                     model = ""
                 engine = OcrEngine(kind=engine_kind, api_key=api_key, base_url=base_url, language=lang, model=model)
                 text = engine.recognize(pil_img)
+                if engine.last_fallback_from and engine.last_used_model:
+                    self._bridge.ocr_fallback.emit(engine.last_fallback_from, engine.last_used_model)
                 self._bridge.ocr_done.emit(text)
             except Exception as e:
                 self._bridge.ocr_error.emit(str(e))
@@ -830,6 +834,18 @@ class PasteFlowApp:
         preview = text[:30].replace("\n", " ")
         suffix = "..." if len(text) > 30 else ""
         ToastNotification(f"{preview}{suffix}", icon="🔤")
+
+    def _on_ocr_fallback(self, failed_model: str, used_model: str):
+        """모델 not_found로 폴백이 발동했을 때 사용자에게 알림.
+
+        사용자가 다음 사용 시 모델 선택을 재고할 수 있게 한다 (DB 자체는 변경하지 않음 —
+        잠깐의 게이트웨이 장애일 수도 있으므로 사용자 명시 선택을 유지).
+        """
+        from pasteflow.ui.toast import ToastNotification
+        ToastNotification(
+            f"{failed_model} 없음 → {used_model}로 폴백",
+            icon="🔤",
+        )
 
     def _on_ocr_error(self, msg: str):
         from pasteflow.ui.toast import ToastNotification
