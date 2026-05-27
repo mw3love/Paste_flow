@@ -220,10 +220,15 @@ class SettingsDialog(QDialog):
     KEY_IMAGE_TO_PATH_HOTKEY = "hotkey_image_to_path"
     KEY_OCR_LANG = "ocr_language"
     KEY_OCR_ENGINE = "ocr_engine"
-    KEY_OCR_GEMINI_API_KEY = "ocr_gemini_api_key"
-    KEY_OCR_GEMINI_BASE_URL = "ocr_gemini_base_url"
-    KEY_OCR_GEMINI_MODEL = "ocr_gemini_model"
-    KEY_OCR_GEMINI_MODEL_CACHE = "ocr_gemini_model_cache"
+    # Gemini는 backend별로 키/모델/캐시 분리 — 학교 게이트웨이와 개인 AI Studio 키를 동시에 보관
+    KEY_OCR_GEMINI_BACKEND = "ocr_gemini_backend"  # "official" | "gateway"
+    KEY_OCR_GEMINI_BASE_URL = "ocr_gemini_base_url"  # gateway 전용
+    KEY_OCR_GEMINI_API_KEY_OFFICIAL = "ocr_gemini_api_key_official"
+    KEY_OCR_GEMINI_API_KEY_GATEWAY = "ocr_gemini_api_key_gateway"
+    KEY_OCR_GEMINI_MODEL_OFFICIAL = "ocr_gemini_model_official"
+    KEY_OCR_GEMINI_MODEL_GATEWAY = "ocr_gemini_model_gateway"
+    KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL = "ocr_gemini_model_cache_official"
+    KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY = "ocr_gemini_model_cache_gateway"
     KEY_QUEUE_IDLE_RESET = "queue_idle_reset_sec"
 
     # 워커 스레드 → UI 안전 통신용 내부 시그널 (models, error_msg)
@@ -315,23 +320,30 @@ class SettingsDialog(QDialog):
         self._ocr_engine_combo.addItem("Google Gemini (API 키 필요)", "gemini")
         ocr_form.addRow("OCR 엔진:", self._ocr_engine_combo)
 
+        # API 백엔드 — Gemini일 때만 표시. 공식/게이트웨이별로 키·모델·캐시를 각각 보관해 동시 등록·자유 전환.
+        self._backend_label = QLabel("API 백엔드:")
+        self._backend_combo = QComboBox()
+        self._backend_combo.setStyleSheet(_combo_style)
+        self._backend_combo.addItem("공식 Google AI Studio", "official")
+        self._backend_combo.addItem("학교 게이트웨이", "gateway")
+        ocr_form.addRow(self._backend_label, self._backend_combo)
+
         self._api_key_label = QLabel("API 키:")
         self._api_key_edit = QLineEdit()
         self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._api_key_edit.setPlaceholderText("게이트웨이 토큰 또는 Google AI Studio 키")
+        self._api_key_edit.setPlaceholderText("Google AI Studio 키")
         ocr_form.addRow(self._api_key_label, self._api_key_edit)
 
         self._base_url_label = QLabel("Base URL:")
         self._base_url_edit = QLineEdit()
-        self._base_url_edit.setPlaceholderText("https://... (공식 API 사용 시 비워두기)")
+        self._base_url_edit.setPlaceholderText("예: https://factchat-cloud.mindlogic.ai/v1/gateway")
         ocr_form.addRow(self._base_url_label, self._base_url_edit)
 
         self._model_label = QLabel("모델명:")
         self._model_combo = QComboBox()
         self._model_combo.setEditable(True)
         self._model_combo.setStyleSheet(_combo_style)
-        self._populate_model_combo()
-        self._model_combo.setCurrentIndex(0)
+        # 콤보 초기 채우기는 _load_values에서 backend가 정해진 뒤 수행한다.
 
         self._model_refresh_btn = QPushButton()
         # Qt 내장 표준 아이콘 — 폰트 의존성 없이 모든 환경에서 보장
@@ -359,6 +371,7 @@ class SettingsDialog(QDialog):
         self._update_model_hint()
 
         self._ocr_engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+        self._backend_combo.currentIndexChanged.connect(self._on_backend_changed)
 
         self._ocr_lang_combo = QComboBox()
         self._ocr_lang_combo.setStyleSheet(_combo_style)
@@ -429,31 +442,69 @@ class SettingsDialog(QDialog):
 
     def _on_engine_changed(self, _idx: int):
         engine = self._ocr_engine_combo.currentData()
-        needs_key = engine == "gemini"
-        needs_url = engine == "gemini"
-        needs_model = engine == "gemini"
+        is_gemini = engine == "gemini"
         is_winrt = engine == "winrt"
-        self._api_key_label.setVisible(needs_key)
-        self._api_key_edit.setVisible(needs_key)
-        self._base_url_label.setVisible(needs_url)
-        self._base_url_edit.setVisible(needs_url)
-        self._model_label.setVisible(needs_model)
-        self._model_combo.setVisible(needs_model)
-        self._model_refresh_btn.setVisible(needs_model)
+        # 백엔드 콤보는 Gemini일 때만, base URL은 gateway 백엔드일 때만 노출 — _on_backend_changed가 후처리
+        self._backend_label.setVisible(is_gemini)
+        self._backend_combo.setVisible(is_gemini)
+        self._api_key_label.setVisible(is_gemini)
+        self._api_key_edit.setVisible(is_gemini)
+        self._model_label.setVisible(is_gemini)
+        self._model_combo.setVisible(is_gemini)
+        self._model_refresh_btn.setVisible(is_gemini)
         if hasattr(self, "_model_hint"):
-            self._model_hint.setVisible(needs_model)
-        # 엔진별 플레이스홀더 + 저장된 값 로드
-        if engine == "gemini":
-            self._api_key_edit.setPlaceholderText("게이트웨이 토큰 또는 Google AI Studio 키")
-            self._base_url_edit.setPlaceholderText(
-                "예: https://factchat-cloud.mindlogic.ai/v1/gateway (끝에 /chat/completions 붙이지 말 것)"
-            )
-            self._api_key_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_API_KEY, ""))
-            self._base_url_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, ""))
-            saved_model = self._settings.get(self.KEY_OCR_GEMINI_MODEL, "gemini-3.1-flash-lite")
-            self._model_combo.setCurrentText(saved_model or "gemini-3.1-flash-lite")
+            self._model_hint.setVisible(is_gemini)
+        if is_gemini:
+            # backend에 맞춰 키/URL/모델/캐시 채우고 base_url 노출 여부 결정
+            self._on_backend_changed(self._backend_combo.currentIndex())
+        else:
+            self._base_url_label.setVisible(False)
+            self._base_url_edit.setVisible(False)
         if hasattr(self, '_ocr_form'):
             self._ocr_form.setRowVisible(self._ocr_lang_combo, is_winrt)
+
+    def _on_backend_changed(self, _idx: int):
+        """API 백엔드 콤보 전환 — 해당 백엔드의 키/URL/모델/캐시로 입력란 스왑.
+
+        편집 중 모델명 변경분(`_model_combo.currentText()`)은 이전 백엔드의 모델 슬롯에 저장하고,
+        새 백엔드의 저장값을 다시 띄운다. 사용자가 backend를 왔다갔다 해도 양쪽 값이 보존되도록.
+        """
+        backend = self._backend_combo.currentData() or "official"
+        prev_backend = getattr(self, "_active_backend", None)
+
+        # 1) 이전 backend의 현재 입력값을 self._settings에 stash (저장은 _on_save에서 일괄)
+        if prev_backend == "official":
+            self._settings[self.KEY_OCR_GEMINI_API_KEY_OFFICIAL] = self._api_key_edit.text()
+            self._settings[self.KEY_OCR_GEMINI_MODEL_OFFICIAL] = self._model_combo.currentText()
+        elif prev_backend == "gateway":
+            self._settings[self.KEY_OCR_GEMINI_API_KEY_GATEWAY] = self._api_key_edit.text()
+            self._settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
+            self._settings[self.KEY_OCR_GEMINI_MODEL_GATEWAY] = self._model_combo.currentText()
+
+        # 2) 새 backend 값으로 입력란 채우기
+        if backend == "gateway":
+            self._api_key_edit.setPlaceholderText("학교 게이트웨이 토큰")
+            self._api_key_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_API_KEY_GATEWAY, ""))
+            self._base_url_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, ""))
+            self._base_url_label.setVisible(True)
+            self._base_url_edit.setVisible(True)
+        else:  # official
+            self._api_key_edit.setPlaceholderText("Google AI Studio 키")
+            self._api_key_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_API_KEY_OFFICIAL, ""))
+            self._base_url_label.setVisible(False)
+            self._base_url_edit.setVisible(False)
+
+        self._active_backend = backend
+        # 3) 모델 콤보는 backend별 캐시로 재구성 후 저장된 모델명 선택
+        self._populate_model_combo()
+        saved_model = self._current_saved_model_for(backend)
+        if saved_model:
+            self._model_combo.setCurrentText(saved_model)
+
+    def _current_saved_model_for(self, backend: str) -> str:
+        if backend == "gateway":
+            return self._settings.get(self.KEY_OCR_GEMINI_MODEL_GATEWAY, "")
+        return self._settings.get(self.KEY_OCR_GEMINI_MODEL_OFFICIAL, "")
 
     def _load_values(self):
         """현재 설정값 로드"""
@@ -466,10 +517,21 @@ class SettingsDialog(QDialog):
         self._image_to_path_hotkey.set_value(
             self._settings.get(self.KEY_IMAGE_TO_PATH_HOTKEY, "ctrl+shift+p")
         )
+        # backend 콤보 — base_url 유무 자동 추론보다 명시 저장값을 우선
+        backend = self._settings.get(self.KEY_OCR_GEMINI_BACKEND, "")
+        if backend not in ("official", "gateway"):
+            backend = "gateway" if (self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, "") or "").strip() else "official"
+        b_idx = self._backend_combo.findData(backend)
+        # 시그널 차단 후 인덱스 설정 → _on_engine_changed가 1회 호출하도록 정렬
+        self._backend_combo.blockSignals(True)
+        self._backend_combo.setCurrentIndex(b_idx if b_idx >= 0 else 0)
+        self._backend_combo.blockSignals(False)
+        self._active_backend = None  # _on_backend_changed가 prev_backend 처리 안 하도록
+
         engine = self._settings.get(self.KEY_OCR_ENGINE, "winrt")
         idx = self._ocr_engine_combo.findData(engine)
         self._ocr_engine_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        # key/url 텍스트는 _on_engine_changed 에서 엔진별로 로드
+        # key/url 텍스트는 _on_engine_changed → _on_backend_changed 체인으로 로드
         self._on_engine_changed(self._ocr_engine_combo.currentIndex())
 
         lang = self._settings.get(self.KEY_OCR_LANG, "ko")
@@ -492,9 +554,14 @@ class SettingsDialog(QDialog):
             self._settings.get(self.KEY_NOTIFY_ON_COPY, "1") == "1"
         )
 
-    def _backend_for_url(self, base_url: str) -> str:
-        """base_url 유무로 backend 결정. 공식 API ↔ 게이트웨이는 라인업이 달라 분리한다."""
-        return "gateway" if (base_url or "").strip() else "official"
+    def _current_backend(self) -> str:
+        """현재 backend 콤보 선택값 — 'official' 또는 'gateway'."""
+        return self._backend_combo.currentData() or "official"
+
+    def _cache_key_for(self, backend: str) -> str:
+        return (self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY
+                if backend == "gateway"
+                else self.KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL)
 
     def _fill_model_combo(self, verified: list[str], unverified: list[str]):
         """콤보를 검증 모델(상단) + 구분선 + 미검증 모델(하단, 회색)로 채운다."""
@@ -527,11 +594,12 @@ class SettingsDialog(QDialog):
         self._model_hint.setText(f"💡 가장 저렴: {verified[0]}")
 
     def _populate_model_combo(self):
-        """캐시된 모델 목록이 있으면 화이트리스트와 분류, 없으면 화이트리스트 기본값."""
+        """현재 backend의 캐시로 모델 콤보 구성. 캐시 없으면 화이트리스트 기본값."""
         import json
         from pasteflow.ocr_engine import sort_models_with_whitelist, whitelist_model_names
 
-        cache_str = self._settings.get(self.KEY_OCR_GEMINI_MODEL_CACHE, "")
+        backend = self._current_backend()
+        cache_str = self._settings.get(self._cache_key_for(backend), "")
         cached: list[str] = []
         if cache_str:
             try:
@@ -541,7 +609,6 @@ class SettingsDialog(QDialog):
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass
 
-        backend = self._backend_for_url(self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, ""))
         if cached:
             verified, unverified = sort_models_with_whitelist(cached, backend)
         else:
@@ -550,14 +617,15 @@ class SettingsDialog(QDialog):
         self._fill_model_combo(verified, unverified)
 
     def _on_refresh_models(self):
-        """🔄 버튼 — API에서 모델 목록 조회 (워커 스레드)."""
+        """🔄 버튼 — 현재 backend에 맞는 API에서 모델 목록 조회 (워커 스레드)."""
         api_key = self._api_key_edit.text().strip()
         if not api_key:
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "API 키 필요",
                                 "먼저 API 키를 입력하세요.")
             return
-        base_url = self._base_url_edit.text().strip()
+        backend = self._current_backend()
+        base_url = self._base_url_edit.text().strip() if backend == "gateway" else ""
 
         self._model_refresh_btn.setEnabled(False)
         # 로딩 중: 아이콘 제거 + "..." 텍스트 (단순/명확)
@@ -592,7 +660,7 @@ class SettingsDialog(QDialog):
             return
 
         from pasteflow.ocr_engine import sort_models_with_whitelist
-        backend = self._backend_for_url(self._base_url_edit.text())
+        backend = self._current_backend()
         unique = sorted(set(models))
         verified, unverified = sort_models_with_whitelist(unique, backend)
 
@@ -605,10 +673,16 @@ class SettingsDialog(QDialog):
             self._model_combo.setCurrentText(current)
 
         import json
-        self._settings[self.KEY_OCR_GEMINI_MODEL_CACHE] = json.dumps(unique)
+        # 캐시도 backend별로 분리 저장 — 공식/게이트웨이 모델 라인업이 달라 섞이면 안 됨
+        self._settings[self._cache_key_for(backend)] = json.dumps(unique)
 
     def _on_save(self):
-        """저장 버튼 클릭 — 레지스트리 등록은 main._on_settings_changed에서 처리"""
+        """저장 버튼 클릭 — 레지스트리 등록은 main._on_settings_changed에서 처리.
+
+        Gemini는 backend별 키/모델을 각각 보존:
+        - 활성 backend의 입력값은 화면에서 읽어 갱신
+        - 비활성 backend의 값은 self._settings에 stash된 것을 그대로 전달
+        """
         engine = self._ocr_engine_combo.currentData()
         auto_start = self._auto_start_check.isChecked()
 
@@ -623,14 +697,30 @@ class SettingsDialog(QDialog):
             self.KEY_AUTO_START: "1" if auto_start else "0",
             self.KEY_NOTIFY_ON_COPY: "1" if self._notify_copy_check.isChecked() else "0",
         }
-        # 엔진별 key/url 저장 (서로 덮어쓰지 않음)
         if engine == "gemini":
-            new_settings[self.KEY_OCR_GEMINI_API_KEY] = self._api_key_edit.text()
-            new_settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
-            new_settings[self.KEY_OCR_GEMINI_MODEL] = self._model_combo.currentText()
-            # 새로고침으로 갱신된 캐시가 있으면 DB에도 반영
-            cache = self._settings.get(self.KEY_OCR_GEMINI_MODEL_CACHE)
-            if cache:
-                new_settings[self.KEY_OCR_GEMINI_MODEL_CACHE] = cache
+            backend = self._current_backend()
+            new_settings[self.KEY_OCR_GEMINI_BACKEND] = backend
+
+            # 활성 backend의 현재 입력값 → self._settings에 반영(반대편 stash와 일관성 유지)
+            if backend == "gateway":
+                self._settings[self.KEY_OCR_GEMINI_API_KEY_GATEWAY] = self._api_key_edit.text()
+                self._settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
+                self._settings[self.KEY_OCR_GEMINI_MODEL_GATEWAY] = self._model_combo.currentText()
+            else:
+                self._settings[self.KEY_OCR_GEMINI_API_KEY_OFFICIAL] = self._api_key_edit.text()
+                self._settings[self.KEY_OCR_GEMINI_MODEL_OFFICIAL] = self._model_combo.currentText()
+
+            # 양쪽 backend의 키/모델/캐시를 모두 같이 전달 — 일부만 보내면 다른 쪽이 사라질 위험
+            for k in (
+                self.KEY_OCR_GEMINI_API_KEY_OFFICIAL,
+                self.KEY_OCR_GEMINI_API_KEY_GATEWAY,
+                self.KEY_OCR_GEMINI_BASE_URL,
+                self.KEY_OCR_GEMINI_MODEL_OFFICIAL,
+                self.KEY_OCR_GEMINI_MODEL_GATEWAY,
+                self.KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL,
+                self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY,
+            ):
+                if k in self._settings:
+                    new_settings[k] = self._settings[k]
         self.settings_changed.emit(new_settings)
         self.accept()

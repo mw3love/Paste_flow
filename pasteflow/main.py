@@ -419,11 +419,16 @@ def _resolve_db_path() -> str:
 # ── settings.json (Drive 공유 설정) ──────────────────────────────────────────
 # 5대 PC가 같은 코드(Drive)를 쓰면서 일부 설정만 공유하기 위한 화이트리스트.
 # 본질적으로 PC별인 키(auto_start=레지스트리 바인딩, panel_geometry=모니터 종속,
-# ocr_gemini_model_cache=네트워크 캐시)는 동기화하지 않는다.
+# ocr_gemini_model_cache_*=네트워크 캐시)는 동기화하지 않는다.
+# 옛 키(ocr_gemini_api_key, ocr_gemini_model)는 화이트리스트에서 제거 — 더 이상 db로 들어오지 않으므로
+# 다른 PC가 옛 버전을 쓰더라도 마이그레이션 가드에 의해 안전.
 _SYNC_KEYS = frozenset({
-    "ocr_gemini_api_key",
+    "ocr_gemini_backend",
+    "ocr_gemini_api_key_official",
+    "ocr_gemini_api_key_gateway",
     "ocr_gemini_base_url",
-    "ocr_gemini_model",
+    "ocr_gemini_model_official",
+    "ocr_gemini_model_gateway",
     "ocr_engine",
     "ocr_language",
     "hotkey_panel_toggle",
@@ -471,6 +476,53 @@ def _save_shared_settings(updates: dict):
             json.dump(current, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[Settings] settings.json 저장 실패: {e}")
+
+
+def _migrate_split_gemini_keys(db):
+    """1회 마이그레이션: 단일 ocr_gemini_api_key / model / model_cache를 backend별 분리 키로 이전.
+
+    base_url 유무로 official/gateway 결정. 새 키가 이미 채워져 있으면 옛 값으로 덮어쓰지 않음
+    (이미 마이그레이션됐거나 사용자가 새 설정을 입력한 경우). 마지막에 옛 키를 db에서 삭제하며,
+    이후 settings.json 화이트리스트에서도 제외되어 있어 다시 db로 들어오지 않는다.
+    """
+    old_api = db.get_setting("ocr_gemini_api_key", "") or ""
+    old_model = db.get_setting("ocr_gemini_model", "") or ""
+    old_cache = db.get_setting("ocr_gemini_model_cache", "") or ""
+    if not (old_api or old_model or old_cache):
+        return  # 마이그레이션 대상 없음
+
+    base_url = (db.get_setting("ocr_gemini_base_url", "") or "").strip()
+    backend = "gateway" if base_url else "official"
+
+    if backend == "gateway":
+        new_api_key, new_model_key, new_cache_key = (
+            "ocr_gemini_api_key_gateway",
+            "ocr_gemini_model_gateway",
+            "ocr_gemini_model_cache_gateway",
+        )
+    else:
+        new_api_key, new_model_key, new_cache_key = (
+            "ocr_gemini_api_key_official",
+            "ocr_gemini_model_official",
+            "ocr_gemini_model_cache_official",
+        )
+
+    if old_api and not db.get_setting(new_api_key, ""):
+        db.set_setting(new_api_key, old_api)
+    if old_model and not db.get_setting(new_model_key, ""):
+        db.set_setting(new_model_key, old_model)
+    if old_cache and not db.get_setting(new_cache_key, ""):
+        db.set_setting(new_cache_key, old_cache)
+    if not db.get_setting("ocr_gemini_backend", ""):
+        db.set_setting("ocr_gemini_backend", backend)
+
+    with db._lock:
+        db.conn.execute(
+            "DELETE FROM settings WHERE key IN (?, ?, ?)",
+            ("ocr_gemini_api_key", "ocr_gemini_model", "ocr_gemini_model_cache"),
+        )
+        db.conn.commit()
+    print(f"[Migrate] ocr_gemini 키 분리 완료: backend={backend}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -698,9 +750,19 @@ class PasteFlowApp:
                 lang = self.db.get_setting("ocr_language", "ko")
                 engine_kind = self.db.get_setting("ocr_engine", "winrt")
                 if engine_kind == "gemini":
-                    api_key = self.db.get_setting("ocr_gemini_api_key", "")
-                    base_url = self.db.get_setting("ocr_gemini_base_url", "")
-                    model = self.db.get_setting("ocr_gemini_model", "")
+                    # backend 명시값 우선, 미설정 시 base_url 유무로 추론(레거시 호환)
+                    backend = self.db.get_setting("ocr_gemini_backend", "")
+                    base_url_saved = self.db.get_setting("ocr_gemini_base_url", "")
+                    if backend not in ("official", "gateway"):
+                        backend = "gateway" if (base_url_saved or "").strip() else "official"
+                    if backend == "gateway":
+                        api_key = self.db.get_setting("ocr_gemini_api_key_gateway", "")
+                        base_url = base_url_saved
+                        model = self.db.get_setting("ocr_gemini_model_gateway", "")
+                    else:
+                        api_key = self.db.get_setting("ocr_gemini_api_key_official", "")
+                        base_url = ""  # 공식 API는 base_url 무시
+                        model = self.db.get_setting("ocr_gemini_model_official", "")
                 else:
                     api_key = ""
                     base_url = ""
@@ -1187,6 +1249,9 @@ class PasteFlowApp:
             if k in _SYNC_KEYS:
                 self.db.set_setting(k, str(v))
 
+        # Gemini 키/모델 분리 마이그레이션 (옛 단일 키 → backend별 분리 키). 1회성·idempotent.
+        _migrate_split_gemini_keys(self.db)
+
         # 레지스트리 실제 상태로 auto_start DB 동기화
         self._sync_auto_start_from_registry()
 
@@ -1222,10 +1287,14 @@ class PasteFlowApp:
             "hotkey_image_to_path": self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p"),
             "ocr_language": self.db.get_setting("ocr_language", "ko"),
             "ocr_engine": self.db.get_setting("ocr_engine", "winrt"),
-            "ocr_gemini_api_key": self.db.get_setting("ocr_gemini_api_key", ""),
+            "ocr_gemini_backend": self.db.get_setting("ocr_gemini_backend", ""),
             "ocr_gemini_base_url": self.db.get_setting("ocr_gemini_base_url", ""),
-            "ocr_gemini_model": self.db.get_setting("ocr_gemini_model", ""),
-            "ocr_gemini_model_cache": self.db.get_setting("ocr_gemini_model_cache", ""),
+            "ocr_gemini_api_key_official": self.db.get_setting("ocr_gemini_api_key_official", ""),
+            "ocr_gemini_api_key_gateway": self.db.get_setting("ocr_gemini_api_key_gateway", ""),
+            "ocr_gemini_model_official": self.db.get_setting("ocr_gemini_model_official", ""),
+            "ocr_gemini_model_gateway": self.db.get_setting("ocr_gemini_model_gateway", ""),
+            "ocr_gemini_model_cache_official": self.db.get_setting("ocr_gemini_model_cache_official", ""),
+            "ocr_gemini_model_cache_gateway": self.db.get_setting("ocr_gemini_model_cache_gateway", ""),
             "notify_on_copy": self.db.get_setting("notify_on_copy", "1"),
             "queue_idle_reset_sec": self.db.get_setting("queue_idle_reset_sec", "10"),
         }
