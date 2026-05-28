@@ -73,6 +73,8 @@ python -m PyInstaller PasteFlow.spec --clean
 
 ## 버전
 
+**v1.4.0** — API 키 DPAPI 암호화. OCR Gemini API 키(공식·게이트웨이)를 Windows DPAPI(`CryptProtectData`)로 암호화해 로컬 DB에 저장(`enc:v1:` prefix) — 현재 Windows 계정에만 묶이므로 PC 도난/디스크 복제 시에도 키 노출 차단. 다중 PC `settings.json` 자동 동기화 폐기(DPAPI 바인딩과 양립 불가, 클라우드 평문 키 노출 위험 제거). 모든 설정은 PC별 로컬 DB(`%LOCALAPPDATA%\PasteFlow\pasteflow.db`)에 저장. 시작 시 1회 마이그레이션으로 기존 평문 키 자동 암호화 + 고아 설정 키 4종(`ocr_api_key`·`ocr_base_url`·`hotkey_settings`·`panel_always_on_top`) 정리.
+
 **v1.3.0** — OCR Gemini API 키를 backend별로 분리 (공식 Google AI Studio / 학교 게이트웨이). 설정에 **API 백엔드** 콤보 추가 — 두 backend의 API 키·모델·캐시를 동시 보관하고 자유롭게 전환. base_url 입력란은 게이트웨이일 때만 노출. 기존 단일 키(`ocr_gemini_api_key`)는 `base_url` 유무를 기준으로 1회 자동 마이그레이션 후 정리.
 
 **v1.2.0** — 이미지→경로 단축키 (`Ctrl+Shift+P` 기본, 설정 가능) 추가 — 클립보드 이미지를 임시 PNG로 저장 후 절대경로 텍스트로 자동 붙여넣기. OCR Gemini 게이트웨이 본문 잘림 수정 (`max_tokens` 2048→16384, reasoning 토큰 차감 대응) — 기본 모델을 `gemini-3.1-flash-lite`로 변경. OCR Gemini 모델 선택 개선 — 검증 모델 화이트리스트 기반 콤보 정렬(가격순, 미검증 모델은 회색 + 구분선 아래), 호출 실패 시 `gemini-2.5-flash`로 자동 폴백 + 토스트 알림(게이트웨이 라인업 변경/광고-실제 불일치 대응).

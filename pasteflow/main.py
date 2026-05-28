@@ -416,66 +416,45 @@ def _resolve_db_path() -> str:
     return local_db
 
 
-# ── settings.json (Drive 공유 설정) ──────────────────────────────────────────
-# 5대 PC가 같은 코드(Drive)를 쓰면서 일부 설정만 공유하기 위한 화이트리스트.
-# 본질적으로 PC별인 키(auto_start=레지스트리 바인딩, panel_geometry=모니터 종속,
-# ocr_gemini_model_cache_*=네트워크 캐시)는 동기화하지 않는다.
-# 옛 키(ocr_gemini_api_key, ocr_gemini_model)는 화이트리스트에서 제거 — 더 이상 db로 들어오지 않으므로
-# 다른 PC가 옛 버전을 쓰더라도 마이그레이션 가드에 의해 안전.
-_SYNC_KEYS = frozenset({
-    "ocr_gemini_backend",
+# ── 시크릿 처리 ──────────────────────────────────────────────────────────────
+# DPAPI(crypto.py)로 암호화해 로컬 DB에 저장하는 키 화이트리스트.
+# 읽기/쓰기 시 자동 복호화/암호화. 다른 PC 복호화 불가(설계상 — 동기화 폐지됨).
+_SECRET_KEYS = frozenset({
     "ocr_gemini_api_key_official",
     "ocr_gemini_api_key_gateway",
-    "ocr_gemini_base_url",
-    "ocr_gemini_model_official",
-    "ocr_gemini_model_gateway",
-    "ocr_engine",
-    "ocr_language",
-    "hotkey_panel_toggle",
-    "hotkey_ocr_trigger",
-    "hotkey_image_to_path",
-    "history_max",
-    "panel_auto_close",
-    "notify_on_copy",
-    "queue_idle_reset_sec",
 })
 
-
-def _settings_json_path() -> str:
-    """Drive 공유 settings.json 경로 (코드와 같은 위치 = project root)."""
-    return os.path.join(os.path.dirname(__file__), "..", "settings.json")
-
-
-def _load_shared_settings() -> dict:
-    """settings.json 읽어 dict 반환. 파일 없거나 파싱 실패 시 빈 dict."""
-    path = _settings_json_path()
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception as e:
-        print(f"[Settings] settings.json 로드 실패: {e}")
-        return {}
+# 과거 빌드의 잔재로 DB에 남았으나 현재 코드 어디서도 참조하지 않는 고아 키.
+# ocr_api_key는 평문 시크릿이라 P0(이미 노출), 나머지는 cruft 정리.
+_ORPHAN_KEYS = (
+    "ocr_api_key",
+    "ocr_base_url",
+    "hotkey_settings",
+    "panel_always_on_top",
+)
 
 
-def _save_shared_settings(updates: dict):
-    """settings.json에 화이트리스트 키만 병합 저장. 다른 키는 무시."""
-    path = _settings_json_path()
-    current = _load_shared_settings()
-    changed = False
-    for k, v in updates.items():
-        if k in _SYNC_KEYS and current.get(k) != v:
-            current[k] = v
-            changed = True
-    if not changed:
-        return
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(current, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[Settings] settings.json 저장 실패: {e}")
+def _migrate_secrets(db):
+    """1회 마이그레이션 — _SECRET_KEYS 평문 → DPAPI 암호화 + 고아 키 purge. Idempotent.
+
+    - 이미 암호화된 값(`enc:v1:`)은 `crypto.protect`가 그대로 두므로 재실행 안전.
+    - 빈 값/없는 키는 no-op.
+    - 고아 키는 SELECT 없이 DELETE — 없으면 0행 영향, 있으면 1행 정리.
+    """
+    from pasteflow.crypto import protect, is_protected
+
+    for key in _SECRET_KEYS:
+        cur = db.get_setting(key, "") or ""
+        if cur and not is_protected(cur):
+            db.set_setting(key, protect(cur))
+
+    with db._lock:
+        placeholders = ",".join("?" * len(_ORPHAN_KEYS))
+        db.conn.execute(
+            f"DELETE FROM settings WHERE key IN ({placeholders})",
+            _ORPHAN_KEYS,
+        )
+        db.conn.commit()
 
 
 def _migrate_split_gemini_keys(db):
@@ -508,7 +487,8 @@ def _migrate_split_gemini_keys(db):
         )
 
     if old_api and not db.get_setting(new_api_key, ""):
-        db.set_setting(new_api_key, old_api)
+        from pasteflow.crypto import protect
+        db.set_setting(new_api_key, protect(old_api))
     if old_model and not db.get_setting(new_model_key, ""):
         db.set_setting(new_model_key, old_model)
     if old_cache and not db.get_setting(new_cache_key, ""):
@@ -756,11 +736,11 @@ class PasteFlowApp:
                     if backend not in ("official", "gateway"):
                         backend = "gateway" if (base_url_saved or "").strip() else "official"
                     if backend == "gateway":
-                        api_key = self.db.get_setting("ocr_gemini_api_key_gateway", "")
+                        api_key = self._get_secret("ocr_gemini_api_key_gateway")
                         base_url = base_url_saved
                         model = self.db.get_setting("ocr_gemini_model_gateway", "")
                     else:
-                        api_key = self.db.get_setting("ocr_gemini_api_key_official", "")
+                        api_key = self._get_secret("ocr_gemini_api_key_official")
                         base_url = ""  # 공식 API는 base_url 무시
                         model = self.db.get_setting("ocr_gemini_model_official", "")
                 else:
@@ -1239,18 +1219,18 @@ class PasteFlowApp:
 
     # ── 설정 ──
 
-    def _apply_settings_from_db(self):
-        """DB에서 설정 로드 → UI/동작에 적용.
-        DB 읽기 전에 Drive의 settings.json을 화이트리스트 기준으로 DB에 덮어써서
-        다른 PC에서 변경한 설정(API 키·단축키 등)을 이 PC에 반영한다.
-        """
-        shared = _load_shared_settings()
-        for k, v in shared.items():
-            if k in _SYNC_KEYS:
-                self.db.set_setting(k, str(v))
+    def _get_secret(self, key: str, default: str = "") -> str:
+        """시크릿 키(DPAPI 암호화 저장) 복호화 읽기 헬퍼."""
+        from pasteflow.crypto import unprotect
+        return unprotect(self.db.get_setting(key, default) or default)
 
+    def _apply_settings_from_db(self):
+        """DB에서 설정 로드 → UI/동작에 적용."""
         # Gemini 키/모델 분리 마이그레이션 (옛 단일 키 → backend별 분리 키). 1회성·idempotent.
         _migrate_split_gemini_keys(self.db)
+
+        # 시크릿 암호화 + 고아 키 purge. Idempotent.
+        _migrate_secrets(self.db)
 
         # 레지스트리 실제 상태로 auto_start DB 동기화
         self._sync_auto_start_from_registry()
@@ -1289,8 +1269,8 @@ class PasteFlowApp:
             "ocr_engine": self.db.get_setting("ocr_engine", "winrt"),
             "ocr_gemini_backend": self.db.get_setting("ocr_gemini_backend", ""),
             "ocr_gemini_base_url": self.db.get_setting("ocr_gemini_base_url", ""),
-            "ocr_gemini_api_key_official": self.db.get_setting("ocr_gemini_api_key_official", ""),
-            "ocr_gemini_api_key_gateway": self.db.get_setting("ocr_gemini_api_key_gateway", ""),
+            "ocr_gemini_api_key_official": self._get_secret("ocr_gemini_api_key_official"),
+            "ocr_gemini_api_key_gateway": self._get_secret("ocr_gemini_api_key_gateway"),
             "ocr_gemini_model_official": self.db.get_setting("ocr_gemini_model_official", ""),
             "ocr_gemini_model_gateway": self.db.get_setting("ocr_gemini_model_gateway", ""),
             "ocr_gemini_model_cache_official": self.db.get_setting("ocr_gemini_model_cache_official", ""),
@@ -1311,11 +1291,11 @@ class PasteFlowApp:
         old_ocr_hotkey = self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s")
         old_img2path_hotkey = self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p")
 
+        from pasteflow.crypto import protect
         for key, value in new_settings.items():
+            if key in _SECRET_KEYS:
+                value = protect(value)
             self.db.set_setting(key, value)
-
-        # 화이트리스트 키는 Drive의 settings.json에도 반영(다른 PC에서 다음 부팅 시 적용)
-        _save_shared_settings(new_settings)
 
         # 패널 토글 단축키 재설정
         new_hotkey = new_settings.get("hotkey_panel_toggle", "ctrl+space")
