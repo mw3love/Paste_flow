@@ -1,4 +1,6 @@
 """Database CRUD 테스트 — 인메모리 SQLite 사용"""
+import threading
+
 import pytest
 from pasteflow.database import Database
 from pasteflow.models import ClipboardItem
@@ -161,6 +163,63 @@ class TestDeleteItem:
         item = db.save_item(ClipboardItem(content_type="text", text_content="삭제대상"))
         db.delete_item(item.id)
         assert db.get_item(item.id) is None
+
+
+class TestThreadSafety:
+    """동시 읽기/쓰기 스레드 안전성 — 단일 커넥션을 여러 스레드가 공유한다.
+
+    클립보드 모니터 스레드(save_item)와 메인 스레드(get_*) 가 동시에 같은
+    sqlite3 커넥션을 쓰면, 읽기 경로가 잠금 없이 커서를 사용할 경우
+    'bad parameter or other API misuse' / 'Recursive use of cursors' 류
+    예외가 간헐적으로 발생한다. 잠금으로 직렬화되면 예외가 없어야 한다.
+    """
+
+    def test_concurrent_read_write_no_error(self):
+        db = Database(":memory:")
+        try:
+            for i in range(20):
+                db.save_item(ClipboardItem(content_type="text", text_content=f"seed{i}"))
+
+            errors: list = []
+            stop = threading.Event()
+
+            def writer():
+                try:
+                    for i in range(400):
+                        if stop.is_set():
+                            return
+                        db.save_item(
+                            ClipboardItem(content_type="text", text_content=f"w{i}")
+                        )
+                except Exception as e:  # noqa: BLE001
+                    errors.append(repr(e))
+                    stop.set()
+
+            def reader():
+                try:
+                    for _ in range(400):
+                        if stop.is_set():
+                            return
+                        db.get_recent_items(limit=50)
+                        db.get_recent_items_summary(limit=50)
+                        db.get_pinned_items()
+                        db.get_setting("history_max", "50")
+                except Exception as e:  # noqa: BLE001
+                    errors.append(repr(e))
+                    stop.set()
+
+            threads = (
+                [threading.Thread(target=writer) for _ in range(2)]
+                + [threading.Thread(target=reader) for _ in range(3)]
+            )
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+
+            assert not errors, f"동시 접근 중 예외 발생: {errors[:3]}"
+        finally:
+            db.close()
 
 
 class TestSettings:

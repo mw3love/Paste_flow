@@ -16,7 +16,10 @@ class Database:
     def __init__(self, db_path: str = "pasteflow.db"):
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
-        self._lock = threading.Lock()
+        # 단일 커넥션을 여러 스레드(클립보드 모니터·메인·OCR 워커)가 공유하므로
+        # 읽기/쓰기 모두 이 락으로 직렬화해 'API misuse'·'Recursive use of cursors'를 막는다.
+        # RLock: 한 잠금 메서드가 다른 잠금 메서드를 호출해도 데드락이 없도록.
+        self._lock = threading.RLock()
         self._create_tables()
 
     def _create_tables(self):
@@ -95,62 +98,71 @@ class Database:
 
     def get_item(self, item_id: int) -> Optional[ClipboardItem]:
         """ID로 항목 조회"""
-        cur = self.conn.cursor()
-        cur.execute("SELECT * FROM clipboard_items WHERE id = ?", (item_id,))
-        row = cur.fetchone()
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("SELECT * FROM clipboard_items WHERE id = ?", (item_id,))
+            row = cur.fetchone()
         if row is None:
             return None
         return self._row_to_item(row)
 
     def get_recent_items(self, limit: int = 50) -> list[ClipboardItem]:
         """비고정 항목 목록 (history_order순, 전체 데이터)"""
-        cur = self.conn.cursor()
-        cur.execute(
-            """SELECT * FROM clipboard_items
-               WHERE is_pinned = 0
-               ORDER BY history_order ASC
-               LIMIT ?""",
-            (limit,),
-        )
-        return [self._row_to_item(row) for row in cur.fetchall()]
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """SELECT * FROM clipboard_items
+                   WHERE is_pinned = 0
+                   ORDER BY history_order ASC
+                   LIMIT ?""",
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [self._row_to_item(row) for row in rows]
 
     def get_recent_items_summary(self, limit: int = 50) -> list[ClipboardItem]:
         """비고정 항목 목록 (표시용 — image_data/extra_formats 제외)"""
-        cur = self.conn.cursor()
-        cur.execute(
-            """SELECT id, content_type, text_content, NULL AS image_data,
-                      html_content, rtf_content, preview_text, thumbnail,
-                      created_at, is_pinned, pin_order, NULL AS extra_formats
-               FROM clipboard_items
-               WHERE is_pinned = 0
-               ORDER BY history_order ASC
-               LIMIT ?""",
-            (limit,),
-        )
-        return [self._row_to_item(row) for row in cur.fetchall()]
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """SELECT id, content_type, text_content, NULL AS image_data,
+                          html_content, rtf_content, preview_text, thumbnail,
+                          created_at, is_pinned, pin_order, NULL AS extra_formats
+                   FROM clipboard_items
+                   WHERE is_pinned = 0
+                   ORDER BY history_order ASC
+                   LIMIT ?""",
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [self._row_to_item(row) for row in rows]
 
     def get_pinned_items(self) -> list[ClipboardItem]:
         """고정 항목 목록 (pin_order순, 전체 데이터)"""
-        cur = self.conn.cursor()
-        cur.execute(
-            """SELECT * FROM clipboard_items
-               WHERE is_pinned = 1
-               ORDER BY pin_order ASC"""
-        )
-        return [self._row_to_item(row) for row in cur.fetchall()]
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """SELECT * FROM clipboard_items
+                   WHERE is_pinned = 1
+                   ORDER BY pin_order ASC"""
+            )
+            rows = cur.fetchall()
+        return [self._row_to_item(row) for row in rows]
 
     def get_pinned_items_summary(self) -> list[ClipboardItem]:
         """고정 항목 목록 (표시용 — image_data/extra_formats 제외)"""
-        cur = self.conn.cursor()
-        cur.execute(
-            """SELECT id, content_type, text_content, NULL AS image_data,
-                      html_content, rtf_content, preview_text, thumbnail,
-                      created_at, is_pinned, pin_order, NULL AS extra_formats
-               FROM clipboard_items
-               WHERE is_pinned = 1
-               ORDER BY pin_order ASC"""
-        )
-        return [self._row_to_item(row) for row in cur.fetchall()]
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """SELECT id, content_type, text_content, NULL AS image_data,
+                          html_content, rtf_content, preview_text, thumbnail,
+                          created_at, is_pinned, pin_order, NULL AS extra_formats
+                   FROM clipboard_items
+                   WHERE is_pinned = 1
+                   ORDER BY pin_order ASC"""
+            )
+            rows = cur.fetchall()
+        return [self._row_to_item(row) for row in rows]
 
     def delete_item(self, item_id: int):
         """항목 삭제"""
@@ -252,9 +264,10 @@ class Database:
 
     def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """설정 값 조회"""
-        cur = self.conn.cursor()
-        cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
-        row = cur.fetchone()
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = cur.fetchone()
         return row[0] if row else default
 
     def set_setting(self, key: str, value: str):
