@@ -8,12 +8,12 @@ from typing import Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QMenu, QApplication, QGraphicsOpacityEffect,
-    QSizePolicy, QDialog, QPlainTextEdit, QDialogButtonBox,
+    QSizePolicy, QDialog, QPlainTextEdit,
 )
 import ctypes
 import ctypes.wintypes
 
-from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QMimeData, QRect, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QRect, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QPixmap, QCursor, QFontMetrics, QFont
 
 _HWND_TOPMOST = ctypes.wintypes.HWND(-1)
@@ -24,7 +24,7 @@ _SWP_NOACTIVATE = 0x0010
 from pasteflow.models import ClipboardItem
 from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.text_preview import TextPreviewPopup
-from pasteflow.ui.theme import COLORS, TEAL_HOVER, RED_HOVER
+from pasteflow.ui.theme import COLORS, TEAL_HOVER
 
 PANEL_WIDTH = 320
 PANEL_HEIGHT = 420

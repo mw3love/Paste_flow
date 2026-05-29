@@ -11,7 +11,7 @@
 
 - **순차 붙여넣기** — A → B → C 순서로 복사하면 붙여넣기도 A → B → C 순서로
 - **다양한 형식 지원** — 텍스트, 이미지, HTML, RTF(노션 서식 포함)
-- **클립보드 패널** — 복사 히스토리 목록, 고정(pin), 검색
+- **클립보드 패널** — 복사 히스토리 목록, 고정(pin)
 - **이미지 미리보기** — 다중 창 동시 표시, 휠 줌, 드래그 이동
 - **드래그 붙여넣기** — 패널에서 텍스트/이미지를 앱으로 직접 드래그 (Alt+드래그 시 이미지를 임시 파일 경로로 변환 — Claude CLI 등)
 - **이미지 → 경로 단축키** — `Ctrl+Shift+P` 한 번으로 클립보드 이미지를 임시 PNG로 저장 후 절대경로 텍스트로 현재 창에 자동 붙여넣기 (Claude CLI 워크플로용)
@@ -29,8 +29,10 @@
   ```
   PyQt6
   pywin32
-  keyboard
   Pillow
+  winocr                  # 화면 OCR (Windows WinRT)
+  google-generativeai     # Gemini OCR (선택)
+  openai                  # OpenAI 호환 게이트웨이 OCR (선택)
   ```
 
 ---
@@ -39,7 +41,7 @@
 
 ```bash
 # 패키지 설치
-pip install PyQt6 pywin32 keyboard Pillow
+pip install -r requirements.txt
 
 # 실행
 python -m pasteflow.main

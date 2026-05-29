@@ -2,7 +2,6 @@
 
 단축키 커스터마이징, 히스토리 제한, 자동 시작, 자동 닫기 설정.
 """
-import sys
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,

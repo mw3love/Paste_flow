@@ -39,9 +39,6 @@ a = Analysis(
         'win32process',
         'win32event',
         'pywintypes',
-        # keyboard
-        'keyboard',
-        'keyboard._winkeyboard',
         # PyQt6 플러그인
         'PyQt6.QtCore',
         'PyQt6.QtGui',
