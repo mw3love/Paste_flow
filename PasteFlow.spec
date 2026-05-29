@@ -12,6 +12,36 @@ def _get_version():
 
 APP_VERSION = _get_version()
 
+
+def _version_info(version_str):
+    """'1.4.0' → 속성창에 표시할 VSVersionInfo. 4번째 자리는 0으로 패딩."""
+    parts = [int(p) for p in version_str.split('.')][:4]
+    while len(parts) < 4:
+        parts.append(0)
+    filevers = tuple(parts)
+    from PyInstaller.utils.win32.versioninfo import (
+        VSVersionInfo, FixedFileInfo, StringFileInfo, StringTable,
+        StringStruct, VarFileInfo, VarStruct,
+    )
+    return VSVersionInfo(
+        ffi=FixedFileInfo(filevers=filevers, prodvers=filevers),
+        kids=[
+            StringFileInfo([StringTable('040904B0', [
+                StringStruct('CompanyName', 'PasteFlow'),
+                StringStruct('FileDescription', 'PasteFlow — 순차 붙여넣기 클립보드 매니저'),
+                StringStruct('FileVersion', version_str),
+                StringStruct('InternalName', 'PasteFlow'),
+                StringStruct('OriginalFilename', f'PasteFlow-{version_str}.exe'),
+                StringStruct('ProductName', 'PasteFlow'),
+                StringStruct('ProductVersion', version_str),
+            ])]),
+            VarFileInfo([VarStruct('Translation', [0x0409, 0x04B0])]),
+        ],
+    )
+
+
+APP_ICON = str(pathlib.Path(SPECPATH) / 'pasteflow' / 'assets' / 'pasteflow.ico')
+
 block_cipher = None
 
 # winocr/winrt 의존성 수집 — 빌드 환경에 설치되지 않은 경우 빈 리스트
@@ -96,4 +126,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=APP_ICON,
+    version=_version_info(APP_VERSION),
 )
