@@ -18,8 +18,8 @@ pip install -r requirements.txt
 # 테스트 실행
 pytest tests/
 
-# 단독 실행 .exe 빌드
-pyinstaller --onefile --windowed pasteflow/main.py
+# 단독 실행 .exe 빌드 (진입점·onefile·windowed·아이콘·버전 메타데이터는 spec에 인코딩)
+pyinstaller PasteFlow.spec    # 산출물: dist/PasteFlow-{버전}.exe
 ```
 
 ---
