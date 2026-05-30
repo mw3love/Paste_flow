@@ -79,13 +79,20 @@ def _is_chromium_window(class_name: str) -> bool:
     return any(class_name.startswith(p) for p in _CHROMIUM_CLASS_PREFIXES)
 
 
-def _activate_and_send_ctrl_v(hwnd):
+def _activate_and_send_ctrl_v(hwnd, sender=None):
     """AttachThreadInput으로 포그라운드 잠금을 우회한 뒤 SendInput(Ctrl+V).
     Qt 메인 스레드에서만 호출해야 한다.
+
+    sender: 실제 키 주입 함수(인자 없음). 기본은 수정키 처리 없는 _send_ctrl_v_plain.
+    Alt+드래그처럼 호출 시점에 수정키가 눌려 있는 경로는
+    interceptor._release_modifiers_and_send_ctrl_v를 넘겨 Alt 해제 후 주입해야
+    OS가 Ctrl+Alt+V로 오인하지 않는다.
     """
     import win32gui
     import win32process
     from pasteflow.paste_interceptor import _send_ctrl_v_plain
+
+    sender = sender or _send_ctrl_v_plain
 
     fg_hwnd = win32gui.GetForegroundWindow()
     current_tid = ctypes.windll.kernel32.GetCurrentThreadId()
@@ -116,7 +123,7 @@ def _activate_and_send_ctrl_v(hwnd):
                 return  # 다른 창이 활성화됐으면 전송 안 함
         except Exception:
             pass
-        _send_ctrl_v_plain()
+        sender()
 
     QTimer.singleShot(80, _send)
 
@@ -1166,7 +1173,11 @@ class PasteFlowApp:
                 preview_text=saved_path[:200],
             )
             self.interceptor._set_clipboard(path_item)
-            _activate_and_send_ctrl_v(root_hwnd)
+            # 마우스 업 시점에 사용자가 Alt를 여전히 누르고 있으므로 수정키 해제 후 주입
+            # (해제 없이 plain Ctrl+V를 쏘면 OS가 Ctrl+Alt+V로 오인해 붙여넣기 실패)
+            _activate_and_send_ctrl_v(
+                root_hwnd, sender=self.interceptor._release_modifiers_and_send_ctrl_v
+            )
             return
 
         # 이미지 항목 + Explorer/바탕화면 → PNG 파일 저장

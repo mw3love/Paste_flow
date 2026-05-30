@@ -304,8 +304,10 @@ class PanelItemWidget(QWidget):
                         panel._ext_drag_active = False
                 self._apply_bg_style()  # 드래그 소스 강조 해제
                 if not self.window().geometry().contains(cursor_pos):
+                    # event.modifiers()가 이 release 이벤트의 권위 있는 수정키 상태.
+                    # QApplication.keyboardModifiers()는 마지막 처리 이벤트 기준이라 lag 가능.
                     alt_held = bool(
-                        QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier
+                        event.modifiers() & Qt.KeyboardModifier.AltModifier
                     )
                     self.external_drag_paste.emit(self.item_id, cursor_pos, alt_held)
                 elif self._is_pinned and panel:
