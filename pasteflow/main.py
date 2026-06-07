@@ -94,27 +94,32 @@ def _activate_and_send_ctrl_v(hwnd, sender=None):
 
     sender = sender or _send_ctrl_v_plain
 
-    fg_hwnd = win32gui.GetForegroundWindow()
     current_tid = ctypes.windll.kernel32.GetCurrentThreadId()
-    fg_tid = win32process.GetWindowThreadProcessId(fg_hwnd)[0]
+    # 타겟 창의 스레드에 입력 큐를 붙여야 SetForegroundWindow가 포커스까지 확실히
+    # 넘긴다. 드래그 시점 포그라운드는 PasteFlow 패널 자신(같은 스레드)이라, 거기에
+    # 붙는 것은 무효였다.
+    target_tid = win32process.GetWindowThreadProcessId(hwnd)[0]
 
     attached = False
     try:
-        if fg_tid and fg_tid != current_tid:
-            win32process.AttachThreadInput(current_tid, fg_tid, True)
+        if target_tid and target_tid != current_tid:
+            win32process.AttachThreadInput(current_tid, target_tid, True)
             attached = True
         win32gui.SetForegroundWindow(hwnd)
         win32gui.BringWindowToTop(hwnd)
+        try:
+            win32gui.SetFocus(hwnd)
+        except Exception:
+            pass
     except Exception:
         pass
     finally:
         if attached:
             try:
-                win32process.AttachThreadInput(current_tid, fg_tid, False)
+                win32process.AttachThreadInput(current_tid, target_tid, False)
             except Exception:
                 pass
 
-    # 창 활성화 후 80ms 대기 → SendInput(Ctrl+V)
     def _send():
         # 현재 포그라운드가 타겟인지 확인
         try:
@@ -125,7 +130,25 @@ def _activate_and_send_ctrl_v(hwnd, sender=None):
             pass
         sender()
 
-    QTimer.singleShot(80, _send)
+    # Alt가 물리적으로 떨어질 때까지 폴링한 뒤 Ctrl+V 주입.
+    # 사용자가 드롭 시점에 Alt를 누르고 있으면 가상 KEYUP으로는 해제되지 않으므로
+    # (GetAsyncKeyState는 물리 키 기준), 실제로 손을 뗄 때까지 기다려야
+    # 타겟이 Ctrl+V를 Ctrl+Alt+V로 오인하지 않는다. QTimer 재예약이라 UI 비차단.
+    _VK_MENU = 0x12
+    _POLL_MS = 25
+    _MAX_WAIT_MS = 1500
+    _wait_state = {"ms": 0}
+
+    def _wait_alt_release_then_send():
+        alt_down = ctypes.windll.user32.GetAsyncKeyState(_VK_MENU) & 0x8000
+        if alt_down and _wait_state["ms"] < _MAX_WAIT_MS:
+            _wait_state["ms"] += _POLL_MS
+            QTimer.singleShot(_POLL_MS, _wait_alt_release_then_send)
+            return
+        _send()
+
+    # 창 활성화 후 80ms 대기 → Alt 해제 대기 → SendInput(Ctrl+V)
+    QTimer.singleShot(80, _wait_alt_release_then_send)
 
 
 def _get_explorer_subfolder_at_cursor(lv_hwnd: int, screen_pt: tuple, current_folder: str):
