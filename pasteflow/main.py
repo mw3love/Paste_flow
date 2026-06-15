@@ -845,7 +845,10 @@ class PasteFlowApp:
         )
         # _set_clipboard가 monitor._self_triggered를 설정해 히스토리 자동 추가 방지
         self.interceptor._set_clipboard(path_item)
-        ToastNotification(f"경로 복사됨: {os.path.basename(saved_path)}", icon="🔤")
+        # 썸네일을 함께 띄워 "복사한 게 의도한 이미지가 맞는지" 그 자리에서 시각 확인
+        ToastNotification(
+            f"경로 복사됨: {os.path.basename(saved_path)}",
+            icon="", image_path=saved_path)
 
     def _on_image_to_path_hotkey(self):
         """이미지→경로 단축키(기본 Ctrl+Shift+P) — 현재 클립보드 이미지를 임시 PNG로 저장 후
