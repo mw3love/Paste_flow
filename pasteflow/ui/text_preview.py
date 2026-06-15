@@ -50,10 +50,14 @@ class TextPreviewPopup(QWidget):
     # ------------------------------------------------------------------
 
     @classmethod
-    def open_new(cls, item: ClipboardItem, panel_geom: QRect) -> "TextPreviewPopup":
-        """새 미리보기 창을 열고 인스턴스 목록에 등록한다."""
+    def open_new(cls, item: ClipboardItem, panel_geom: QRect, editable: bool = True) -> "TextPreviewPopup":
+        """새 미리보기 창을 열고 인스턴스 목록에 등록한다.
+
+        editable=False면 우클릭 "수정" 메뉴를 숨긴다(AI 답변 등 DB에 없는 임시 항목 —
+        id가 없어 수정·저장 경로가 무력하므로 메뉴 자체를 제거).
+        """
         cascade_offset = len(cls._instances) * _CASCADE_STEP
-        popup = cls(item)
+        popup = cls(item, editable=editable)
         cls._instances.append(popup)
         popup.show_preview(panel_geom, cascade_offset)
         return popup
@@ -68,9 +72,10 @@ class TextPreviewPopup(QWidget):
     # 인스턴스 초기화
     # ------------------------------------------------------------------
 
-    def __init__(self, item: ClipboardItem):
+    def __init__(self, item: ClipboardItem, editable: bool = True):
         super().__init__(None)
         self._item = item
+        self._editable = editable
         self.setObjectName("popup_root")
         self.setWindowFlags(
             Qt.WindowType.Tool
@@ -229,7 +234,7 @@ class TextPreviewPopup(QWidget):
         copy_action = menu.addAction("전체 복사")
         copy_action.triggered.connect(lambda: self.copy_requested.emit(self._item))
 
-        if self._item.content_type != "image":
+        if self._editable and self._item.content_type != "image":
             edit_action = menu.addAction("수정")
             edit_action.triggered.connect(lambda: self.edit_requested.emit(self._item.id))
 

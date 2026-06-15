@@ -551,6 +551,8 @@ class _SignalBridge(QObject):
     ocr_error          = pyqtSignal(str)     # 워커 스레드 → 메인: 에러 메시지
     ocr_fallback       = pyqtSignal(str, str)  # 워커 스레드 → 메인: (실패 모델, 폴백 모델) 자동 폴백 알림
     image_to_path      = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 경로 텍스트로 교체 후 Ctrl+V
+    ai_done            = pyqtSignal(str, str)  # AI 워커 스레드 → 메인: (질문, 답변)
+    ai_error           = pyqtSignal(str)     # AI 워커 스레드 → 메인: 에러 메시지
 
 
 class PasteFlowApp:
@@ -582,6 +584,8 @@ class PasteFlowApp:
         self._bridge.ocr_fallback.connect(self._on_ocr_fallback)
         self._bridge.plain_paste.connect(self._on_plain_paste)
         self._bridge.image_to_path.connect(self._on_image_to_path_hotkey)
+        self._bridge.ai_done.connect(self._on_ai_done)
+        self._bridge.ai_error.connect(self._on_ai_error)
 
         self._saved_panel_geometry = None
         self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
@@ -655,6 +659,7 @@ class PasteFlowApp:
         self.panel.preview_image_requested.connect(self._on_preview_image)
         self.panel.preview_text_requested.connect(self._on_preview_text)
         self.panel.ocr_item_requested.connect(self._on_ocr_image_by_id)
+        self.panel.ai_query_requested.connect(self._on_ai_query_requested)
         self.panel.copy_image_as_path_requested.connect(self._on_copy_image_as_path)
         self.panel.open_settings_requested.connect(self._open_settings)
         self.panel.quit_requested.connect(self._quit)
@@ -738,6 +743,54 @@ class PasteFlowApp:
         buf.close()
         self._start_ocr_worker(png_bytes)
 
+    def _resolve_gemini_cfg(self) -> tuple[str, str, str]:
+        """게이트웨이/공식 백엔드 설정을 해석해 (api_key, base_url, model) 반환.
+
+        OCR 워커와 AI 질의 워커가 공유. backend 명시값 우선, 미설정 시 base_url 유무로
+        추론(레거시 호환). 공식 API는 base_url을 무시하므로 ""로 강제한다.
+        DB 접근은 _lock으로 직렬화되어 워커 스레드에서 호출해도 안전.
+        """
+        backend = self.db.get_setting("ocr_gemini_backend", "")
+        base_url_saved = self.db.get_setting("ocr_gemini_base_url", "")
+        if backend not in ("official", "gateway"):
+            backend = "gateway" if (base_url_saved or "").strip() else "official"
+        if backend == "gateway":
+            return (
+                self._get_secret("ocr_gemini_api_key_gateway"),
+                base_url_saved,
+                self.db.get_setting("ocr_gemini_model_gateway", ""),
+            )
+        return (
+            self._get_secret("ocr_gemini_api_key_official"),
+            "",
+            self.db.get_setting("ocr_gemini_model_official", ""),
+        )
+
+    def _start_ai_worker(self, question: str, context_text: str):
+        """AI 질의 워커 — 질문+컨텍스트를 받아 백그라운드에서 Gemini에 질의.
+
+        OCR과 동일한 게이트웨이/공식 배관(`OcrEngine.ask`)을 재사용한다. OCR 엔진 설정과
+        무관하게 항상 gemini 경로를 사용(이미지→텍스트 OCR이 winrt여도 AI 질의는 게이트웨이).
+        결과/에러는 `_bridge.ai_done` / `_bridge.ai_error` 시그널로 메인 스레드에 통지.
+        """
+        from pasteflow.ui.toast import ToastNotification
+
+        ToastNotification("AI 생각 중…", icon="🤖")
+
+        def _run():
+            try:
+                from pasteflow.ocr_engine import OcrEngine
+                api_key, base_url, model = self._resolve_gemini_cfg()
+                engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url, model=model)
+                answer = engine.ask(question, context_text)
+                if engine.last_fallback_from and engine.last_used_model:
+                    self._bridge.ocr_fallback.emit(engine.last_fallback_from, engine.last_used_model)
+                self._bridge.ai_done.emit(question, answer)
+            except Exception as e:
+                self._bridge.ai_error.emit(str(e))
+
+        threading.Thread(target=_run, daemon=True, name="ai-worker").start()
+
     def _start_ocr_worker(self, png_bytes: bytes):
         """공용 OCR 워커 — PNG bytes를 받아 백그라운드에서 OCR 수행.
 
@@ -760,19 +813,7 @@ class PasteFlowApp:
                 lang = self.db.get_setting("ocr_language", "ko")
                 engine_kind = self.db.get_setting("ocr_engine", "winrt")
                 if engine_kind == "gemini":
-                    # backend 명시값 우선, 미설정 시 base_url 유무로 추론(레거시 호환)
-                    backend = self.db.get_setting("ocr_gemini_backend", "")
-                    base_url_saved = self.db.get_setting("ocr_gemini_base_url", "")
-                    if backend not in ("official", "gateway"):
-                        backend = "gateway" if (base_url_saved or "").strip() else "official"
-                    if backend == "gateway":
-                        api_key = self._get_secret("ocr_gemini_api_key_gateway")
-                        base_url = base_url_saved
-                        model = self.db.get_setting("ocr_gemini_model_gateway", "")
-                    else:
-                        api_key = self._get_secret("ocr_gemini_api_key_official")
-                        base_url = ""  # 공식 API는 base_url 무시
-                        model = self.db.get_setting("ocr_gemini_model_official", "")
+                    api_key, base_url, model = self._resolve_gemini_cfg()
                 else:
                     api_key = ""
                     base_url = ""
@@ -1152,6 +1193,52 @@ class PasteFlowApp:
             new_text = dialog.get_text()
             if new_text != (item.text_content or ""):
                 self._on_edit_item(item_id, new_text)
+
+    def _on_ai_query_requested(self, item_id: int):
+        """패널 우클릭 "AI에게 질문" → 항목을 컨텍스트로 질문 입력 다이얼로그 표시 → AI 워커."""
+        from PyQt6.QtWidgets import QDialog
+        from pasteflow.ui.ai_query import AiQueryDialog
+
+        item = self.db.get_item(item_id)
+        if not item:
+            return
+        context_text = item.text_content or item.preview_text or ""
+        dialog = AiQueryDialog(context_text, self.panel)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        question = dialog.get_question()
+        if not question:
+            return
+        self._start_ai_worker(question, context_text)
+
+    def _on_ai_done(self, question: str, answer: str):
+        """AI 답변 → 임시 텍스트 미리보기 창으로 표시(읽기+복사 전용, 수정 메뉴 없음)."""
+        from pasteflow.ui.toast import ToastNotification
+
+        if not answer.strip():
+            ToastNotification("답변을 받지 못했습니다", icon="🤖")
+            return
+
+        body = f"Q. {question}\n\n{answer}"
+        item = ClipboardItem(
+            content_type="text",
+            text_content=body,
+            preview_text=answer[:200],
+        )
+        # DB에 없는 임시 항목(id 없음) → editable=False로 수정 메뉴 숨김.
+        # TextPreviewPopup._instances가 창을 닫을 때까지 참조를 유지하므로 별도 보관 불필요.
+        popup = TextPreviewPopup.open_new(item, self.panel.geometry(), editable=False)
+        popup.copy_requested.connect(self._on_copy_item)
+
+    def _on_ai_error(self, msg: str):
+        from pasteflow.ui.toast import ToastNotification
+
+        # API 키 미설정 → 토스트 후 설정 다이얼로그 자동 열기 (OCR 에러 처리와 동일 패턴)
+        if "API 키" in msg:
+            ToastNotification("API 키를 설정해 주세요", icon="🤖")
+            QTimer.singleShot(300, self._open_settings)
+            return
+        ToastNotification(f"AI 질의 실패 — {msg}", icon="🤖")
 
     def _on_clear_history(self):
         self.db.clear_history()

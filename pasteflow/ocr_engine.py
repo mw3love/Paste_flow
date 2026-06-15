@@ -167,6 +167,22 @@ def _ocr_prompt(language: str) -> str:
     )
 
 
+def _ask_prompt(question: str, context_text: str = "") -> str:
+    """클립보드 항목을 컨텍스트로 끼운 AI 질의 프롬프트.
+
+    컨텍스트가 비어 있으면 질문만 그대로 보낸다(자유 질문).
+    """
+    if context_text.strip():
+        return (
+            "다음은 사용자가 복사해 둔 클립보드 내용입니다.\n"
+            "----\n"
+            f"{context_text}\n"
+            "----\n\n"
+            f"위 내용을 참고하여 질문에 답하세요. 질문: {question}"
+        )
+    return question
+
+
 # ── 엔진 ────────────────────────────────────────────────────────────────────
 
 
@@ -434,6 +450,67 @@ class OcrEngine:
             }],
         )
         return (resp.choices[0].message.content or "").strip()
+
+    # ── 텍스트 AI 질의 (OCR과 동일 배관 재사용) ──
+
+    def ask(self, question: str, context_text: str = "") -> str:
+        """텍스트 전용 AI 질의 — 클립보드 항목을 컨텍스트로 질문에 답한다.
+
+        OCR과 동일한 Gemini 배관(게이트웨이/공식 분기·자동 폴백·_normalize_base_url)을
+        재사용하되, 이미지 대신 텍스트 컨텍스트+질문을 보낸다. 게이트웨이는 OpenAI 호환
+        chat.completions, 공식 API는 google.generativeai로 갈린다(_recognize_gemini와 동일 구조).
+        동기 호출이므로 호출자가 워커 스레드에서 실행해야 UI 블로킹이 없다.
+        """
+        import os
+        api_key = self.api_key or os.environ.get("GOOGLE_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("API 키가 설정되지 않았습니다. 설정에서 Gemini API 키를 입력하세요.")
+
+        self.last_fallback_from = None
+        prompt = _ask_prompt(question, context_text)
+
+        if self.base_url:
+            model_name = self.model or "gemini-3.1-flash-lite"
+            return self._call_with_fallback(
+                model_name,
+                backend="gateway",
+                call=lambda m: self._ask_openai_compat(prompt, api_key, self.base_url, m),
+            )
+
+        try:
+            import google.generativeai as genai
+        except ImportError:
+            raise RuntimeError("google-generativeai 패키지 미설치: pip install google-generativeai")
+
+        genai.configure(api_key=api_key)
+        model_name = self.model or "gemini-2.5-flash"
+        return self._call_with_fallback(
+            model_name,
+            backend="official",
+            call=lambda m: self._ask_google_genai(genai, prompt, m),
+        )
+
+    def _ask_openai_compat(self, prompt: str, api_key: str, base_url: str, model: str) -> str:
+        """OpenAI 호환 게이트웨이 텍스트 질의 단일 호출 (폴백 없음)."""
+        try:
+            import openai
+        except ImportError:
+            raise RuntimeError("openai 패키지 미설치: pip install openai")
+        client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
+        # max_tokens=16384: OCR과 동일 — 게이트웨이가 thinking 토큰을 같은 예산에서 차감하므로
+        # 작게 잡으면 thinking 모델에서 본문이 잘린다.
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=16384,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return (resp.choices[0].message.content or "").strip()
+
+    def _ask_google_genai(self, genai_module, prompt: str, model_name: str) -> str:
+        """공식 Google API 텍스트 질의 단일 호출 (폴백 없음)."""
+        model = genai_module.GenerativeModel(model_name)
+        response = model.generate_content(prompt)
+        return (response.text or "").strip()
 
 
 # ── 단독 실행 검증 ────────────────────────────────────────────────────────
