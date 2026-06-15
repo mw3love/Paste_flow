@@ -882,7 +882,10 @@ class PasteFlowApp:
 
         # 50ms 후 Ctrl+V 주입 — _send_clean_key가 사용자 Ctrl/Shift 해제 → Ctrl+V → 복원
         QTimer.singleShot(50, lambda: self.interceptor._send_clean_key(VK_V))
-        ToastNotification(f"경로 붙여넣음: {os.path.basename(saved_path)}", icon="🔤")
+        # 썸네일을 함께 띄워 "의도한 이미지가 맞는지" 그 자리에서 시각 확인
+        ToastNotification(
+            f"경로 붙여넣음: {os.path.basename(saved_path)}",
+            icon="", image_path=saved_path)
 
     def _on_ocr_done(self, text: str):
         """메인 스레드: OCR 결과 → 클립보드 + DB + 큐 + 토스트"""

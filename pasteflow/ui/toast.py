@@ -6,13 +6,15 @@ _ToastStack 싱글턴이 활성 토스트를 우하단 코너 기준으로 위�
 """
 from PyQt6.QtWidgets import QWidget, QLabel, QHBoxLayout
 from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint
-from PyQt6.QtGui import QGuiApplication, QPainter, QColor, QPen
+from PyQt6.QtGui import QGuiApplication, QPainter, QColor, QPen, QPixmap
 
 from pasteflow.ui.theme import COLORS
 
 # 토스트 간 세로 간격 / 화면 가장자리 여백 (px)
 _TOAST_GAP = 10
 _SCREEN_MARGIN = 20
+# 토스트 썸네일 한 변 최대 크기 (px) — 이미지→경로 붙여넣기 시각 확인용
+_THUMB_MAX = 96
 # 동시에 보일 수 있는 최대 토스트 수 — 초과 시 가장 오래된 것 즉시 제거
 _MAX_STACK = 5
 
@@ -73,9 +75,13 @@ class ToastNotification(QWidget):
 
     def __init__(self, message: str, duration_ms: int = 3000,
                  icon: str = "✓", badge: str = None,
-                 badge_position: str = "trailing"):
+                 badge_position: str = "trailing",
+                 image_path: str = None):
         """
         badge_position: "leading"(아이콘과 본문 사이) | "trailing"(본문 뒤, 기본)
+        image_path: 주어지면 아이콘과 본문 사이에 그 이미지의 썸네일을 표시
+                    (이미지→경로 붙여넣기 시 "의도한 이미지 맞나" 시각 확인용).
+                    로드 실패 시 조용히 생략.
         """
         super().__init__(None, Qt.WindowType.FramelessWindowHint |
                          Qt.WindowType.WindowStaysOnTopHint |
@@ -91,10 +97,24 @@ class ToastNotification(QWidget):
         layout.setContentsMargins(24, 18, 24, 18)
         layout.setSpacing(12)
 
-        icon_lbl = QLabel(icon)
-        icon_lbl.setStyleSheet(
-            f"color: {COLORS['peach']}; font-size: 22px; background: transparent;")
-        layout.addWidget(icon_lbl)
+        # icon 빈 문자열이면 아이콘 라벨 생략 (썸네일이 카테고리를 대신할 때)
+        if icon:
+            icon_lbl = QLabel(icon)
+            icon_lbl.setStyleSheet(
+                f"color: {COLORS['peach']}; font-size: 22px; background: transparent;")
+            layout.addWidget(icon_lbl)
+
+        # 썸네일 (선택) — 아이콘과 본문 사이. 디스크의 PNG를 직접 로드한다.
+        if image_path:
+            pix = QPixmap(image_path)
+            if not pix.isNull():
+                thumb = QLabel()
+                thumb.setPixmap(pix.scaled(
+                    _THUMB_MAX, _THUMB_MAX,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation))
+                thumb.setStyleSheet("background: transparent;")
+                layout.addWidget(thumb)
 
         # 큐 개수 등 강조 배지 (선택) — 본문 앞/뒤 배치 선택 가능
         badge_lbl = None
