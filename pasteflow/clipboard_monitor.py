@@ -284,8 +284,10 @@ class ClipboardMonitor:
         if item.text_content:
             h.update(item.text_content.encode("utf-8"))
         if item.image_data:
-            h.update(item.image_data[:4096])
-            h.update(len(item.image_data).to_bytes(8, "little"))
+            # 전체 바이트를 해시한다. 앞부분만(예: [:4096]) 보면 DIB(비압축)는
+            # 픽셀이 아래→위로 저장돼 첫 바이트가 이미지 맨 아래 줄이고, 같은 크기
+            # 캡처에 주석만 덮은 이미지는 바이트 길이까지 동일해 오탐(중복)이 난다.
+            h.update(item.image_data)
         if item.html_content:
             h.update(item.html_content.encode("utf-8"))
         return h.hexdigest()
