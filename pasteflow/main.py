@@ -1156,17 +1156,56 @@ class PasteFlowApp:
         self._refresh_panel()
 
     def _on_preview_image(self, item_id: int):
-        existing = self._image_preview_windows.pop(item_id, None)
+        existing = self._image_preview_windows.get(item_id)
         if existing is not None:
-            existing.close()
+            # 이미 열려 있으면 닫지 않고 편집 모드 토글(Space 두 번째 = 편집 진입). 닫기는 ESC.
+            existing.activateWindow()
+            existing.raise_()
+            existing.toggle_edit_mode()
             return
         item = self.db.get_item(item_id)
         if item and item.image_data:
             popup = ImagePreviewPopup.open_new(item, self.panel.geometry())
             popup.copy_requested.connect(self._on_copy_item)
             popup.ocr_requested.connect(self._on_ocr_image_item)
+            # 인라인 주석 편집(Space) 완료 액션 — 같은 창에서 emit
+            popup.annotated_copy_requested.connect(self._on_annotation_copy)
+            popup.export_file_requested.connect(self._on_annotation_export)
             self._image_preview_windows[item_id] = popup
             popup.destroyed.connect(lambda _=None, iid=item_id: self._image_preview_windows.pop(iid, None))
+
+    def _on_annotation_copy(self, png: bytes):
+        """주석본을 클립보드에 복사 + 히스토리에 새 항목으로 저장(썸네일 포함).
+
+        _set_clipboard는 monitor.set_self_triggered를 켜 클립보드 모니터의 재감지를
+        막으므로, 히스토리 추가는 _persist_clipboard_item(직접 DB+큐)이 담당한다.
+        """
+        from pasteflow.ui.toast import ToastNotification
+        thumb = None
+        if self.interceptor.monitor is not None:
+            thumb = self.interceptor.monitor._create_thumbnail(png)
+        item = ClipboardItem(content_type="image", image_data=png, thumbnail=thumb)
+        self.interceptor._set_clipboard(item)   # 클립보드
+        self._persist_clipboard_item(item)       # 히스토리 + 큐
+        ToastNotification("복사 + 히스토리 저장됨", icon="🖼")
+
+    def _on_annotation_export(self, png: bytes):
+        """주석본을 PNG 파일로 저장(경로는 사용자 선택)."""
+        from PyQt6.QtWidgets import QFileDialog
+        from pasteflow.ui.toast import ToastNotification
+        path, _ = QFileDialog.getSaveFileName(
+            self.panel, "주석 이미지 저장", "annotation.png", "PNG 이미지 (*.png)")
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+        try:
+            with open(path, "wb") as f:
+                f.write(png)
+        except Exception as e:
+            ToastNotification(f"저장 실패 — {e}", icon="🖼")
+            return
+        ToastNotification(f"저장됨: {os.path.basename(path)}", icon="", image_path=path)
 
     def _on_preview_text(self, item_id: int):
         existing = self._text_preview_windows.pop(item_id, None)

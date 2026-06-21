@@ -1,18 +1,26 @@
-"""이미지 확대 미리보기 팝업 — 드래그 이동·휠 줌·다중 창 지원"""
-import io
+"""이미지 미리보기 + 인라인 주석 편집 (통합 단일 창, Snipaste식).
 
+평소엔 가벼운 뷰어(창이 이미지에 딱 맞게 리사이즈 = hug-zoom, 레터박스 없음). Space를 누르면
+같은 창에서 편집 툴바가 펴진다(편집 모드). 편집 컴포넌트는 image_annotator.py에서 가져와 host.
+
+- 뷰어 모드: 좌클릭 드래그 = 창 이동, 휠 = 줌(창 리사이즈), 더블클릭/ESC = 닫기,
+  우클릭 = 복사/OCR/주석 편집/닫기.
+- 편집 모드: 툴바·액션바 표시, 그리기/선택/크기조절, 창 이동은 상단 핸들로만. ESC = 편집 종료.
+"""
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QVBoxLayout, QApplication, QMenu,
+    QWidget, QVBoxLayout, QHBoxLayout, QGraphicsScene, QGraphicsView, QFrame,
+    QMenu, QLabel, QApplication, QToolButton,
 )
-from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QEvent, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, QSize, QEvent, pyqtSignal
 
 from pasteflow.ui.theme import (
-    BASE as _BG, SURFACE0 as _SURFACE0, SURFACE1 as _BORDER,
-    SURFACE2 as _SURFACE2, TEXT as _TEXT, BLUE as _BLUE,
-    PEACH as _PEACH,
+    BASE as _BG, SURFACE0 as _SURFACE0, SURFACE1 as _BORDER, SURFACE2 as _SURFACE2,
+    TEXT as _TEXT, BLUE as _BLUE, PEACH as _PEACH,
 )
 from pasteflow.models import ClipboardItem
+from pasteflow.ui.image_annotator import (
+    _EditorMixin, _AnnotatorView, _DragBar, _pixmap_from_data, _tool_icon,
+)
 
 PREVIEW_MAX_W = 640
 PREVIEW_MAX_H = 480
@@ -67,25 +75,21 @@ def _dark_menu_style() -> str:
     """
 
 
-class ImagePreviewPopup(QWidget):
-    """이미지 확대 미리보기 — 다중 창 동시 표시 지원"""
+class ImagePreviewPopup(_EditorMixin, QWidget):
+    """이미지 미리보기 + 인라인 주석 편집 통합 창 — 다중 창 동시 표시 지원."""
 
     _instances: list["ImagePreviewPopup"] = []
 
-    # 우클릭 메뉴 → main 핸들러로 전달
-    copy_requested = pyqtSignal(object)  # ClipboardItem
-    ocr_requested = pyqtSignal(object)   # ClipboardItem
+    # 뷰어 모드 우클릭 메뉴 → main 핸들러 (ClipboardItem)
+    copy_requested = pyqtSignal(object)        # ClipboardItem
+    ocr_requested = pyqtSignal(object)         # ClipboardItem
+    # 편집 완료 → main 핸들러 (PNG bytes)
+    annotated_copy_requested = pyqtSignal(bytes)   # 클립보드 복사 + 히스토리 저장
+    export_file_requested = pyqtSignal(bytes)      # 파일 저장
 
     # ------------------------------------------------------------------
-    # 클래스 메서드
-    # ------------------------------------------------------------------
-
     @classmethod
     def open_new(cls, item: ClipboardItem, panel_geom: QRect) -> "ImagePreviewPopup":
-        """새 미리보기 창을 열고 인스턴스 목록에 등록한다.
-
-        panel_geom: 패널의 글로벌 geometry — 미리보기를 패널 옆에 배치하기 위한 기준.
-        """
         cascade_offset = len(cls._instances) * _CASCADE_STEP
         popup = cls(item)
         cls._instances.append(popup)
@@ -94,14 +98,10 @@ class ImagePreviewPopup(QWidget):
 
     @classmethod
     def close_all(cls):
-        """열려 있는 모든 미리보기 창을 닫는다."""
         for popup in list(cls._instances):
             popup.close()
 
     # ------------------------------------------------------------------
-    # 인스턴스 초기화
-    # ------------------------------------------------------------------
-
     def __init__(self, item: ClipboardItem):
         super().__init__(None)
         self._item = item
@@ -111,185 +111,193 @@ class ImagePreviewPopup(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        # close() 시 즉시 destroy → destroyed 시그널 즉시 발동 → main dict 정리 즉시
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        self._drag_pos: QPoint | None = None
-        self._original_pixmap: QPixmap | None = None
-        self._scale_factor: float = 1.0
+        self._edit_mode = False
+        self._zoom = 1.0
+        self._win_drag: QPoint | None = None
 
-        self.setObjectName("popup_root")
+        self._init_editor_state()
+
+        # 씬 + 배경 이미지
+        self._scene = QGraphicsScene(self)
+        self._bg_item = None
+        pm = _pixmap_from_data(item.image_data) if item.image_data else None
+        self._pixmap_ok = pm is not None and not pm.isNull()
+        if self._pixmap_ok:
+            self._scene.setSceneRect(QRectF(pm.rect()))
+            self._bg_item = self._scene.addPixmap(pm)
+            self._bg_item.setZValue(0)
+
+        self._view = _AnnotatorView(self._scene, self)
+        self._view.setFrameShape(QFrame.Shape.NoFrame)
+        self._view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+
+        self._build_layout()
+        self.set_tool("select")
+        self._view.setDragMode(QGraphicsView.DragMode.NoDrag)  # 뷰어 시작
+        self._set_color(self.current_color)
         self._apply_active_style(False)
+        self.hide()
 
+    # ------------------------------------------------------------------
+    # 레이아웃 — 드래그핸들 / 툴바 / 뷰 / 액션바 (편집 모드만 chrome 표시)
+    # ------------------------------------------------------------------
+    def _build_layout(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        img_wrapper = QWidget()
-        img_wrapper.setObjectName("img_wrapper")
-        img_layout = QVBoxLayout(img_wrapper)
-        img_layout.setContentsMargins(6, 6, 6, 6)
-        img_layout.setSpacing(0)
+        # 상단 드래그 핸들 (편집 모드 창 이동) — 배경색은 활성/비활성(파랑/코랄)과 통일.
+        # 제목은 굵게, 단축키 힌트는 작은 secondary 색, 우측에 닫기 버튼.
+        self._dragbar = _DragBar(self)
+        self._dragbar.setObjectName("dragbar")
+        bar_l = QHBoxLayout(self._dragbar)
+        bar_l.setContentsMargins(10, 0, 6, 0)
+        bar_l.setSpacing(8)
+        title = QLabel("주석 편집")
+        title.setObjectName("title")
+        bar_l.addWidget(title)
+        hint = QLabel("드래그 이동 · Space 토글 · ESC 종료")
+        hint.setObjectName("hint")
+        bar_l.addWidget(hint)
+        bar_l.addStretch(1)
+        close_btn = QToolButton()
+        close_btn.setObjectName("titleclose")
+        close_btn.setIcon(_tool_icon("close", neutral_override=_BG))  # 밝은 바 위 어두운 X
+        close_btn.setIconSize(QSize(18, 18))
+        close_btn.setToolTip("닫기 (ESC)")
+        close_btn.clicked.connect(self.close)
+        bar_l.addWidget(close_btn)
+        root.addWidget(self._dragbar)
 
-        self._image_label = QLabel()
-        self._image_label.setObjectName("image_label")
-        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        img_layout.addWidget(self._image_label)
+        # 툴바
+        self._toolbar_host = QWidget()
+        self._toolbar_host.setLayout(self._build_toolbar())
+        root.addWidget(self._toolbar_host)
 
-        root.addWidget(img_wrapper)
+        # 이미지 뷰 — 좌상단 정렬: 창 좌상단이 고정이므로 줌 시 이미지 좌상단이 화면에 고정되고
+        # 우하단으로 확대된다(중심 기준 확대 방지). 툴바가 더 넓어도 이미지는 좌측에 붙는다.
+        root.addWidget(self._view, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
-        self.hide()
+        # 완료 버튼(복사/저장/닫기)은 툴바 오른쪽에 합쳐졌으므로 별도 액션바 없음
+        for w in (self._dragbar, self._toolbar_host):
+            w.setVisible(False)  # 뷰어 모드 시작
 
     # ------------------------------------------------------------------
-    # 미리보기 표시
+    # 표시 + hug-zoom
     # ------------------------------------------------------------------
-
     def show_preview(self, panel_geom: QRect, cascade_offset: int = 0):
-        """보유한 item의 이미지 데이터(DIB 또는 PNG)로 미리보기 표시 — 패널 옆에 배치"""
-        if not self._item.image_data:
+        if not self._pixmap_ok:
             return
-        png_data = self._to_png(self._item.image_data)
-        if not png_data:
-            return
-
-        pixmap = QPixmap()
-        if not pixmap.loadFromData(png_data):
-            return
-
-        self._original_pixmap = pixmap
-        self._scale_factor = 1.0
-        self._apply_scale()
+        sr = self._scene.sceneRect()
+        z0 = 1.0
+        if sr.width() > 0 and sr.height() > 0:
+            z0 = min(1.0, PREVIEW_MAX_W / sr.width(), PREVIEW_MAX_H / sr.height())
+        self._apply_zoom(z0)
 
         screen = QApplication.screenAt(panel_geom.center()) or QApplication.primaryScreen()
         if screen:
             self.move(compute_preview_pos(panel_geom, self.size(), screen, cascade_offset))
-
         self.show()
         self.raise_()
+        # 활성화 — 이후 Space(편집 토글)·ESC(닫기)를 미리보기가 직접 받도록
+        self.activateWindow()
+
+    def _apply_zoom(self, z: float):
+        """zoom factor z로 뷰 변환·크기를 맞추고 창을 이미지에 hug되게 리사이즈."""
+        self._zoom = max(0.1, min(z, 8.0))
+        self._view.resetTransform()
+        self._view.scale(self._zoom, self._zoom)
+        sr = self._scene.sceneRect()
+        vw = max(1, round(sr.width() * self._zoom))
+        vh = max(1, round(sr.height() * self._zoom))
+        self._view.setFixedSize(vw, vh)
+        self.adjustSize()  # 보이는 chrome(편집 시 툴바/액션바)만큼만 창 크기 조정
+
+    def _on_wheel_zoom(self, delta: int):
+        factor = 1.15 if delta > 0 else 1 / 1.15
+        self._apply_zoom(self._zoom * factor)
 
     # ------------------------------------------------------------------
-    # 휠 줌
+    # 모드 (뷰어 / 편집)
     # ------------------------------------------------------------------
+    def is_edit_mode(self) -> bool:
+        return self._edit_mode
 
-    def wheelEvent(self, event):
-        if self._original_pixmap is None:
-            return
-        delta = event.angleDelta().y()
-        if delta == 0:
-            return
-        factor = 1.1 if delta > 0 else (1 / 1.1)
-        self._scale_factor *= factor
-        self._apply_scale()
-
-    def _apply_scale(self):
-        """현재 _scale_factor를 _original_pixmap에 적용하고 창 크기를 갱신."""
-        if self._original_pixmap is None:
-            return
-
-        base = self._original_pixmap.scaled(
-            PREVIEW_MAX_W, PREVIEW_MAX_H,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        target_w = max(1, round(base.width() * self._scale_factor))
-        target_h = max(1, round(base.height() * self._scale_factor))
-
-        scaled = self._original_pixmap.scaled(
-            target_w, target_h,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._image_label.setPixmap(scaled)
-        self._image_label.setFixedSize(scaled.size())
-        self.setMinimumSize(0, 0)
-        self.resize(scaled.width() + 12, scaled.height() + 12)
-
-    # ------------------------------------------------------------------
-    # 드래그 이동 (본문 영역 클릭 드래그)
-    # ------------------------------------------------------------------
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.activateWindow()  # 클릭 시 활성화 → 테두리 표시 트리거
-            self._drag_pos = (
-                event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            )
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._drag_pos and event.buttons() & Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self._drag_pos)
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        self._drag_pos = None
-        super().mouseReleaseEvent(event)
-
-    def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.close()
+    def toggle_edit_mode(self):
+        self._edit_mode = not self._edit_mode
+        for w in (self._dragbar, self._toolbar_host):
+            w.setVisible(self._edit_mode)
+        if self._edit_mode:
+            self.set_tool("select")  # RubberBandDrag
+            self.activateWindow()
         else:
-            super().mouseDoubleClickEvent(event)
+            self._scene.clearSelection()
+            self._view.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self._update_arrow_dir_btn()      # 뷰어 전환 시 floating 방향 토글 숨김
+        self._update_text_opts_bar()      # 뷰어 전환 시 텍스트 옵션 바 숨김
+        self._update_badge_size_stepper()  # 뷰어 전환 시 번호 크기 스테퍼 숨김
+        self._apply_zoom(self._zoom)  # chrome 변화 반영해 창 재리사이즈
+        self._view.setFocus()
+
+    def _on_escape(self):
+        if self._eyedrop_active:
+            self._stop_eyedropper(False)
+            return
+        if self._edit_mode:
+            self.toggle_edit_mode()
+            return
+        self.close()
 
     # ------------------------------------------------------------------
-    # 우클릭 메뉴 — 복사 / 텍스트 추출(OCR) / 닫기
+    # 창 이동 (뷰어 모드 본문 드래그 — _AnnotatorView가 호출)
     # ------------------------------------------------------------------
+    def _win_drag_start(self, global_pt: QPoint):
+        self.activateWindow()
+        self._win_drag = global_pt - self.frameGeometry().topLeft()
 
+    def _win_drag_move(self, global_pt: QPoint):
+        if self._win_drag is not None:
+            self.move(global_pt - self._win_drag)
+
+    def _win_drag_end(self):
+        self._win_drag = None
+
+    # ------------------------------------------------------------------
+    # 우클릭 메뉴 (뷰어 모드) — 복사 / OCR / 주석 편집 / 닫기
+    # ------------------------------------------------------------------
     def contextMenuEvent(self, event):
+        if self._edit_mode:
+            return  # 편집 모드에선 그리기 우선 (메뉴 없음)
         menu = QMenu(self)
         menu.setStyleSheet(_dark_menu_style())
-
-        copy_action = menu.addAction("복사")
-        copy_action.triggered.connect(lambda: self.copy_requested.emit(self._item))
-
-        ocr_action = menu.addAction("텍스트 추출(OCR)")
-        ocr_action.triggered.connect(lambda: self.ocr_requested.emit(self._item))
-
+        menu.addAction("복사").triggered.connect(lambda: self.copy_requested.emit(self._item))
+        menu.addAction("텍스트 추출(OCR)").triggered.connect(lambda: self.ocr_requested.emit(self._item))
+        menu.addAction("주석 편집").triggered.connect(self.toggle_edit_mode)
         menu.addSeparator()
-
-        close_action = menu.addAction("닫기")
-        close_action.triggered.connect(self.close)
-
+        menu.addAction("닫기").triggered.connect(self.close)
         menu.exec(event.globalPos())
 
     # ------------------------------------------------------------------
-    # 키보드 (ESC)
+    # 키 — Space/ESC는 뷰가 위임. 여기선 팝업이 포커스일 때의 백업 처리.
     # ------------------------------------------------------------------
-
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Space:
+            self.toggle_edit_mode()
+            return
         if event.key() == Qt.Key.Key_Escape:
-            self.close()
-        else:
-            super().keyPressEvent(event)
+            self._on_escape()
+            return
+        super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
-    # 활성화 외곽선 — 클릭으로 활성될 때 외곽 테두리 강조
+    # 활성/비활성 테두리 (이미지 뷰 테두리 색)
     # ------------------------------------------------------------------
-
     def _apply_active_style(self, active: bool):
-        """활성 상태에 따라 이미지 테두리를 직접 갱신.
-
-        QSS 동적 프로퍼티([active="true"]) + unpolish/polish 방식은
-        런타임에 재반영되지 않아, 스타일시트를 직접 교체한다.
-        비활성 시에는 주황 테두리로 창 존재를 상시 알리고,
-        클릭으로 활성될 때 파란 테두리로 강조한다.
-        """
-        border = _BLUE if active else _PEACH
-        self.setStyleSheet(f"""
-            QWidget#popup_root {{
-                background-color: {_BG};
-                border-radius: 6px;
-            }}
-            QWidget#img_wrapper {{
-                background: transparent;
-                border: none;
-            }}
-            QLabel#image_label {{
-                background: transparent;
-                border: 2px solid {border};
-            }}
-        """)
+        self.setStyleSheet(self._editor_stylesheet(_BLUE if active else _PEACH))
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange:
@@ -297,25 +305,10 @@ class ImagePreviewPopup(QWidget):
         super().changeEvent(event)
 
     # ------------------------------------------------------------------
-    # 생명주기 — _instances 목록 정리
+    # 생명주기
     # ------------------------------------------------------------------
-
     def closeEvent(self, event):
+        if self._eyedrop_active:
+            self._stop_eyedropper(False)
         type(self)._instances = [p for p in type(self)._instances if p is not self]
         super().closeEvent(event)
-
-    # ------------------------------------------------------------------
-    # 유틸
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _to_png(data: bytes) -> bytes | None:
-        """DIB 또는 기타 이미지 데이터를 PNG로 변환"""
-        try:
-            from PIL import Image
-            img = Image.open(io.BytesIO(data))
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            return buf.getvalue()
-        except Exception:
-            return None
