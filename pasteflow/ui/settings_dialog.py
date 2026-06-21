@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QStyle,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QFontMetrics
 
 from pasteflow.ui.theme import COLORS, TEAL_HOVER
 
@@ -568,6 +568,9 @@ class SettingsDialog(QDialog):
         self._model_combo.clear()
         for name in verified:
             self._model_combo.addItem(name)
+            # 모든 항목에 전체 이름 툴팁 — 팝업이 화면 폭을 넘어 잘릴 때의 안전망
+            idx = self._model_combo.count() - 1
+            self._model_combo.setItemData(idx, name, Qt.ItemDataRole.ToolTipRole)
         if verified and unverified:
             self._model_combo.insertSeparator(self._model_combo.count())
         gray = QColor(COLORS['subtext0'])
@@ -580,7 +583,26 @@ class SettingsDialog(QDialog):
                 "PasteFlow가 검증하지 않은 모델 — 게이트웨이가 광고하지만 호출 실패 가능",
                 Qt.ItemDataRole.ToolTipRole,
             )
+        self._adjust_model_popup_width()
         self._update_model_hint()
+
+    def _adjust_model_popup_width(self):
+        """드롭다운 팝업만 최장 모델명에 맞춰 넓힌다 — 콤보 본체/설정창 폭은 불변.
+
+        QComboBox 팝업은 기본적으로 콤보 위젯 폭에 묶여 긴 이름의 가운데가
+        생략된다(`gemini-3.1-p...-customtools`). 모델명이 공통 접두사를
+        공유하므로 가운데 생략은 구분을 망가뜨린다. 팝업 view의 최소 폭을
+        실제 텍스트 폭에 맞춰 늘려 잘림 자체를 없앤다.
+        """
+        fm = QFontMetrics(self._model_combo.view().font())
+        widest = 0
+        for i in range(self._model_combo.count()):
+            text = self._model_combo.itemText(i)
+            if text:
+                widest = max(widest, fm.horizontalAdvance(text))
+        if widest:
+            # 스크롤바·여백 여유분 가산
+            self._model_combo.view().setMinimumWidth(widest + 40)
 
     def _update_model_hint(self):
         """검증 모델 중 가장 저렴한 것(verified[0])을 힌트 라벨에 표시."""
