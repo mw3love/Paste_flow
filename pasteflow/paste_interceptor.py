@@ -209,6 +209,8 @@ class PasteInterceptor:
         on_ocr_trigger: Optional[Callable[[], None]] = None,
         on_plain_paste: Optional[Callable[[], None]] = None,
         on_image_to_path: Optional[Callable[[], None]] = None,
+        on_pin_image: Optional[Callable[[], None]] = None,
+        on_capture: Optional[Callable[[], None]] = None,
     ):
         self.queue = paste_queue
         self.monitor = clipboard_monitor
@@ -218,6 +220,8 @@ class PasteInterceptor:
         self.on_ocr_trigger = on_ocr_trigger
         self.on_plain_paste = on_plain_paste
         self.on_image_to_path = on_image_to_path
+        self.on_pin_image = on_pin_image
+        self.on_capture = on_capture
         self._hook = None
         self._thread: Optional[threading.Thread] = None
         self._hook_thread_id: int = 0
@@ -239,6 +243,16 @@ class PasteInterceptor:
         self._img2path_need_ctrl: bool = False
         self._img2path_need_shift: bool = False
         self._img2path_need_alt: bool = False
+        # 화면에 핀(이미지 띄우기) 단축키 (패널 토글과 동일 구조)
+        self._pin_vk: int = 0
+        self._pin_need_ctrl: bool = False
+        self._pin_need_shift: bool = False
+        self._pin_need_alt: bool = False
+        # 영역 캡처 단축키 (패널 토글과 동일 구조)
+        self._capture_vk: int = 0
+        self._capture_need_ctrl: bool = False
+        self._capture_need_shift: bool = False
+        self._capture_need_alt: bool = False
         # 콜백 참조 유지 (GC 방지)
         self._hook_proc = HOOKPROC(self._low_level_keyboard_proc)
 
@@ -281,6 +295,32 @@ class PasteInterceptor:
             self._img2path_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._img2path_vk = 0
+
+    def set_pin_hotkey(self, hotkey_str: str):
+        """화면에 핀 단축키 설정 — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다."""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._pin_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._pin_need_shift = "shift" in parts
+        self._pin_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._pin_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._pin_vk = 0
+
+    def set_capture_hotkey(self, hotkey_str: str):
+        """영역 캡처 단축키 설정 — 캡처 오버레이를 띄워 드래그 영역을 클립보드·파일로 저장."""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._capture_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._capture_need_shift = "shift" in parts
+        self._capture_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._capture_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._capture_vk = 0
 
     def start(self):
         """저수준 키보드 훅 시작 (별도 스레드)"""
@@ -404,6 +444,34 @@ class PasteInterceptor:
                     if self.on_image_to_path:
                         try:
                             self.on_image_to_path()
+                        except Exception:
+                            pass
+                    return 1  # suppress
+
+                # 화면에 핀(이미지 띄우기) 단축키 감지 (기본 Alt+F3)
+                if (self._pin_vk and vk_code == self._pin_vk
+                        and ctrl_pressed  == self._pin_need_ctrl
+                        and shift_pressed == self._pin_need_shift
+                        and alt_pressed   == self._pin_need_alt):
+                    # 새 핀 창이 포그라운드를 잡을 수 있도록 잠금 해제 (OCR 트리거와 동일)
+                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
+                    if self.on_pin_image:
+                        try:
+                            self.on_pin_image()
+                        except Exception:
+                            pass
+                    return 1  # suppress
+
+                # 영역 캡처 단축키 감지 (기본 Alt+F2)
+                if (self._capture_vk and vk_code == self._capture_vk
+                        and ctrl_pressed  == self._capture_need_ctrl
+                        and shift_pressed == self._capture_need_shift
+                        and alt_pressed   == self._capture_need_alt):
+                    # 캡처 오버레이가 포그라운드를 잡을 수 있도록 잠금 해제 (OCR 트리거와 동일)
+                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
+                    if self.on_capture:
+                        try:
+                            self.on_capture()
                         except Exception:
                             pass
                     return 1  # suppress

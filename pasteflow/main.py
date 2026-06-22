@@ -10,7 +10,7 @@ import threading
 import time
 import json
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QTimer, QObject, pyqtSignal, QBuffer
+from PyQt6.QtCore import QTimer, QObject, pyqtSignal, QBuffer, QRect
 
 from pasteflow.database import Database
 from pasteflow.models import ClipboardItem
@@ -419,6 +419,73 @@ def _read_image_from_clipboard() -> bytes | None:
             pass
 
 
+def _render_text_to_png(text: str) -> bytes:
+    """클립보드 텍스트를 흰 배경 이미지(PNG bytes)로 렌더링한다.
+
+    Snipaste의 'paste text to screen'처럼, 텍스트도 화면 핀·주석이 가능하도록
+    이미지화한다. 줄바꿈은 보존하고, 최대폭을 넘으면 워드랩한다.
+    """
+    from PyQt6.QtGui import QPixmap, QPainter, QFont, QFontMetrics, QColor
+    from PyQt6.QtCore import QRect, Qt, QBuffer, QByteArray
+
+    pad = 16
+    max_w = 700
+    # 한글 글리프 보장 — 기본 QFont는 폴백이 불확실해 두부(□)로 렌더될 수 있음.
+    # 맑은 고딕(Win 한글 시스템 폰트) 우선, 영문은 Segoe UI로 폴백.
+    font = QFont()
+    font.setFamilies(["Malgun Gothic", "Segoe UI"])
+    font.setPixelSize(18)
+    fm = QFontMetrics(font)
+    flags = (int(Qt.TextFlag.TextWordWrap)
+             | int(Qt.AlignmentFlag.AlignLeft)
+             | int(Qt.AlignmentFlag.AlignTop))
+
+    bounds = fm.boundingRect(QRect(0, 0, max_w, 1_000_000), flags, text)
+    w = max(1, bounds.width()) + pad * 2
+    h = max(1, bounds.height()) + pad * 2
+
+    pm = QPixmap(w, h)
+    pm.fill(QColor("#ffffff"))
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    p.setFont(font)
+    p.setPen(QColor("#1e1e2e"))  # 흰 배경 위 어두운 글자
+    p.drawText(QRect(pad, pad, w - pad * 2, h - pad * 2), flags, text)
+    p.end()
+
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QBuffer.OpenModeFlag.WriteOnly)
+    pm.save(buf, "PNG")
+    return bytes(ba.data())
+
+
+def _qpixmap_to_dib(pixmap) -> bytes:
+    """QPixmap을 CF_DIB(BITMAPFILEHEADER 없는 BMP) 바이트로 변환.
+
+    스크린샷은 불투명하므로 RGB32로 평탄화한다(알파 채널이 일부 앱에서 검게 처리되는 것 방지).
+    클립보드 CF_DIB와 동일 포맷이라 _set_clipboard(PNG 시그니처 아니면 CF_DIB 처리)·
+    _save_image_to_folder·_create_thumbnail에 그대로 넘길 수 있다.
+    """
+    from PyQt6.QtGui import QImage
+    from PyQt6.QtCore import QBuffer, QByteArray
+    img = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB32)
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QBuffer.OpenModeFlag.WriteOnly)
+    img.save(buf, "BMP")
+    return bytes(ba.data())[14:]  # 14바이트 BITMAPFILEHEADER 제거 = CF_DIB
+
+
+def _default_capture_folder() -> str:
+    """캡처 기본 저장 폴더 — <사진>\\PasteFlow."""
+    from PyQt6.QtCore import QStandardPaths
+    pics = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
+    if not pics:
+        pics = os.path.join(os.path.expanduser("~"), "Pictures")
+    return os.path.join(pics, "PasteFlow")
+
+
 # ── 로컬 데이터 경로 (DB·로그) ────────────────────────────────────────────────
 
 
@@ -551,6 +618,8 @@ class _SignalBridge(QObject):
     ocr_error          = pyqtSignal(str)     # 워커 스레드 → 메인: 에러 메시지
     ocr_fallback       = pyqtSignal(str, str)  # 워커 스레드 → 메인: (실패 모델, 폴백 모델) 자동 폴백 알림
     image_to_path      = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 경로 텍스트로 교체 후 Ctrl+V
+    pin_image          = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 화면에 핀(떠 있는 창)으로 띄우기
+    capture_requested  = pyqtSignal()        # 훅 스레드 → 메인: 영역 캡처 오버레이 띄우기
     ai_done            = pyqtSignal(str, str)  # AI 워커 스레드 → 메인: (질문, 답변)
     ai_error           = pyqtSignal(str)     # AI 워커 스레드 → 메인: 에러 메시지
 
@@ -584,6 +653,8 @@ class PasteFlowApp:
         self._bridge.ocr_fallback.connect(self._on_ocr_fallback)
         self._bridge.plain_paste.connect(self._on_plain_paste)
         self._bridge.image_to_path.connect(self._on_image_to_path_hotkey)
+        self._bridge.pin_image.connect(self._on_pin_hotkey)
+        self._bridge.capture_requested.connect(self._on_capture_requested)
         self._bridge.ai_done.connect(self._on_ai_done)
         self._bridge.ai_error.connect(self._on_ai_error)
 
@@ -608,6 +679,8 @@ class PasteFlowApp:
             on_ocr_trigger=self._bridge.ocr_requested.emit,
             on_plain_paste=self._bridge.plain_paste.emit,
             on_image_to_path=self._bridge.image_to_path.emit,
+            on_pin_image=self._bridge.pin_image.emit,
+            on_capture=self._bridge.capture_requested.emit,
         )
         self.hotkey_manager = HotkeyManager()
 
@@ -626,6 +699,10 @@ class PasteFlowApp:
         self._ocr_overlay = OcrOverlay()
         self._ocr_overlay.region_captured.connect(self._on_ocr_region_captured)
         # cancelled 시그널은 내부 close()로 충분 — 별도 콜백 불필요
+
+        # 영역 캡처 오버레이 (OCR과 동일 위젯 재사용 — region_captured만 캡처 핸들러로 연결)
+        self._capture_overlay = OcrOverlay()
+        self._capture_overlay.region_captured.connect(self._on_capture_region)
 
         # OCR은 호출마다 새 스레드 — asyncio.run()을 재사용 스레드에서 반복 호출 시
         # WinRT 콜백 상태가 누적돼 두 번째 호출부터 빈 결과를 반환하는 문제 방지
@@ -677,6 +754,12 @@ class PasteFlowApp:
 
         img2path_hotkey = self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p")
         self.interceptor.set_image_to_path_hotkey(img2path_hotkey)
+
+        pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
+        self.interceptor.set_pin_hotkey(pin_hotkey)
+
+        capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
+        self.interceptor.set_capture_hotkey(capture_hotkey)
 
 
     def _persist_clipboard_item(self, item: ClipboardItem) -> ClipboardItem:
@@ -742,6 +825,45 @@ class PasteFlowApp:
         png_bytes = bytes(buf.data())
         buf.close()
         self._start_ocr_worker(png_bytes)
+
+    # ── 영역 캡처 (Alt+F2) ──
+
+    def _on_capture_requested(self):
+        """메인 스레드: 영역 캡처 오버레이 시작 (OcrOverlay 재사용)"""
+        self._capture_overlay.start()
+
+    def _on_capture_region(self, pixmap):
+        """메인 스레드: 선택 영역 픽맵 → 클립보드(DIB) + 히스토리·큐 + 파일 저장 + 토스트.
+
+        클립보드·히스토리 처리는 OCR 결과 경로와 동일(_set_clipboard로 모니터 재감지 방지 후
+        _persist_clipboard_item). 이미지는 붙여넣기 호환성이 가장 넓은 CF_DIB로 넣는다.
+        """
+        from pasteflow.ui.toast import ToastNotification
+
+        dib = _qpixmap_to_dib(pixmap)
+        item = ClipboardItem(
+            content_type="image",
+            image_data=dib,
+            thumbnail=self.monitor._create_thumbnail(dib),
+        )
+        self.interceptor._set_clipboard(item)
+        self._persist_clipboard_item(item)
+
+        # 지정 폴더에 PNG 저장 (없으면 생성, 미설정 시 <사진>\PasteFlow)
+        folder = self.db.get_setting("capture_save_folder", "") or _default_capture_folder()
+        saved_path = None
+        try:
+            os.makedirs(folder, exist_ok=True)
+            saved_path = _save_image_to_folder(dib, folder)
+        except Exception as e:
+            ToastNotification(f"캡처 파일 저장 실패 — {e}", icon="📷")
+
+        if saved_path:
+            ToastNotification(
+                f"캡처됨: {os.path.basename(saved_path)}",
+                icon="", image_path=saved_path)
+        else:
+            ToastNotification("캡처를 클립보드에 복사했습니다", icon="📷")
 
     def _resolve_gemini_cfg(self) -> tuple[str, str, str]:
         """게이트웨이/공식 백엔드 설정을 해석해 (api_key, base_url, model) 반환.
@@ -930,6 +1052,41 @@ class PasteFlowApp:
         ToastNotification(
             f"경로 붙여넣음: {os.path.basename(saved_path)}",
             icon="", image_path=saved_path)
+
+    def _on_pin_hotkey(self):
+        """화면에 핀 단축키(기본 Alt+F3) — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다.
+
+        Snipaste의 'paste to screen'에 해당. 패널과 무관한 독립 창이라
+        커서 근처에 띄우고, Space로 주석 편집·ESC로 닫기는 ImagePreviewPopup이 처리한다.
+        """
+        from PyQt6.QtGui import QCursor
+        from pasteflow.ui.toast import ToastNotification
+
+        image_bytes = _read_image_from_clipboard()
+        if not image_bytes:
+            # 이미지가 없으면 클립보드 텍스트를 흰 배경 이미지로 렌더링해 핀(Snipaste 동작)
+            text = self.app.clipboard().text() or ""
+            if text.strip():
+                try:
+                    image_bytes = _render_text_to_png(text)
+                except Exception as e:
+                    ToastNotification(f"텍스트 렌더링 실패 — {e}", icon="📌")
+                    return
+            else:
+                ToastNotification("클립보드에 이미지·텍스트가 없습니다", icon="📌")
+                return
+
+        item = ClipboardItem(content_type="image", image_data=image_bytes)
+
+        # 커서 위치에 1px 앵커를 만들어 그 우측에 핀 창을 띄운다(compute_preview_pos 재사용).
+        cursor_pos = QCursor.pos()
+        anchor = QRect(cursor_pos.x(), cursor_pos.y(), 1, 1)
+        popup = ImagePreviewPopup.open_new(item, anchor)
+        # 핀 창에서도 복사·OCR·Space 주석 편집 후 복사/저장이 동작하도록 연결
+        popup.copy_requested.connect(self._on_copy_item)
+        popup.ocr_requested.connect(self._on_ocr_image_item)
+        popup.annotated_copy_requested.connect(self._on_annotation_copy)
+        popup.export_file_requested.connect(self._on_annotation_export)
 
     def _on_ocr_done(self, text: str):
         """메인 스레드: OCR 결과 → 클립보드 + DB + 큐 + 토스트"""
@@ -1431,6 +1588,9 @@ class PasteFlowApp:
             "auto_start": self.db.get_setting("auto_start", "0"),
             "hotkey_ocr_trigger": self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s"),
             "hotkey_image_to_path": self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p"),
+            "hotkey_pin_image": self.db.get_setting("hotkey_pin_image", "alt+f3"),
+            "hotkey_capture": self.db.get_setting("hotkey_capture", "alt+f2"),
+            "capture_save_folder": self.db.get_setting("capture_save_folder", "") or _default_capture_folder(),
             "ocr_language": self.db.get_setting("ocr_language", "ko"),
             "ocr_engine": self.db.get_setting("ocr_engine", "winrt"),
             "ocr_gemini_backend": self.db.get_setting("ocr_gemini_backend", ""),
@@ -1456,6 +1616,8 @@ class PasteFlowApp:
         old_hotkey = self.db.get_setting("hotkey_panel_toggle", "ctrl+space")
         old_ocr_hotkey = self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s")
         old_img2path_hotkey = self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p")
+        old_pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
+        old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
 
         from pasteflow.crypto import protect
         for key, value in new_settings.items():
@@ -1477,6 +1639,16 @@ class PasteFlowApp:
         new_img2path_hotkey = new_settings.get("hotkey_image_to_path", "ctrl+shift+p")
         if old_img2path_hotkey != new_img2path_hotkey:
             self.interceptor.set_image_to_path_hotkey(new_img2path_hotkey)
+
+        # 화면에 핀 단축키 재설정
+        new_pin_hotkey = new_settings.get("hotkey_pin_image", "alt+f3")
+        if old_pin_hotkey != new_pin_hotkey:
+            self.interceptor.set_pin_hotkey(new_pin_hotkey)
+
+        # 영역 캡처 단축키 재설정
+        new_capture_hotkey = new_settings.get("hotkey_capture", "alt+f2")
+        if old_capture_hotkey != new_capture_hotkey:
+            self.interceptor.set_capture_hotkey(new_capture_hotkey)
 
         # 자동 시작
         auto_start = new_settings.get("auto_start", "0") == "1"

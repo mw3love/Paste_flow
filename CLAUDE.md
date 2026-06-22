@@ -36,6 +36,7 @@ pasteflow/
 ├── database.py             # SQLite CRUD (clipboard_items, settings)
 ├── models.py               # ClipboardItem 데이터 모델
 ├── crypto.py               # DPAPI 시크릿 보호 (API 키 암호화 저장)
+├── uia.py                  # Windows UI Automation hit-test (ElementFromPoint — 마그네틱 캡처용, comtypes)
 ├── ocr_engine.py           # OCR 추상화 — winocr(WinRT) 동기 래퍼
 └── ui/
     ├── panel.py            # 전체 클립보드 패널
@@ -46,6 +47,7 @@ pasteflow/
     ├── paste_hud.py        # 순차 붙여넣기 진행 HUD (큐 목록·포인터 실시간)
     ├── settings_dialog.py  # 설정 화면
     ├── ocr_overlay.py      # OCR 영역 선택 오버레이
+    ├── capture_overlay.py  # 마그네틱 영역 캡처 오버레이 (Snipaste식 요소 스냅 — WIP, 3a)
     ├── ai_query.py         # AI 질의 입력 다이얼로그 (우클릭 "AI에게 질문")
     └── tray.py             # 시스템 트레이
 
@@ -124,7 +126,7 @@ tests/
 - **`toast.py`** — 우하단 토스트 알림. `_ToastStack` 싱글턴이 활성 토스트를 코너 기준 위로 스택(최신=맨 아래)하고 닫힐 때 재정렬, 최대 5개 동시 표시(초과 시 가장 오래된 것 즉시 제거). `ToastNotification(message, icon, badge, badge_position, image_path)` — `badge_position`은 `"leading"`(아이콘과 본문 사이) 또는 `"trailing"`(본문 뒤, 기본). `image_path`가 주어지면 아이콘과 본문 사이에 그 PNG 파일의 썸네일(최대 96px, `QPixmap(path)` 직접 로드·로드 실패 시 조용히 생략)을 삽입 — 이미지→경로 붙여넣기 시 "의도한 이미지가 맞나" 시각 확인용. `icon`이 빈 문자열이면 아이콘 라벨 자체를 생략(썸네일이 카테고리 구분을 대신). `show_copy_toast(item, queue_count)`는 누적 큐 카운트를 `Q{n}` 형태 badge로 본문 앞(`leading`)에 배치해 2초간 표시. `reserve_bottom(px)`(HUD 등 우하단 위젯을 위해 스택 하단 여백 확보). 시작 알림·OCR 알림도 이 스택을 공유한다. **OCR 토스트**: icon `🔤`로 통일, 본문에서 `OCR:` prefix는 제거(아이콘이 카테고리 구분을 담당). 모든 OCR 진입점(진행 중·결과·각종 에러)이 동일 아이콘을 사용해야 일관됨.
 - **`paste_hud.py`** — 순차 붙여넣기 진행 HUD. 우하단 비활성 창(`WA_ShowWithoutActivating` — 포커스 미탈취), 큐 항목 목록을 `✓`(완료·흐림)·`▶`(다음·강조)·`·`(대기)로 표시하고 헤더에 `순차 붙여넣기 n/total`. 단일 인스턴스 재사용 — `show_progress(items, pointer)`로 표시·갱신, `finish()`로 1.2초 후 fade-out. 큐 10개 초과 시 "외 N개"로 축약. 표시 중 `toast.reserve_bottom()`을 호출해 복사 토스트가 HUD 위로 쌓이게 한다.
 - **`tray.py`** — 시스템 트레이. 좌클릭 시 `panel_toggle_requested` 시그널 emit → main이 패널 토글.
-- **`settings_dialog.py`** — 단축키 커스터마이징(패널 토글, OCR, 이미지→경로 — `KEY_IMAGE_TO_PATH_HOTKEY` = `hotkey_image_to_path`, 기본 `ctrl+shift+p`), 히스토리 제한, 순차 큐 자동 초기화 시간(`KEY_QUEUE_IDLE_RESET` = `queue_idle_reset_sec`, QSpinBox 1~3600초·기본 10초), 자동 시작, 복사 알림 on/off(`notify_on_copy`) 설정. OCR 언어 콤보는 `OcrEngine.winrt_supported_languages()`로 동적 채움(winocr 미설치 시 기본 목록 폴백). Gemini 모델 콤보 옆 ↻ **새로고침 버튼**(Qt 표준 아이콘 `SP_BrowserReload` — 폰트 무관 보장)으로 `OcrEngine.list_gemini_models()` 호출 → 결과를 콤보에 반영하고 현재 backend의 `KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL` 또는 `_GATEWAY`(JSON list)에 저장 — backend별로 모델 캐시 분리 → 다음 실행 시 캐시 로드. 네트워크 호출은 `threading.Thread` + 내부 시그널 `_models_fetched(list, str)`로 UI 스레드 안전 통신. **콤보 정렬**은 `ocr_engine.sort_models_with_whitelist(cached, backend)`에 위임. backend는 새로 추가된 **API 백엔드 콤보**(`_current_backend()` → "공식 Google AI Studio"/"학교 게이트웨이")로 사용자가 명시 선택. 콤보 전환 시 `_on_backend_changed()`가 이전 backend 입력값을 `self._settings`에 stash하고 새 backend의 키·URL·모델·캐시를 입력란에 다시 채워, 두 backend를 자유 전환해도 양쪽 값이 모두 보존된다. base_url 입력란은 gateway일 때만 노출. 저장 시 `_on_save`는 활성·비활성 backend의 키/모델/캐시를 모두 함께 emit해 한쪽이 사라지지 않게 한다. 결과를 `_fill_model_combo(verified, unverified)`가: verified는 상단(tier 오름차순), 검증/미검증 둘 다 있으면 `insertSeparator`로 구분선, unverified는 하단에 회색(`ForegroundRole=COLORS['subtext0']`) + 툴팁 "PasteFlow가 검증하지 않은 모델 — 게이트웨이가 광고하지만 호출 실패 가능". 모든 항목엔 전체 모델명 툴팁을 달고, `_adjust_model_popup_width()`로 드롭다운 팝업(view) 최소 폭을 최장 모델명에 맞춰 넓혀(콤보 본체·설정창 폭은 불변) 공통 접두사를 공유하는 긴 이름의 가운데 생략을 막는다. 캐시가 비어 있는 첫 실행은 `whitelist_model_names(backend)`로 초기 채움(unverified는 빈 리스트). `self._verified_models`에 verified 목록을 보관해 `_update_model_hint()`가 `💡 가장 저렴: {verified[0]}`(또는 검증 모델 없으면 `(검증된 모델 없음 — ↻ 새로고침을 시도하세요)`) 안내. ↻ 결과 머지(`_on_models_fetched`)도 동일 정렬 적용 후 캐시 갱신.
+- **`settings_dialog.py`** — 단축키 커스터마이징(패널 토글, OCR, 이미지→경로 — `KEY_IMAGE_TO_PATH_HOTKEY` = `hotkey_image_to_path`, 기본 `ctrl+shift+p`, 화면 핀 — `KEY_PIN_IMAGE_HOTKEY` = `hotkey_pin_image`, 기본 `alt+f3`, 영역 캡처 — `KEY_CAPTURE_HOTKEY` = `hotkey_capture`, 기본 `alt+f2`), 캡처 저장 폴더(`KEY_CAPTURE_FOLDER` = `capture_save_folder`, QLineEdit + 찾아보기 `QFileDialog`), 히스토리 제한, 순차 큐 자동 초기화 시간(`KEY_QUEUE_IDLE_RESET` = `queue_idle_reset_sec`, QSpinBox 1~3600초·기본 10초), 자동 시작, 복사 알림 on/off(`notify_on_copy`) 설정. OCR 언어 콤보는 `OcrEngine.winrt_supported_languages()`로 동적 채움(winocr 미설치 시 기본 목록 폴백). Gemini 모델 콤보 옆 ↻ **새로고침 버튼**(Qt 표준 아이콘 `SP_BrowserReload` — 폰트 무관 보장)으로 `OcrEngine.list_gemini_models()` 호출 → 결과를 콤보에 반영하고 현재 backend의 `KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL` 또는 `_GATEWAY`(JSON list)에 저장 — backend별로 모델 캐시 분리 → 다음 실행 시 캐시 로드. 네트워크 호출은 `threading.Thread` + 내부 시그널 `_models_fetched(list, str)`로 UI 스레드 안전 통신. **콤보 정렬**은 `ocr_engine.sort_models_with_whitelist(cached, backend)`에 위임. backend는 새로 추가된 **API 백엔드 콤보**(`_current_backend()` → "공식 Google AI Studio"/"학교 게이트웨이")로 사용자가 명시 선택. 콤보 전환 시 `_on_backend_changed()`가 이전 backend 입력값을 `self._settings`에 stash하고 새 backend의 키·URL·모델·캐시를 입력란에 다시 채워, 두 backend를 자유 전환해도 양쪽 값이 모두 보존된다. base_url 입력란은 gateway일 때만 노출. 저장 시 `_on_save`는 활성·비활성 backend의 키/모델/캐시를 모두 함께 emit해 한쪽이 사라지지 않게 한다. 결과를 `_fill_model_combo(verified, unverified)`가: verified는 상단(tier 오름차순), 검증/미검증 둘 다 있으면 `insertSeparator`로 구분선, unverified는 하단에 회색(`ForegroundRole=COLORS['subtext0']`) + 툴팁 "PasteFlow가 검증하지 않은 모델 — 게이트웨이가 광고하지만 호출 실패 가능". 모든 항목엔 전체 모델명 툴팁을 달고, `_adjust_model_popup_width()`로 드롭다운 팝업(view) 최소 폭을 최장 모델명에 맞춰 넓혀(콤보 본체·설정창 폭은 불변) 공통 접두사를 공유하는 긴 이름의 가운데 생략을 막는다. 캐시가 비어 있는 첫 실행은 `whitelist_model_names(backend)`로 초기 채움(unverified는 빈 리스트). `self._verified_models`에 verified 목록을 보관해 `_update_model_hint()`가 `💡 가장 저렴: {verified[0]}`(또는 검증 모델 없으면 `(검증된 모델 없음 — ↻ 새로고침을 시도하세요)`) 안내. ↻ 결과 머지(`_on_models_fetched`)도 동일 정렬 적용 후 캐시 갱신.
 - **`ocr_overlay.py`** — 모니터별 분리 오버레이. `OcrOverlay`는 매니저(QObject 베이스, QWidget 아님)이고 실제 위젯은 `_ScreenOverlay`로 각 QScreen마다 1개씩 생성. `start()` 호출 시 모니터 수만큼 `_ScreenOverlay`를 만들고 각각 자기 화면을 `screen.grabWindow(0, 0, 0, w, h)`로 캡처해 표시. 한 모니터에서 드래그 시작되면 `drag_started` 시그널로 매니저가 다른 오버레이를 `deactivate()`(마스크만 표시·입력 차단). ESC/우클릭은 어느 오버레이에서든 전체 취소. **다중 DPI 모니터 대응**: 가상 데스크톱 전체를 단일 위젯으로 덮으면 Qt 백킹 스토어 DPR이 하나로 고정돼, DPR이 다른 모니터에 진입할 때 좌표·크기가 어긋나 고DPI 노트북 화면이 좌상단 일부로 축소되는 증상이 발생한다. 모니터별 분리 위젯 + `setScreen()` 명시 바인딩으로 Qt가 모니터별 DPR을 독립 처리하므로 문제 자체가 발생하지 않는다. 공개 API(`region_captured(QPixmap)`, `cancelled()`, `start()`)는 호출부 변경 없이 유지.
 
 ### 단축키 체계
@@ -135,9 +137,19 @@ tests/
 | ctrl+space *(기본값, 설정 가능)* | 패널 토글 (suppress) | WH_KEYBOARD_LL (paste_interceptor) |
 | ctrl+shift+s *(기본값, 설정 가능)* | OCR 영역 선택 시작 (suppress) | WH_KEYBOARD_LL (paste_interceptor) |
 | ctrl+shift+p *(기본값, 설정 가능)* | 클립보드 이미지를 임시 PNG로 저장 후 경로 텍스트로 자동 Ctrl+V (suppress) | WH_KEYBOARD_LL (paste_interceptor) |
+| alt+f3 *(기본값, 설정 가능)* | 클립보드 이미지/텍스트를 화면에 핀(떠 있는 창)으로 띄우기 (suppress) | WH_KEYBOARD_LL (paste_interceptor) |
+| alt+f2 *(기본값, 설정 가능)* | 영역 캡처 → 클립보드(DIB)+파일 저장 (suppress) | WH_KEYBOARD_LL (paste_interceptor) |
 | 트레이 좌클릭 | 패널 토글 | Qt 이벤트 |
 
 > ⚠️ `Alt+1~9` 직접 붙여넣기, `Ctrl+Shift+X` 큐 초기화, `Ctrl+Shift+Z` 실수 복구는 **의도적으로 제거**됨.
+
+### 화면 핀 · 영역 캡처 (Snipaste식, v1.8.0~)
+
+Snipaste를 대체하는 캡처 기능군. 단축키 추가는 모두 기존 패턴(`set_*_hotkey` + 훅 감지 블록 + 브리지 시그널 + 설정 배선) 복제.
+
+- **화면 핀 (Alt+F3)** — `main._on_pin_hotkey`: 클립보드 이미지를 읽어(`_read_image_from_clipboard`) `ImagePreviewPopup.open_new`로 화면에 띄움(다중 창·ESC 닫기·Space 주석 편집은 image_preview가 이미 제공). 이미지가 없으면 클립보드 **텍스트를 흰 배경 PNG로 렌더**(`_render_text_to_png` — 맑은 고딕 18px, 워드랩)해서 띄움(텍스트도 주석 가능 = 사실상 이미지화). 커서 우측에 배치. **`image_preview._bg_item.setTransformationMode(Smooth)`**: QGraphicsPixmapItem 기본 Fast(nearest)가 뷰의 SmoothPixmapTransform을 덮어써 비정수 배율에서 이미지·텍스트가 거칠게 보이던 것 수정(모든 미리보기 공통 개선).
+- **영역 캡처 (Alt+F2)** — `main._on_capture_region`: 캡처 오버레이(현재 `OcrOverlay` 두 번째 인스턴스 `_capture_overlay` 재사용)가 드래그 영역 QPixmap을 emit → **DIB**(`_qpixmap_to_dib` — 24bpp BI_RGB, 붙여넣기 호환 최광)로 변환 → `interceptor._set_clipboard`+`_persist_clipboard_item`(OCR 결과와 동일 무중복 경로: 클립보드+히스토리+큐) → `_save_image_to_folder`(설정 `capture_save_folder`, 기본 `_default_capture_folder()` = `<Pictures>\PasteFlow`, 없으면 생성) → 썸네일 토스트(`📷`). 설정에 캡처 단축키 행 + 저장 폴더 행(`QFileDialog`).
+- **마그네틱 캡처 (WIP — 3a까지)** — `uia.py`(`rect_at(x,y)` = UIA `ElementFromPoint`로 커서 아래 요소의 물리픽셀 사각형, comtypes·CUIAutomation 1회 생성 재사용) + `ui/capture_overlay.py`(`Qt.WindowType.WindowTransparentForInput` 클릭-통과 오버레이 — ElementFromPoint가 아래 실제 창을 짚도록. QTimer ~30ms로 `GetCursorPos`→`uia.rect_at`→물리→논리 변환(`MonitorFromPoint` 물리원점+QScreen DPR)→요소 하이라이트, ESC 폴링). **현재 3a(하이라이트 추적)까지만 구현, main 미연결** — 단독 검증은 `python -m pasteflow.ui.capture_overlay`. **알려진 미완**: 멀티-DPI 모니터에서 하이라이트 정렬이 일부 어긋남(좌표 변환 보정 필요). **남은 작업**: 3b(WH_MOUSE_LL 마우스 훅으로 좌클릭 suppress+요소 캡처, main 연결), 3c(빈 영역 자유드래그 폴백·휠로 부모 요소 확장). 상세 설계는 plan 파일 `tidy-doodling-taco.md`.
 
 ### 순차 붙여넣기 핵심 동작 (가장 중요)
 

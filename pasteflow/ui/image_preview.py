@@ -127,6 +127,10 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         if self._pixmap_ok:
             self._scene.setSceneRect(QRectF(pm.rect()))
             self._bg_item = self._scene.addPixmap(pm)
+            # QGraphicsPixmapItem 기본 transformationMode는 Fast(nearest) — 뷰의
+            # SmoothPixmapTransform 힌트를 아이템 paint가 덮어써, 비정수 배율(hug-zoom)에서
+            # 이미지·텍스트가 거칠게(깨진 듯) 보인다. Smooth로 명시해 부드럽게 스케일.
+            self._bg_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
             self._bg_item.setZValue(0)
 
         self._view = _AnnotatorView(self._scene, self)

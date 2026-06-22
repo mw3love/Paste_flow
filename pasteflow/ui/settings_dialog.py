@@ -5,7 +5,7 @@
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,
-    QStyle,
+    QStyle, QFileDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics
@@ -217,6 +217,9 @@ class SettingsDialog(QDialog):
     KEY_NOTIFY_ON_COPY = "notify_on_copy"
     KEY_OCR_HOTKEY = "hotkey_ocr_trigger"
     KEY_IMAGE_TO_PATH_HOTKEY = "hotkey_image_to_path"
+    KEY_PIN_IMAGE_HOTKEY = "hotkey_pin_image"
+    KEY_CAPTURE_HOTKEY = "hotkey_capture"
+    KEY_CAPTURE_FOLDER = "capture_save_folder"
     KEY_OCR_LANG = "ocr_language"
     KEY_OCR_ENGINE = "ocr_engine"
     # Gemini는 backend별로 키/모델/캐시 분리 — 학교 게이트웨이와 개인 AI Studio 키를 동시에 보관
@@ -243,7 +246,7 @@ class SettingsDialog(QDialog):
 
     def _setup_window(self):
         self.setWindowTitle("PasteFlow 설정")
-        self.setFixedSize(360, 720)
+        self.setFixedSize(360, 816)
         self.setWindowFlags(
             Qt.WindowType.Dialog
             | Qt.WindowType.WindowCloseButtonHint
@@ -269,6 +272,22 @@ class SettingsDialog(QDialog):
             "Claude Code CLI 등 '파일 경로 텍스트'를 첨부로 받는 앱에 한 키로 붙여넣기 위한 단축키."
         )
         hotkey_form.addRow("이미지→경로:", self._image_to_path_hotkey)
+
+        self._pin_image_hotkey = HotkeyEdit()
+        self._pin_image_hotkey.setToolTip(
+            "현재 클립보드 이미지를 화면 위에 떠 있는 창으로 띄웁니다(Snipaste의 화면 핀).\n"
+            "여러 개를 동시에 띄울 수 있고, ESC로 닫습니다.\n"
+            "띄운 창에서 Space를 누르면 주석 편집 모드로 들어갑니다."
+        )
+        hotkey_form.addRow("화면에 핀:", self._pin_image_hotkey)
+
+        self._capture_hotkey = HotkeyEdit()
+        self._capture_hotkey.setToolTip(
+            "화면 영역을 드래그로 선택해 캡처합니다(Snipaste의 영역 캡처).\n"
+            "캡처 즉시 클립보드에 복사되고 지정 폴더에 PNG로 저장됩니다.\n"
+            "ESC 또는 우클릭으로 취소합니다."
+        )
+        hotkey_form.addRow("영역 캡처:", self._capture_hotkey)
 
         layout.addWidget(hotkey_group)
 
@@ -415,6 +434,19 @@ class SettingsDialog(QDialog):
         )
         general_form.addRow("순차 큐 자동 초기화:", self._queue_idle_spin)
 
+        # 캡처 저장 폴더 — 경로 표시 + 찾아보기
+        self._capture_folder_edit = QLineEdit()
+        self._capture_folder_edit.setReadOnly(True)
+        self._capture_folder_edit.setToolTip("영역 캡처(Alt+F2) 이미지를 저장할 폴더")
+        browse_btn = QPushButton("찾아보기")
+        browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        browse_btn.clicked.connect(self._pick_capture_folder)
+        folder_row = QHBoxLayout()
+        folder_row.setContentsMargins(0, 0, 0, 0)
+        folder_row.addWidget(self._capture_folder_edit, 1)
+        folder_row.addWidget(browse_btn)
+        general_form.addRow("캡처 저장 폴더:", folder_row)
+
         self._auto_start_check = QCheckBox("Windows 시작 시 자동 실행")
         general_form.addRow(self._auto_start_check)
 
@@ -505,6 +537,13 @@ class SettingsDialog(QDialog):
             return self._settings.get(self.KEY_OCR_GEMINI_MODEL_GATEWAY, "")
         return self._settings.get(self.KEY_OCR_GEMINI_MODEL_OFFICIAL, "")
 
+    def _pick_capture_folder(self):
+        """캡처 저장 폴더 선택 다이얼로그"""
+        start = self._capture_folder_edit.text() or ""
+        folder = QFileDialog.getExistingDirectory(self, "캡처 저장 폴더 선택", start)
+        if folder:
+            self._capture_folder_edit.setText(folder)
+
     def _load_values(self):
         """현재 설정값 로드"""
         self._panel_toggle_hotkey.set_value(
@@ -515,6 +554,15 @@ class SettingsDialog(QDialog):
         )
         self._image_to_path_hotkey.set_value(
             self._settings.get(self.KEY_IMAGE_TO_PATH_HOTKEY, "ctrl+shift+p")
+        )
+        self._pin_image_hotkey.set_value(
+            self._settings.get(self.KEY_PIN_IMAGE_HOTKEY, "alt+f3")
+        )
+        self._capture_hotkey.set_value(
+            self._settings.get(self.KEY_CAPTURE_HOTKEY, "alt+f2")
+        )
+        self._capture_folder_edit.setText(
+            self._settings.get(self.KEY_CAPTURE_FOLDER, "")
         )
         # backend 콤보 — base_url 유무 자동 추론보다 명시 저장값을 우선
         backend = self._settings.get(self.KEY_OCR_GEMINI_BACKEND, "")
@@ -711,6 +759,9 @@ class SettingsDialog(QDialog):
             self.KEY_PANEL_TOGGLE: self._panel_toggle_hotkey.value() or "ctrl+space",
             self.KEY_OCR_HOTKEY: self._ocr_hotkey.value() or "ctrl+shift+s",
             self.KEY_IMAGE_TO_PATH_HOTKEY: self._image_to_path_hotkey.value() or "ctrl+shift+p",
+            self.KEY_PIN_IMAGE_HOTKEY: self._pin_image_hotkey.value() or "alt+f3",
+            self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
+            self.KEY_CAPTURE_FOLDER: self._capture_folder_edit.text(),
             self.KEY_OCR_LANG: self._ocr_lang_combo.currentText(),
             self.KEY_OCR_ENGINE: engine,
             self.KEY_HISTORY_MAX: str(self._history_max_spin.value()),
