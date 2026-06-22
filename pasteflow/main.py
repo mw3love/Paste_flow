@@ -700,9 +700,11 @@ class PasteFlowApp:
         self._ocr_overlay.region_captured.connect(self._on_ocr_region_captured)
         # cancelled 시그널은 내부 close()로 충분 — 별도 콜백 불필요
 
-        # 영역 캡처 오버레이 (OCR과 동일 위젯 재사용 — region_captured만 캡처 핸들러로 연결)
-        self._capture_overlay = OcrOverlay()
+        # 영역 캡처 오버레이 (마그네틱 — 커서 아래 요소 클릭 캡처. region_captured → _on_capture_region 무수정)
+        from pasteflow.ui.capture_overlay import CaptureOverlay
+        self._capture_overlay = CaptureOverlay()
         self._capture_overlay.region_captured.connect(self._on_capture_region)
+        # cancelled는 오버레이 내부 정리로 충분 — 별도 콜백 불필요
 
         # OCR은 호출마다 새 스레드 — asyncio.run()을 재사용 스레드에서 반복 호출 시
         # WinRT 콜백 상태가 누적돼 두 번째 호출부터 빈 결과를 반환하는 문제 방지
@@ -829,7 +831,7 @@ class PasteFlowApp:
     # ── 영역 캡처 (Alt+F2) ──
 
     def _on_capture_requested(self):
-        """메인 스레드: 영역 캡처 오버레이 시작 (OcrOverlay 재사용)"""
+        """메인 스레드: 영역 캡처 오버레이 시작 (마그네틱 CaptureOverlay)"""
         self._capture_overlay.start()
 
     def _on_capture_region(self, pixmap):
