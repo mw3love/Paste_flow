@@ -24,6 +24,30 @@ CF_PNG = win32clipboard.RegisterClipboardFormat("PNG")
 # 썸네일 크기
 THUMBNAIL_SIZE = (80, 60)
 
+# OLE 클립보드 포맷 — IDataObject 인터페이스 마샬링 데이터라 실제 콘텐츠가 아니다.
+# 평면 바이트로 복사해 되살리면 원본 앱이 클립보드를 놓는 순간 stale 참조가 되어,
+# 한글(HWP)처럼 붙여넣기 시 OLE 데이터를 평면 포맷보다 우선 채택하는 앱에서
+# "아무것도 안 붙음"을 유발한다. 캡처 단계에서 제외해 평면 포맷으로 폴백시킨다.
+# (이름 소문자·trailing 공백 제거 후 비교)
+_OLE_CLIPBOARD_FORMATS = {
+    "dataobject",
+    "ole private data",
+    "object descriptor",
+    "embed source",
+    "embedded object",
+    "link source",
+    "link source descriptor",
+}
+
+# 한글(HWP) 네이티브 클립보드 포맷 — 한글은 붙여넣기 시 자기 고유 포맷을 평면
+# 포맷(HTML/RTF/텍스트)보다 최우선 채택하는데, 우리가 복원한 네이티브 블롭은
+# (동반 OLE 객체가 사라져) 한글이 읽으면 빈 내용이라 "아무것도 안 붙음"을 유발한다.
+# 제외하면 한글이 평면 포맷으로 폴백해 정상 붙여넣기 — 단 한글 전용 객체 충실도는 포기.
+_HWP_NATIVE_FORMATS = {
+    "hwp native",
+    "hwp_native_info",
+}
+
 
 class ClipboardMonitor:
     """WM_CLIPBOARDUPDATE 기반 클립보드 감시
@@ -208,6 +232,14 @@ class ClipboardMonitor:
                 if fmt == 0:
                     break
                 if fmt in known_fmts:
+                    continue
+                try:
+                    fmt_name = win32clipboard.GetClipboardFormatName(fmt)
+                except Exception:
+                    fmt_name = ""
+                # OLE 마샬링 포맷·한글 네이티브 포맷은 복원하면 한글 붙여넣기를 깨뜨림 → 제외
+                _nm = fmt_name.strip().lower()
+                if _nm in _OLE_CLIPBOARD_FORMATS or _nm in _HWP_NATIVE_FORMATS:
                     continue
                 try:
                     data = win32clipboard.GetClipboardData(fmt)
