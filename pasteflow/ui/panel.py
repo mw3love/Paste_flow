@@ -464,7 +464,7 @@ class ClipboardPanel(QWidget):
     preview_image_requested = pyqtSignal(int)  # item_id — 위치는 main이 panel.geometry()로 계산
     preview_text_requested = pyqtSignal(int)   # item_id — 동상
     ocr_item_requested = pyqtSignal(int)       # item_id — 이미지 항목에 OCR 적용
-    ai_query_requested = pyqtSignal(int)       # item_id — 텍스트 항목을 컨텍스트로 AI에게 질문
+    ai_query_requested = pyqtSignal(int)       # item_id — 텍스트/이미지 항목을 컨텍스트로 AI에게 질문
     copy_image_as_path_requested = pyqtSignal(int)  # item_id — 이미지를 임시 PNG로 저장 후 경로를 클립보드에 텍스트로 복사
     open_settings_requested = pyqtSignal()
     quit_requested = pyqtSignal()
@@ -1119,6 +1119,8 @@ class ClipboardPanel(QWidget):
         if item.content_type == "image":
             ocr_action = menu.addAction("텍스트 추출(OCR)")
             ocr_action.triggered.connect(lambda: self.ocr_item_requested.emit(item_id))
+            ai_action = menu.addAction("AI에게 질문")
+            ai_action.triggered.connect(lambda: self.ai_query_requested.emit(item_id))
             path_action = menu.addAction("파일로 저장 후 경로 복사")
             path_action.triggered.connect(lambda: self.copy_image_as_path_requested.emit(item_id))
         else:

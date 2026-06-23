@@ -341,27 +341,21 @@ _DIRECT_OPEN_SIGNATURES = (
 )
 
 
-def _save_image_to_folder(image_data: bytes, folder: str) -> str:
-    """image_data(PNG/JPEG/GIF/WebP/CF_DIB)를 folder에 PNG 파일로 저장. 저장 경로 반환."""
+def _image_data_to_png_bytes(image_data: bytes) -> bytes:
+    """image_data(PNG/JPEG/GIF/WebP/CF_DIB)를 PNG bytes로 변환.
+
+    PIL이 직접 못 여는 CF_DIB raw는 BMP 파일 헤더를 조립해 인식시킨다(_create_thumbnail과
+    동일 기법). 파일 저장(_save_image_to_folder)·이미지 AI 질의가 공유한다.
+    """
     import io
     import struct
     from PIL import Image
-    from datetime import datetime
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_path = os.path.join(folder, f"clip_{ts}.png")
-    path = base_path
-    suffix = 0
-    while os.path.exists(path):
-        suffix += 1
-        path = os.path.join(folder, f"clip_{ts}_{suffix}.png")
 
     if any(image_data.startswith(sig) for sig in _DIRECT_OPEN_SIGNATURES):
         # PIL이 직접 인식 가능한 포맷 (PNG/JPEG/GIF/WebP/BMP 파일 등)
         img = Image.open(io.BytesIO(image_data))
-        img.save(path, 'PNG')
     else:
-        # CF_DIB raw → BMP 파일 헤더 조립 → Pillow로 PNG 변환
+        # CF_DIB raw → BMP 파일 헤더 조립 → Pillow로 인식
         bih_size = struct.unpack_from('<I', image_data, 0)[0]
         bit_count = struct.unpack_from('<H', image_data, 14)[0]
         colors_used = struct.unpack_from('<I', image_data, 32)[0]
@@ -372,7 +366,26 @@ def _save_image_to_folder(image_data: bytes, folder: str) -> str:
         file_size = 14 + len(image_data)
         file_header = struct.pack('<2sIHHI', b'BM', file_size, 0, 0, pixel_offset)
         img = Image.open(io.BytesIO(file_header + image_data))
-        img.save(path, 'PNG')
+
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    return buf.getvalue()
+
+
+def _save_image_to_folder(image_data: bytes, folder: str) -> str:
+    """image_data(PNG/JPEG/GIF/WebP/CF_DIB)를 folder에 PNG 파일로 저장. 저장 경로 반환."""
+    from datetime import datetime
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_path = os.path.join(folder, f"clip_{ts}.png")
+    path = base_path
+    suffix = 0
+    while os.path.exists(path):
+        suffix += 1
+        path = os.path.join(folder, f"clip_{ts}_{suffix}.png")
+
+    with open(path, 'wb') as f:
+        f.write(_image_data_to_png_bytes(image_data))
 
     return path
 
@@ -890,11 +903,12 @@ class PasteFlowApp:
             self.db.get_setting("ocr_gemini_model_official", ""),
         )
 
-    def _start_ai_worker(self, question: str, context_text: str):
-        """AI 질의 워커 — 질문+컨텍스트를 받아 백그라운드에서 Gemini에 질의.
+    def _start_ai_worker(self, question: str, context_text: str, image_png: bytes | None = None):
+        """AI 질의 워커 — 질문+컨텍스트(텍스트 또는 이미지)를 받아 백그라운드에서 Gemini에 질의.
 
         OCR과 동일한 게이트웨이/공식 배관(`OcrEngine.ask`)을 재사용한다. OCR 엔진 설정과
         무관하게 항상 gemini 경로를 사용(이미지→텍스트 OCR이 winrt여도 AI 질의는 게이트웨이).
+        `image_png`가 주어지면 이미지를 멀티모달로 함께 전송(시각 질의).
         결과/에러는 `_bridge.ai_done` / `_bridge.ai_error` 시그널로 메인 스레드에 통지.
         """
         from pasteflow.ui.toast import ToastNotification
@@ -906,7 +920,7 @@ class PasteFlowApp:
                 from pasteflow.ocr_engine import OcrEngine
                 api_key, base_url, model = self._resolve_gemini_cfg()
                 engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url, model=model)
-                answer = engine.ask(question, context_text)
+                answer = engine.ask(question, context_text, image_png=image_png)
                 if engine.last_fallback_from and engine.last_used_model:
                     self._bridge.ocr_fallback.emit(engine.last_fallback_from, engine.last_used_model)
                 self._bridge.ai_done.emit(question, answer)
@@ -990,11 +1004,17 @@ class PasteFlowApp:
         self._on_ocr_image_item(item)
 
     def _on_copy_image_as_path(self, item_id: int):
-        """우클릭 "파일로 저장 후 경로 복사" — 임시 PNG 저장 후 절대경로를 클립보드에 텍스트로 복사.
+        """우클릭 "파일로 저장 후 경로 복사"(item_id 기반) → DB 로드 후 항목 기반 코어로 위임."""
+        item = self.db.get_item(item_id)
+        if item:
+            self._copy_image_as_path_for_item(item)
+
+    def _copy_image_as_path_for_item(self, item: ClipboardItem):
+        """임시 PNG 저장 후 절대경로를 클립보드에 텍스트로 복사.
         Claude CLI 등 "경로 텍스트"를 첨부로 받는 앱에 사용자가 직접 Ctrl+V로 붙여넣기 위한 경로.
+        DB id가 없는 임시 항목(화면 핀 등)도 받을 수 있도록 ClipboardItem을 직접 받는다.
         """
         from pasteflow.ui.toast import ToastNotification
-        item = self.db.get_item(item_id)
         if not item or not item.image_data:
             ToastNotification("이미지 데이터를 찾을 수 없습니다", icon="🔤")
             return
@@ -1084,9 +1104,11 @@ class PasteFlowApp:
         cursor_pos = QCursor.pos()
         anchor = QRect(cursor_pos.x(), cursor_pos.y(), 1, 1)
         popup = ImagePreviewPopup.open_new(item, anchor)
-        # 핀 창에서도 복사·OCR·Space 주석 편집 후 복사/저장이 동작하도록 연결
+        # 핀 창에서도 복사·OCR·AI 질문·경로 복사·Space 주석 편집 후 복사/저장이 동작하도록 연결
         popup.copy_requested.connect(self._on_copy_item)
         popup.ocr_requested.connect(self._on_ocr_image_item)
+        popup.ai_requested.connect(self._ai_query_for_item)
+        popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
         popup.annotated_copy_requested.connect(self._on_annotation_copy)
         popup.export_file_requested.connect(self._on_annotation_export)
 
@@ -1327,6 +1349,8 @@ class PasteFlowApp:
             popup = ImagePreviewPopup.open_new(item, self.panel.geometry())
             popup.copy_requested.connect(self._on_copy_item)
             popup.ocr_requested.connect(self._on_ocr_image_item)
+            popup.ai_requested.connect(self._ai_query_for_item)
+            popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
             # 인라인 주석 편집(Space) 완료 액션 — 같은 창에서 emit
             popup.annotated_copy_requested.connect(self._on_annotation_copy)
             popup.export_file_requested.connect(self._on_annotation_export)
@@ -1393,13 +1417,39 @@ class PasteFlowApp:
                 self._on_edit_item(item_id, new_text)
 
     def _on_ai_query_requested(self, item_id: int):
-        """패널 우클릭 "AI에게 질문" → 항목을 컨텍스트로 질문 입력 다이얼로그 표시 → AI 워커."""
+        """패널 우클릭 "AI에게 질문"(item_id 기반) → DB 로드 후 항목 기반 코어로 위임."""
+        item = self.db.get_item(item_id)
+        if item:
+            self._ai_query_for_item(item)
+
+    def _ai_query_for_item(self, item: ClipboardItem):
+        """항목을 컨텍스트로 질문 입력 다이얼로그 표시 → AI 워커.
+
+        텍스트 항목은 텍스트를 컨텍스트로, 이미지 항목은 이미지를 멀티모달로 전송(시각 질의).
+        DB id가 없는 임시 항목(화면 핀 등)도 받을 수 있도록 ClipboardItem을 직접 받는다.
+        """
         from PyQt6.QtWidgets import QDialog
         from pasteflow.ui.ai_query import AiQueryDialog
+        from pasteflow.ui.toast import ToastNotification
 
-        item = self.db.get_item(item_id)
-        if not item:
+        if item.content_type == "image":
+            if not item.image_data:
+                ToastNotification("이미지 데이터를 찾을 수 없습니다", icon="🤖")
+                return
+            try:
+                image_png = _image_data_to_png_bytes(item.image_data)
+            except Exception as e:
+                ToastNotification(f"이미지 변환 실패 — {e}", icon="🤖")
+                return
+            dialog = AiQueryDialog("", self.panel, context_image=image_png)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            question = dialog.get_question()
+            if not question:
+                return
+            self._start_ai_worker(question, "", image_png=image_png)
             return
+
         context_text = item.text_content or item.preview_text or ""
         dialog = AiQueryDialog(context_text, self.panel)
         if dialog.exec() != QDialog.DialogCode.Accepted:

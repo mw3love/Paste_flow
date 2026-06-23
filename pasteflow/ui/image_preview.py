@@ -83,6 +83,8 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
     # 뷰어 모드 우클릭 메뉴 → main 핸들러 (ClipboardItem)
     copy_requested = pyqtSignal(object)        # ClipboardItem
     ocr_requested = pyqtSignal(object)         # ClipboardItem
+    ai_requested = pyqtSignal(object)          # ClipboardItem — AI에게 질문(시각 질의)
+    copy_as_path_requested = pyqtSignal(object)  # ClipboardItem — 파일로 저장 후 경로 복사
     # 편집 완료 → main 핸들러 (PNG bytes)
     annotated_copy_requested = pyqtSignal(bytes)   # 클립보드 복사 + 히스토리 저장
     export_file_requested = pyqtSignal(bytes)      # 파일 저장
@@ -280,6 +282,9 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         menu.setStyleSheet(_dark_menu_style())
         menu.addAction("복사").triggered.connect(lambda: self.copy_requested.emit(self._item))
         menu.addAction("텍스트 추출(OCR)").triggered.connect(lambda: self.ocr_requested.emit(self._item))
+        menu.addAction("AI에게 질문").triggered.connect(lambda: self.ai_requested.emit(self._item))
+        menu.addAction("파일로 저장 후 경로 복사").triggered.connect(
+            lambda: self.copy_as_path_requested.emit(self._item))
         menu.addAction("주석 편집").triggered.connect(self.toggle_edit_mode)
         menu.addSeparator()
         menu.addAction("닫기").triggered.connect(self.close)

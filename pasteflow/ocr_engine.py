@@ -453,12 +453,13 @@ class OcrEngine:
 
     # ── 텍스트 AI 질의 (OCR과 동일 배관 재사용) ──
 
-    def ask(self, question: str, context_text: str = "") -> str:
-        """텍스트 전용 AI 질의 — 클립보드 항목을 컨텍스트로 질문에 답한다.
+    def ask(self, question: str, context_text: str = "", image_png: bytes | None = None) -> str:
+        """AI 질의 — 클립보드 항목(텍스트 또는 이미지)을 컨텍스트로 질문에 답한다.
 
         OCR과 동일한 Gemini 배관(게이트웨이/공식 분기·자동 폴백·_normalize_base_url)을
-        재사용하되, 이미지 대신 텍스트 컨텍스트+질문을 보낸다. 게이트웨이는 OpenAI 호환
-        chat.completions, 공식 API는 google.generativeai로 갈린다(_recognize_gemini와 동일 구조).
+        재사용한다. `image_png`가 주어지면 질문과 함께 이미지를 멀티모달로 전송(시각 질의),
+        없으면 텍스트 컨텍스트+질문만 보낸다. 게이트웨이는 OpenAI 호환 chat.completions,
+        공식 API는 google.generativeai로 갈린다(_recognize_gemini와 동일 구조).
         동기 호출이므로 호출자가 워커 스레드에서 실행해야 UI 블로킹이 없다.
         """
         import os
@@ -474,7 +475,7 @@ class OcrEngine:
             return self._call_with_fallback(
                 model_name,
                 backend="gateway",
-                call=lambda m: self._ask_openai_compat(prompt, api_key, self.base_url, m),
+                call=lambda m: self._ask_openai_compat(prompt, api_key, self.base_url, m, image_png),
             )
 
         try:
@@ -487,29 +488,46 @@ class OcrEngine:
         return self._call_with_fallback(
             model_name,
             backend="official",
-            call=lambda m: self._ask_google_genai(genai, prompt, m),
+            call=lambda m: self._ask_google_genai(genai, prompt, m, image_png),
         )
 
-    def _ask_openai_compat(self, prompt: str, api_key: str, base_url: str, model: str) -> str:
-        """OpenAI 호환 게이트웨이 텍스트 질의 단일 호출 (폴백 없음)."""
+    def _ask_openai_compat(
+        self, prompt: str, api_key: str, base_url: str, model: str, image_png: bytes | None = None
+    ) -> str:
+        """OpenAI 호환 게이트웨이 질의 단일 호출 (폴백 없음). image_png가 있으면 멀티모달."""
+        import base64
         try:
             import openai
         except ImportError:
             raise RuntimeError("openai 패키지 미설치: pip install openai")
         client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
-        # max_tokens=16384: OCR과 동일 — 게이트웨이가 thinking 토큰을 같은 예산에서 차감하므로
-        # 작게 잡으면 thinking 모델에서 본문이 잘린다.
+        # 이미지가 있으면 OCR(_openai_compat_call)과 동일한 image_url+text 멀티모달 content,
+        # 없으면 텍스트만. max_tokens=16384는 OCR과 동일(thinking 토큰 잘림 방지).
+        if image_png:
+            b64 = base64.standard_b64encode(image_png).decode()
+            content = [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                {"type": "text", "text": prompt},
+            ]
+        else:
+            content = prompt
         resp = client.chat.completions.create(
             model=model,
             max_tokens=16384,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": content}],
         )
         return (resp.choices[0].message.content or "").strip()
 
-    def _ask_google_genai(self, genai_module, prompt: str, model_name: str) -> str:
-        """공식 Google API 텍스트 질의 단일 호출 (폴백 없음)."""
+    def _ask_google_genai(
+        self, genai_module, prompt: str, model_name: str, image_png: bytes | None = None
+    ) -> str:
+        """공식 Google API 질의 단일 호출 (폴백 없음). image_png가 있으면 멀티모달."""
         model = genai_module.GenerativeModel(model_name)
-        response = model.generate_content(prompt)
+        if image_png:
+            parts = [{"mime_type": "image/png", "data": image_png}, prompt]
+            response = model.generate_content(parts)
+        else:
+            response = model.generate_content(prompt)
         return (response.text or "").strip()
 
 

@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap
 
 from pasteflow.ui.theme import COLORS, TEAL_HOVER
 
@@ -35,7 +36,7 @@ class AiQueryDialog(QDialog):
 
     _CTX_PREVIEW_CHARS = 300
 
-    def __init__(self, context_text: str, parent=None):
+    def __init__(self, context_text: str, parent=None, context_image: bytes | None = None):
         super().__init__(parent)
         self.setWindowTitle("AI에게 질문")
         self.setMinimumSize(420, 240)
@@ -92,7 +93,21 @@ class AiQueryDialog(QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
 
         ctx = (context_text or "").strip()
-        if ctx:
+        if context_image:
+            pix = QPixmap()
+            if pix.loadFromData(context_image) and not pix.isNull():
+                layout.addWidget(QLabel("선택한 이미지(컨텍스트):"))
+                thumb = pix.scaled(
+                    280, 180,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                img_label = QLabel()
+                img_label.setObjectName("ctx")
+                img_label.setPixmap(thumb)
+                img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                layout.addWidget(img_label)
+        elif ctx:
             layout.addWidget(QLabel("선택한 항목(컨텍스트):"))
             preview = ctx[: self._CTX_PREVIEW_CHARS].replace("\n", " ")
             if len(ctx) > self._CTX_PREVIEW_CHARS:
