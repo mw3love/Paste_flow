@@ -26,8 +26,10 @@ UIA·GetCursorPos = 물리 픽셀(DPI-aware 프로세스). Qt 위젯 geometry·�
 """
 from __future__ import annotations
 
+import atexit
 import ctypes
 import threading
+import time
 from ctypes import wintypes
 
 from PyQt6.QtWidgets import QWidget, QApplication
@@ -39,7 +41,9 @@ from pasteflow import uia
 
 _MASK_ALPHA = 100  # 어두운 마스크 알파
 _BORDER_W = 2
-_POLL_MS = 30      # 커서 추적 주기
+_POLL_MS = 16          # 커서 추적/드래그 repaint 주기 (~60fps)
+_UIA_MIN_INTERVAL = 0.030  # hover 요소 hit-test(UIA) 최소 호출 간격(초) — 과호출 방지
+_INVAL_MARGIN = _BORDER_W + 2  # 부분 repaint 무효화 영역 여유(테두리 잔상 방지)
 _DRAG_THRESHOLD = 4  # 클릭(요소) vs 드래그(자유 사각형) 구분 임계(논리 px)
 
 _VK_ESCAPE = 0x1B
@@ -71,6 +75,55 @@ _kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 _kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 _kernel32.GetCurrentThreadId.argtypes = []
 _kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
+# ── 캡처 모드 십자 커서 (시스템 커서 전역 교체) ──────────────────────────────────
+_IDC_CROSS = 32515         # LoadCursorW 표준 십자선
+_IMAGE_CURSOR = 2          # CopyImage 타입
+_SPI_SETCURSORS = 0x0057   # 시스템 커서 일괄 재로드(복원)
+_SPIF_SENDCHANGE = 0x0002
+# 호버 시 자주 뜨는 OCR_* 시스템 커서 슬롯 — 전부 십자로 덮어 어떤 창 위에서든 십자 유지
+# (NORMAL/IBEAM/CROSS/UP/SIZE*/SIZEALL/NO/HAND/APPSTARTING)
+_OCR_SLOTS = (32512, 32513, 32515, 32516, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650)
+
+_user32.LoadCursorW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_user32.LoadCursorW.restype = ctypes.c_void_p
+_user32.CopyImage.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+_user32.CopyImage.restype = ctypes.c_void_p
+_user32.SetSystemCursor.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+_user32.SetSystemCursor.restype = wintypes.BOOL
+_user32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
+_user32.SystemParametersInfoW.restype = wintypes.BOOL
+
+_cursors_swapped = False
+
+
+def _swap_system_cursor_to_cross():
+    """OS 시스템 커서를 십자(IDC_CROSS)로 전역 교체. idempotent."""
+    global _cursors_swapped
+    if _cursors_swapped:
+        return
+    base = _user32.LoadCursorW(None, _IDC_CROSS)  # 공유 핸들 — 직접 넘기면 안 됨
+    if not base:
+        return
+    for slot in _OCR_SLOTS:
+        # SetSystemCursor는 넘긴 핸들의 소유권을 가져가 파괴하므로 슬롯마다 복사본 전달
+        copy = _user32.CopyImage(base, _IMAGE_CURSOR, 0, 0, 0)
+        if copy:
+            _user32.SetSystemCursor(copy, slot)
+    _cursors_swapped = True
+
+
+def _restore_system_cursors():
+    """레지스트리에서 시스템 커서 일괄 재로드해 복원. idempotent."""
+    global _cursors_swapped
+    if not _cursors_swapped:
+        return
+    _user32.SystemParametersInfoW(_SPI_SETCURSORS, 0, None, _SPIF_SENDCHANGE)
+    _cursors_swapped = False
+
+
+# 캡처 도중 예외로 죽어도 커서가 십자로 남지 않도록 안전망
+atexit.register(_restore_system_cursors)
 
 
 class _POINT(ctypes.Structure):
@@ -118,11 +171,19 @@ class _CaptureScreen(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setScreen(screen)
         self._screenshot: QPixmap | None = None
+        self._dimmed: QPixmap | None = None  # 마스크 사전합성(물리 픽셀, dpr=1) — 프레임당 알파합성 제거
         self._hl_local: QRect | None = None  # 하이라이트(이 화면 로컬 논리좌표) 또는 None
 
     def prepare(self):
         sg = self._screen.geometry()
         self._screenshot = self._screen.grabWindow(0, 0, 0, sg.width(), sg.height())
+        # 어두운 마스크를 입힌 딤 버전을 1회 미리 합성 → paintEvent에서 매 프레임 전체 알파합성 제거
+        dim = self._screenshot.copy()
+        dim.setDevicePixelRatio(1.0)  # 물리 픽셀 그대로 인덱싱
+        dp = QPainter(dim)
+        dp.fillRect(dim.rect(), QColor(0, 0, 0, _MASK_ALPHA))
+        dp.end()
+        self._dimmed = dim
         self.setGeometry(sg)
         self._hl_local = None
 
@@ -131,7 +192,7 @@ class _CaptureScreen(QWidget):
         self.raise_()
 
     def set_highlight_global(self, gr: QRect | None):
-        """논리 가상좌표 하이라이트를 이 화면 로컬로 변환해 저장(바뀌면 repaint)."""
+        """논리 가상좌표 하이라이트를 이 화면 로컬로 변환해 저장(바뀌면 부분 repaint)."""
         sg = self._screen.geometry()
         if gr is None:
             new = None
@@ -139,25 +200,43 @@ class _CaptureScreen(QWidget):
             inter = gr.intersected(sg)
             new = inter.translated(-sg.topLeft()) if not inter.isEmpty() else None
         if new != self._hl_local:
+            old = self._hl_local
             self._hl_local = new
-            self.update()
+            # 이전∪현재 하이라이트(테두리 여유 포함)만 무효화 → paintEvent가 그 띠만 다시 그림
+            dirty = self._dirty_union(old, new)
+            if dirty is None:
+                self.update()
+            else:
+                self.update(dirty)
+
+    def _dirty_union(self, old: QRect | None, new: QRect | None) -> QRect | None:
+        """이전·현재 하이라이트를 합쳐 테두리 여유를 더한 무효화 사각형(위젯 영역으로 클립)."""
+        rects = [r for r in (old, new) if r is not None and not r.isEmpty()]
+        if not rects:
+            return None
+        u = QRect(rects[0])
+        for r in rects[1:]:
+            u = u.united(r)
+        u = u.adjusted(-_INVAL_MARGIN, -_INVAL_MARGIN, _INVAL_MARGIN, _INVAL_MARGIN)
+        return u.intersected(self.rect())
 
     def paintEvent(self, event):
-        if self._screenshot is None:
+        if self._screenshot is None or self._dimmed is None:
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        # 1) 배경 스크린샷
-        p.drawPixmap(self.rect(), self._screenshot)
-        # 2) 어두운 마스크
-        p.fillRect(self.rect(), QColor(0, 0, 0, _MASK_ALPHA))
-        # 3) 하이라이트: 마스크 없는 원본 복원 + teal 테두리
+        dpr = self._screenshot.devicePixelRatio()
+        er = event.rect()  # 무효화된 논리 dirty 영역(Qt가 painter를 이 영역으로 클립)
+        # 1) 딤 배경: 사전합성된 _dimmed에서 dirty 영역만 (전체 알파합성 없음)
+        src = QRect(round(er.x() * dpr), round(er.y() * dpr),
+                    round(er.width() * dpr), round(er.height() * dpr))
+        p.drawPixmap(er, self._dimmed, src)
+        # 2) 하이라이트: 마스크 없는 원본 복원 + teal 테두리 (클립 덕에 dirty 밖은 안 그려짐)
         hl = self._hl_local
         if hl is not None and not hl.isEmpty():
-            dpr = self._screenshot.devicePixelRatio()
-            src = QRect(round(hl.x() * dpr), round(hl.y() * dpr),
-                        round(hl.width() * dpr), round(hl.height() * dpr))
-            p.drawPixmap(hl, self._screenshot, src)
+            hsrc = QRect(round(hl.x() * dpr), round(hl.y() * dpr),
+                         round(hl.width() * dpr), round(hl.height() * dpr))
+            p.drawPixmap(hl, self._screenshot, hsrc)
             pen = QPen(QColor(TEAL), _BORDER_W)
             p.setPen(pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
@@ -205,6 +284,7 @@ class CaptureOverlay:
         self._dragging = False
         self._need_drag_start = False
         self._drag_start: QPoint | None = None  # 드래그 시작 논리 좌표(첫 tick에서 샘플)
+        self._last_uia = 0.0  # hover UIA 호출 스로틀용 마지막 호출 시각(monotonic)
 
     def start(self):
         self._close_all()
@@ -214,12 +294,14 @@ class CaptureOverlay:
         self._dragging = False
         self._need_drag_start = False
         self._drag_start = None
+        self._last_uia = 0.0
         for screen in QApplication.screens():
             ov = _CaptureScreen(screen)
             ov.prepare()
             self._overlays.append(ov)
         for ov in self._overlays:
             ov.show_overlay()
+        _swap_system_cursor_to_cross()  # 캡처 모드 진입 시각 신호 — 십자 커서
         self._install_mouse_hook()
         self._timer.start()
 
@@ -254,6 +336,12 @@ class CaptureOverlay:
                 for ov in self._overlays:
                     ov.set_highlight_global(gr)
                 return
+        # hover 요소 hit-test: UIA ElementFromPoint는 무거우므로 최소 간격으로 스로틀
+        # (드래그 repaint는 매 tick=60fps로 돌고, UIA만 ~30fps로 떼어냄)
+        now = time.monotonic()
+        if now - self._last_uia < _UIA_MIN_INTERVAL:
+            return
+        self._last_uia = now
         gr = self._element_rect_logical()
         for ov in self._overlays:
             ov.set_highlight_global(gr)
@@ -409,6 +497,7 @@ class CaptureOverlay:
     def _close_all(self):
         self._timer.stop()
         self._uninstall_mouse_hook()
+        _restore_system_cursors()  # 십자 커서 → 기본 커서 복원
         for ov in self._overlays:
             try:
                 ov.close()
