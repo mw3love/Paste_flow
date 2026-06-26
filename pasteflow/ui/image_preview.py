@@ -26,6 +26,7 @@ PREVIEW_MAX_W = 640
 PREVIEW_MAX_H = 480
 _PREVIEW_MARGIN = 8
 _CASCADE_STEP = 24
+_CASCADE_NEAR = 150  # 이 거리(px) 안에 있는 기존 창만 cascade 대상으로 셈
 
 
 def compute_preview_pos(
@@ -91,11 +92,23 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
 
     # ------------------------------------------------------------------
     @classmethod
-    def open_new(cls, item: ClipboardItem, panel_geom: QRect) -> "ImagePreviewPopup":
-        cascade_offset = len(cls._instances) * _CASCADE_STEP
+    def open_new(cls, item: ClipboardItem, panel_geom: QRect,
+                 native: bool = False) -> "ImagePreviewPopup":
+        # native=True면 이미지를 원본 픽셀 크기(1:1)로 띄운다(화면 초과 시만 축소).
+        # 캡처(Alt+F2)→핀(Alt+F3) 시 "캡처한 크기 그대로" 보이게 하는 용도.
+        # cascade는 "총 창 수"가 아니라 "새 앵커(커서/패널) 근처에 이미 떠 있는 창 수"에만
+        # 비례한다. 핀(Alt+F3)은 매번 커서를 앵커로 쓰므로, 커서를 옮겨 새로 핀하면
+        # 근처 창이 0개 → offset 0 → 커서 바로 옆에 뜨고, 같은 자리에 연속 핀할 때만
+        # 어긋난다(겹침 방지). 패널 미리보기는 앵커가 고정이라 기존 cascade 그대로 유지.
+        base = panel_geom.topLeft()
+        near = sum(
+            1 for p in cls._instances
+            if (p.pos() - base).manhattanLength() < _CASCADE_NEAR
+        )
+        cascade_offset = near * _CASCADE_STEP
         popup = cls(item)
         cls._instances.append(popup)
-        popup.show_preview(panel_geom, cascade_offset)
+        popup.show_preview(panel_geom, cascade_offset, native=native)
         return popup
 
     @classmethod
@@ -195,16 +208,25 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
     # ------------------------------------------------------------------
     # 표시 + hug-zoom
     # ------------------------------------------------------------------
-    def show_preview(self, panel_geom: QRect, cascade_offset: int = 0):
+    def show_preview(self, panel_geom: QRect, cascade_offset: int = 0, native: bool = False):
         if not self._pixmap_ok:
             return
+        screen = QApplication.screenAt(panel_geom.center()) or QApplication.primaryScreen()
         sr = self._scene.sceneRect()
         z0 = 1.0
         if sr.width() > 0 and sr.height() > 0:
-            z0 = min(1.0, PREVIEW_MAX_W / sr.width(), PREVIEW_MAX_H / sr.height())
+            if native:
+                # 원본 크기(1:1) — 화면(여유 40px)을 넘을 때만 축소.
+                z0 = 1.0
+                if screen:
+                    avail = screen.availableGeometry()
+                    z0 = min(1.0,
+                             (avail.width() - 40) / sr.width(),
+                             (avail.height() - 40) / sr.height())
+            else:
+                z0 = min(1.0, PREVIEW_MAX_W / sr.width(), PREVIEW_MAX_H / sr.height())
         self._apply_zoom(z0)
 
-        screen = QApplication.screenAt(panel_geom.center()) or QApplication.primaryScreen()
         if screen:
             self.move(compute_preview_pos(panel_geom, self.size(), screen, cascade_offset))
         self.show()

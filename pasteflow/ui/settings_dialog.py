@@ -5,7 +5,7 @@
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,
-    QStyle, QFileDialog,
+    QStyle, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics
@@ -85,6 +85,26 @@ DIALOG_STYLE = f"""
         selection-color: {COLORS['text']};
         border: 1px solid {COLORS['surface1']};
         outline: none;
+    }}
+    QScrollArea {{
+        background: transparent;
+        border: none;
+    }}
+    QScrollBar:vertical {{
+        background: {COLORS['surface0']};
+        width: 10px;
+        border-radius: 5px;
+    }}
+    QScrollBar::handle:vertical {{
+        background: {COLORS['surface2']};
+        border-radius: 5px;
+        min-height: 28px;
+    }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+        height: 0;
+    }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+        background: transparent;
     }}
 """
 
@@ -242,24 +262,56 @@ class SettingsDialog(QDialog):
         self._setup_window()
         self._setup_ui()
         self._load_values()
+        self._finalize_size()
         self._models_fetched.connect(self._on_models_fetched)
 
     def _setup_window(self):
         self.setWindowTitle("PasteFlow 설정")
-        self.setFixedSize(360, 816)
+        # 고정 크기는 _finalize_size()에서 콘텐츠·화면에 맞춰 결정(스크롤 영역과 분리).
         self.setWindowFlags(
             Qt.WindowType.Dialog
             | Qt.WindowType.WindowCloseButtonHint
         )
         self.setStyleSheet(DIALOG_STYLE)
 
+    def _finalize_size(self):
+        """창 크기를 콘텐츠에 맞추되 화면을 넘지 않게 cap — 넘으면 스크롤.
+
+        폭: 콘텐츠가 실제로 필요로 하는 폭에 맞춘다(좁게 고정하면 폼·콤보가 뷰포트를
+        넘어 오른쪽이 잘렸다). 높이: 고정 높이로 압박하면 word-wrap 라벨의 heightForWidth가
+        매 repaint마다 진동해 드래그 시 떨렸다 — 스크롤 영역으로 분리해 해결.
+        """
+        content = self._content.sizeHint()
+        btn_h = self._btn_bar.sizeHint().height()
+        screen = self.screen() or QApplication.primaryScreen()
+        ag = screen.availableGeometry() if screen else None
+        avail_w = ag.width() if ag else 1200
+        avail_h = ag.height() if ag else 1000
+        w = min(content.width() + 16, avail_w - 80)   # +16: 세로 스크롤바 여유
+        h = min(content.height() + btn_h + 2, avail_h - 64)
+        self.setFixedSize(max(360, w), max(420, h))
+
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
+        # 콘텐츠를 스크롤 영역에 담아 창 높이와 분리(고정 높이가 콘텐츠를 압박해
+        # 드래그 시 떨리던 문제 해결). 버튼은 스크롤 밖에 둬 항상 노출.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(scroll, 1)
+
+        self._content = QWidget()
+        scroll.setWidget(self._content)
+        layout = QVBoxLayout(self._content)
         layout.setSpacing(8)
         layout.setContentsMargins(16, 16, 16, 16)
 
-        # ── 단축키 그룹 ──
-        hotkey_group = QGroupBox("단축키")
+        # ── 기능 단축키 그룹 (변경 가능) — 아래 기본 단축키 다음에 배치 ──
+        hotkey_group = QGroupBox("기능 단축키 (변경 가능)")
         hotkey_form = QFormLayout(hotkey_group)
 
         self._panel_toggle_hotkey = HotkeyEdit()
@@ -289,10 +341,8 @@ class SettingsDialog(QDialog):
         )
         hotkey_form.addRow("영역 캡처:", self._capture_hotkey)
 
-        layout.addWidget(hotkey_group)
-
-        # ── 단축키 안내 그룹 ──
-        info_group = QGroupBox("단축키 안내")
+        # ── 기본 단축키 그룹 (고정) — 복사/붙여넣기 등 변경 불가한 핵심 기능. 맨 위 배치 ──
+        info_group = QGroupBox("기본 단축키 (고정)")
         info_layout = QGridLayout(info_group)
         info_layout.setSpacing(5)
         info_layout.setContentsMargins(8, 8, 8, 8)
@@ -317,9 +367,16 @@ class SettingsDialog(QDialog):
             info_layout.addWidget(action_lbl, row, 0)
             info_layout.addWidget(key_lbl, row, 1)
 
+        # 배치 순서: 기본 단축키(고정) 먼저, 그다음 기능 단축키(변경 가능)
         layout.addWidget(info_group)
+        layout.addWidget(hotkey_group)
 
-        # ── OCR 설정 그룹 ──
+        _combo_style = (
+            f"QComboBox {{ background-color: {COLORS['surface0']}; color: {COLORS['text']}; "
+            f"border: 1px solid {COLORS['surface1']}; border-radius: 4px; padding: 4px 8px; }}"
+        )
+
+        # ── OCR 설정 그룹 (화면 텍스트 인식) ──
         ocr_group = QGroupBox("OCR (화면 텍스트 인식)")
         self._ocr_form = QFormLayout(ocr_group)
         ocr_form = self._ocr_form
@@ -327,35 +384,61 @@ class SettingsDialog(QDialog):
         self._ocr_hotkey = HotkeyEdit()
         ocr_form.addRow("OCR 단축키:", self._ocr_hotkey)
 
-        _combo_style = (
-            f"QComboBox {{ background-color: {COLORS['surface0']}; color: {COLORS['text']}; "
-            f"border: 1px solid {COLORS['surface1']}; border-radius: 4px; padding: 4px 8px; }}"
-        )
-
         self._ocr_engine_combo = QComboBox()
         self._ocr_engine_combo.setStyleSheet(_combo_style)
         self._ocr_engine_combo.addItem("Windows WinRT (무료)", "winrt")
         self._ocr_engine_combo.addItem("Google Gemini (API 키 필요)", "gemini")
         ocr_form.addRow("OCR 엔진:", self._ocr_engine_combo)
 
-        # API 백엔드 — Gemini일 때만 표시. 공식/게이트웨이별로 키·모델·캐시를 각각 보관해 동시 등록·자유 전환.
+        self._ocr_lang_combo = QComboBox()
+        self._ocr_lang_combo.setStyleSheet(_combo_style)
+        # 설치된 언어팩 동적 탐색 — winocr 미설치 시 기본 목록 폴백
+        try:
+            from pasteflow.ocr_engine import OcrEngine
+            supported = OcrEngine.winrt_supported_languages()
+        except Exception:
+            supported = []
+        if supported:
+            self._ocr_lang_combo.addItems(supported)
+        else:
+            self._ocr_lang_combo.addItems(["ko", "en-US", "ja", "zh-Hans"])
+            lang_hint = QLabel("winocr 미설치 또는 언어팩 미확인 — 기본 목록 표시")
+            lang_hint.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
+            ocr_form.addRow("", lang_hint)
+        ocr_form.addRow("인식 언어:", self._ocr_lang_combo)
+
+        layout.addWidget(ocr_group)
+
+        # ── AI 연동 그룹 (Gemini API) ──
+        # OCR(Gemini 엔진)과 AI 답변(우클릭 'AI에게 질문')이 동일 API를 공유하므로
+        # OCR 엔진 선택과 무관하게 항상 표시한다(WinRT OCR이어도 AI 답변엔 키가 필요).
+        ai_group = QGroupBox("AI 연동 (Gemini API)")
+        self._ai_form = QFormLayout(ai_group)
+        ai_form = self._ai_form
+
+        ai_desc = QLabel("OCR(Gemini 엔진)과 AI 답변(우클릭 'AI에게 질문')이 함께 사용합니다.")
+        ai_desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
+        ai_desc.setWordWrap(True)
+        ai_form.addRow(ai_desc)
+
+        # API 백엔드 — 공식/게이트웨이별로 키·모델·캐시를 각각 보관해 동시 등록·자유 전환.
         self._backend_label = QLabel("API 백엔드:")
         self._backend_combo = QComboBox()
         self._backend_combo.setStyleSheet(_combo_style)
         self._backend_combo.addItem("공식 Google AI Studio", "official")
         self._backend_combo.addItem("학교 게이트웨이", "gateway")
-        ocr_form.addRow(self._backend_label, self._backend_combo)
+        ai_form.addRow(self._backend_label, self._backend_combo)
 
         self._api_key_label = QLabel("API 키:")
         self._api_key_edit = QLineEdit()
         self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._api_key_edit.setPlaceholderText("Google AI Studio 키")
-        ocr_form.addRow(self._api_key_label, self._api_key_edit)
+        ai_form.addRow(self._api_key_label, self._api_key_edit)
 
         self._base_url_label = QLabel("Base URL:")
         self._base_url_edit = QLineEdit()
         self._base_url_edit.setPlaceholderText("예: https://factchat-cloud.mindlogic.ai/v1/gateway")
-        ocr_form.addRow(self._base_url_label, self._base_url_edit)
+        ai_form.addRow(self._base_url_label, self._base_url_edit)
 
         self._model_label = QLabel("모델명:")
         self._model_combo = QComboBox()
@@ -377,43 +460,19 @@ class SettingsDialog(QDialog):
         model_row.setSpacing(4)
         model_row.addWidget(self._model_combo, 1)
         model_row.addWidget(self._model_refresh_btn)
-        ocr_form.addRow(self._model_label, model_row)
+        ai_form.addRow(self._model_label, model_row)
 
         # 가장 저렴 모델 안내 힌트 — 콤보 목록 변경 시 _update_model_hint()로 갱신
         self._model_hint = QLabel()
-        self._model_hint.setStyleSheet(
-            f"color: {COLORS['subtext0']}; font-size: 11px;"
-        )
+        self._model_hint.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
         self._model_hint.setWordWrap(True)
-        ocr_form.addRow("", self._model_hint)
+        ai_form.addRow("", self._model_hint)
         self._update_model_hint()
 
         self._ocr_engine_combo.currentIndexChanged.connect(self._on_engine_changed)
         self._backend_combo.currentIndexChanged.connect(self._on_backend_changed)
 
-        self._ocr_lang_combo = QComboBox()
-        self._ocr_lang_combo.setStyleSheet(_combo_style)
-
-        # 설치된 언어팩 동적 탐색 — winocr 미설치 시 기본 목록 폴백
-        try:
-            from pasteflow.ocr_engine import OcrEngine
-            supported = OcrEngine.winrt_supported_languages()
-        except Exception:
-            supported = []
-
-        if supported:
-            self._ocr_lang_combo.addItems(supported)
-        else:
-            self._ocr_lang_combo.addItems(["ko", "en-US", "ja", "zh-Hans"])
-            lang_hint = QLabel("winocr 미설치 또는 언어팩 미확인 — 기본 목록 표시")
-            lang_hint.setStyleSheet(
-                f"color: {COLORS['subtext0']}; font-size: 11px;"
-            )
-            ocr_form.addRow("", lang_hint)
-
-        ocr_form.addRow("인식 언어:", self._ocr_lang_combo)
-
-        layout.addWidget(ocr_group)
+        layout.addWidget(ai_group)
 
         # ── 일반 설정 그룹 ──
         general_group = QGroupBox("일반")
@@ -455,9 +514,13 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(general_group)
 
-        # ── 버튼 ──
+        # 콘텐츠가 창보다 짧을 때 남는 세로 공간을 아래로 모아 그룹들이 자연 크기 유지
         layout.addStretch()
-        btn_layout = QHBoxLayout()
+
+        # ── 버튼 바 (스크롤 밖, 항상 노출) ──
+        self._btn_bar = QWidget()
+        btn_layout = QHBoxLayout(self._btn_bar)
+        btn_layout.setContentsMargins(16, 8, 16, 12)
         btn_layout.addStretch()
 
         cancel_btn = QPushButton("취소")
@@ -469,28 +532,13 @@ class SettingsDialog(QDialog):
         save_btn.clicked.connect(self._on_save)
         btn_layout.addWidget(save_btn)
 
-        layout.addLayout(btn_layout)
+        outer.addWidget(self._btn_bar)
 
     def _on_engine_changed(self, _idx: int):
+        # AI(Gemini) API 설정은 OCR 엔진과 무관하게 항상 표시(AI 답변이 늘 사용).
+        # OCR 엔진 선택은 '인식 언어'(WinRT 전용) 노출 여부에만 영향을 준다.
         engine = self._ocr_engine_combo.currentData()
-        is_gemini = engine == "gemini"
         is_winrt = engine == "winrt"
-        # 백엔드 콤보는 Gemini일 때만, base URL은 gateway 백엔드일 때만 노출 — _on_backend_changed가 후처리
-        self._backend_label.setVisible(is_gemini)
-        self._backend_combo.setVisible(is_gemini)
-        self._api_key_label.setVisible(is_gemini)
-        self._api_key_edit.setVisible(is_gemini)
-        self._model_label.setVisible(is_gemini)
-        self._model_combo.setVisible(is_gemini)
-        self._model_refresh_btn.setVisible(is_gemini)
-        if hasattr(self, "_model_hint"):
-            self._model_hint.setVisible(is_gemini)
-        if is_gemini:
-            # backend에 맞춰 키/URL/모델/캐시 채우고 base_url 노출 여부 결정
-            self._on_backend_changed(self._backend_combo.currentIndex())
-        else:
-            self._base_url_label.setVisible(False)
-            self._base_url_edit.setVisible(False)
         if hasattr(self, '_ocr_form'):
             self._ocr_form.setRowVisible(self._ocr_lang_combo, is_winrt)
 
@@ -578,8 +626,9 @@ class SettingsDialog(QDialog):
         engine = self._settings.get(self.KEY_OCR_ENGINE, "winrt")
         idx = self._ocr_engine_combo.findData(engine)
         self._ocr_engine_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        # key/url 텍스트는 _on_engine_changed → _on_backend_changed 체인으로 로드
-        self._on_engine_changed(self._ocr_engine_combo.currentIndex())
+        self._on_engine_changed(self._ocr_engine_combo.currentIndex())  # 인식 언어 노출
+        # AI(Gemini) API 입력란은 엔진과 무관하게 항상 backend 값으로 채운다.
+        self._on_backend_changed(self._backend_combo.currentIndex())
 
         lang = self._settings.get(self.KEY_OCR_LANG, "ko")
         idx = self._ocr_lang_combo.findText(lang)
@@ -769,30 +818,31 @@ class SettingsDialog(QDialog):
             self.KEY_AUTO_START: "1" if auto_start else "0",
             self.KEY_NOTIFY_ON_COPY: "1" if self._notify_copy_check.isChecked() else "0",
         }
-        if engine == "gemini":
-            backend = self._current_backend()
-            new_settings[self.KEY_OCR_GEMINI_BACKEND] = backend
+        # AI(Gemini) 설정은 OCR 엔진과 무관하게 항상 저장 — AI 답변이 늘 사용하므로
+        # WinRT OCR이어도 키/모델이 보존돼야 한다.
+        backend = self._current_backend()
+        new_settings[self.KEY_OCR_GEMINI_BACKEND] = backend
 
-            # 활성 backend의 현재 입력값 → self._settings에 반영(반대편 stash와 일관성 유지)
-            if backend == "gateway":
-                self._settings[self.KEY_OCR_GEMINI_API_KEY_GATEWAY] = self._api_key_edit.text()
-                self._settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
-                self._settings[self.KEY_OCR_GEMINI_MODEL_GATEWAY] = self._model_combo.currentText()
-            else:
-                self._settings[self.KEY_OCR_GEMINI_API_KEY_OFFICIAL] = self._api_key_edit.text()
-                self._settings[self.KEY_OCR_GEMINI_MODEL_OFFICIAL] = self._model_combo.currentText()
+        # 활성 backend의 현재 입력값 → self._settings에 반영(반대편 stash와 일관성 유지)
+        if backend == "gateway":
+            self._settings[self.KEY_OCR_GEMINI_API_KEY_GATEWAY] = self._api_key_edit.text()
+            self._settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
+            self._settings[self.KEY_OCR_GEMINI_MODEL_GATEWAY] = self._model_combo.currentText()
+        else:
+            self._settings[self.KEY_OCR_GEMINI_API_KEY_OFFICIAL] = self._api_key_edit.text()
+            self._settings[self.KEY_OCR_GEMINI_MODEL_OFFICIAL] = self._model_combo.currentText()
 
-            # 양쪽 backend의 키/모델/캐시를 모두 같이 전달 — 일부만 보내면 다른 쪽이 사라질 위험
-            for k in (
-                self.KEY_OCR_GEMINI_API_KEY_OFFICIAL,
-                self.KEY_OCR_GEMINI_API_KEY_GATEWAY,
-                self.KEY_OCR_GEMINI_BASE_URL,
-                self.KEY_OCR_GEMINI_MODEL_OFFICIAL,
-                self.KEY_OCR_GEMINI_MODEL_GATEWAY,
-                self.KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL,
-                self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY,
-            ):
-                if k in self._settings:
-                    new_settings[k] = self._settings[k]
+        # 양쪽 backend의 키/모델/캐시를 모두 같이 전달 — 일부만 보내면 다른 쪽이 사라질 위험
+        for k in (
+            self.KEY_OCR_GEMINI_API_KEY_OFFICIAL,
+            self.KEY_OCR_GEMINI_API_KEY_GATEWAY,
+            self.KEY_OCR_GEMINI_BASE_URL,
+            self.KEY_OCR_GEMINI_MODEL_OFFICIAL,
+            self.KEY_OCR_GEMINI_MODEL_GATEWAY,
+            self.KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL,
+            self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY,
+        ):
+            if k in self._settings:
+                new_settings[k] = self._settings[k]
         self.settings_changed.emit(new_settings)
         self.accept()

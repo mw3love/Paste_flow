@@ -131,6 +131,7 @@ class ToastNotification(QWidget):
         label.setStyleSheet(
             f"color: {COLORS['text']}; font-size: 18px; background: transparent;")
         layout.addWidget(label)
+        self._label = label  # set_message()로 본문 갱신 (지속형 진행 토스트용)
 
         if badge_lbl is not None and badge_position == "trailing":
             layout.addWidget(badge_lbl)
@@ -159,7 +160,21 @@ class ToastNotification(QWidget):
         self._anim_out.setEasingCurve(QEasingCurve.Type.InCubic)
         self._anim_out.finished.connect(self.close)
 
-        QTimer.singleShot(duration_ms, self._start_fade_out)
+        # duration_ms=0 → 지속형: 자동 fade-out 없음. 호출자가 dismiss()로 닫는다
+        # (AI 답변처럼 끝나는 시점을 미리 알 수 없는 작업의 진행 표시용).
+        if duration_ms > 0:
+            QTimer.singleShot(duration_ms, self._start_fade_out)
+
+    def set_message(self, text: str):
+        """본문 텍스트 갱신 + 폭 변화 반영 재배치 (지속형 진행 토스트)."""
+        if getattr(self, "_label", None) is not None and not self._closing:
+            self._label.setText(text)
+            self.adjustSize()
+            _stack._relayout()
+
+    def dismiss(self):
+        """지속형 토스트를 fade-out으로 닫는다 (idempotent)."""
+        self._start_fade_out()
 
     def move_to(self, pos: QPoint):
         """스택 매니저가 호출 — 표시 전이면 즉시 이동, 표시 중이면 슬라이드."""

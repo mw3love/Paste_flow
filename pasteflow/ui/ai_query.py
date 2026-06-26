@@ -6,10 +6,11 @@ Enter로 전송, Shift+Enter 줄바꿈, Esc 취소.
 """
 
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
+    QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
+    QPushButton,
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QCursor, QPixmap
 
 from pasteflow.ui.theme import COLORS, TEAL_HOVER
 
@@ -133,6 +134,24 @@ class AiQueryDialog(QDialog):
         btn_row.addWidget(cancel_btn)
         btn_row.addWidget(ask_btn)
         layout.addLayout(btn_row)
+
+    def showEvent(self, event):
+        """첫 표시 시 커서가 있는 모니터에서 커서 옆으로 이동(듀얼/트리플 모니터 대응).
+
+        QDialog 기본은 부모(패널) 중앙 정렬이라, 핀·미리보기를 다른 모니터에서
+        우클릭해 띄우면 패널 모니터에 떠버린다. 트리거 위치(커서)를 따라가게 한다.
+        """
+        super().showEvent(event)
+        if getattr(self, "_positioned", False):
+            return
+        self._positioned = True
+        cursor = QCursor.pos()
+        screen = QApplication.screenAt(cursor) or QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        w, h = self.width(), self.height()
+        x = min(max(cursor.x() + 16, avail.left()), avail.right() - w)
+        y = min(max(cursor.y() + 16, avail.top()), avail.bottom() - h)
+        self.move(x, y)
 
     def _try_submit(self):
         if self._editor.toPlainText().strip():
