@@ -15,7 +15,7 @@ from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, QSize, QEvent, pyqtSignal
 
 from pasteflow.ui.theme import (
     BASE as _BG, SURFACE0 as _SURFACE0, SURFACE1 as _BORDER, SURFACE2 as _SURFACE2,
-    TEXT as _TEXT, BLUE as _BLUE, PEACH as _PEACH,
+    TEXT as _TEXT, PEACH as _PEACH,
 )
 from pasteflow.models import ClipboardItem
 from pasteflow.ui.image_annotator import (
@@ -328,7 +328,8 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
     # 활성/비활성 테두리 (이미지 뷰 테두리 색)
     # ------------------------------------------------------------------
     def _apply_active_style(self, active: bool):
-        self.setStyleSheet(self._editor_stylesheet(_BLUE if active else _PEACH))
+        # 활성(보고 있는 창) = 코랄(주인공), 비활성 = 중립 회색(존재만 표시, 안 튐).
+        self.setStyleSheet(self._editor_stylesheet(_PEACH if active else _SURFACE2))
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange:

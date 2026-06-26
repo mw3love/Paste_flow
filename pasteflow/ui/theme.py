@@ -1,8 +1,8 @@
 """중립 차콜 다크 테마 — 전체 UI 공유 상수"""
 
-BASE     = "#1e1e1e"
-MANTLE   = "#181818"
-CRUST    = "#111111"
+BASE     = "#121212"
+MANTLE   = "#0a0a0a"
+CRUST    = "#050505"
 SURFACE0 = "#2d2d2d"
 SURFACE1 = "#3c3c3c"
 SURFACE2 = "#505050"

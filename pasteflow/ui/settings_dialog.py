@@ -13,77 +13,95 @@ from PyQt6.QtGui import QColor, QFontMetrics
 from pasteflow.ui.theme import COLORS, TEAL_HOVER
 
 
+# ── 옵션창 전용 팔레트 (전역 다크 테마와 분리 — 폼 가독성·정돈 우선) ──────────────
+# 깊이: 페이지(가장 어두움) → 카드(그룹박스) → 보조버튼. 입력칸은 카드에 '박힌' 느낌으로
+# 페이지색을 써서 카드와 또렷이 구분(흐릿한 동색 회색 3개로 뭉개지지 않게). 강조색은
+# teal 하나로 통일(저장 버튼·체크·포커스). (의도된 분리 — COLORS['base']로 되돌리지 말 것)
+_PAGE = "#1a1a1a"       # 다이얼로그 배경
+_CARD = "#262626"       # 그룹박스(카드) 면
+_INSET = "#1a1a1a"      # 입력칸/체크박스 — 카드에 박힌 듯(페이지색과 동일)
+_LINE = "#3a3a3a"       # 테두리·구분선·스크롤바
+_BTN = "#303030"        # 보조 버튼(카드보다 살짝 올라옴)
+_BTN_HOVER = "#3a3a3a"
+_TXT = "#d4d4d4"        # 본문 글자
+_TITLE = "#9aa0b0"      # 그룹 제목(차분한 회청)
+
 DIALOG_STYLE = f"""
     QDialog {{
-        background-color: {COLORS['base']};
-        color: {COLORS['text']};
+        background-color: {_PAGE};
+        color: {_TXT};
     }}
     QGroupBox {{
-        background-color: {COLORS['mantle']};
-        border: 1px solid {COLORS['surface1']};
+        background-color: {_CARD};
+        border: 1px solid {_LINE};
         border-radius: 8px;
-        margin-top: 12px;
-        padding: 12px 8px 8px 8px;
+        margin-top: 6px;
+        padding: 32px 14px 14px 14px;
         font-weight: 600;
-        color: {COLORS['subtext0']};
     }}
     QGroupBox::title {{
-        subcontrol-origin: margin;
-        left: 12px;
-        padding: 0 4px;
+        subcontrol-origin: padding;
+        subcontrol-position: top left;
+        left: 14px;
+        top: 9px;
+        padding: 0;
+        color: {_TITLE};
+        background: transparent;
     }}
     QLabel {{
-        color: {COLORS['text']};
+        color: {_TXT};
+        background: transparent;
     }}
     QLineEdit, QSpinBox {{
-        background-color: {COLORS['surface0']};
-        color: {COLORS['text']};
-        border: 1px solid {COLORS['surface1']};
-        border-radius: 4px;
-        padding: 4px 8px;
+        background-color: {_INSET};
+        color: {_TXT};
+        border: 1px solid {_LINE};
+        border-radius: 5px;
+        padding: 5px 8px;
     }}
     QLineEdit:focus, QSpinBox:focus {{
-        border-color: {COLORS['blue']};
+        border-color: {COLORS['teal']};
     }}
     QCheckBox {{
-        color: {COLORS['text']};
-        spacing: 6px;
+        color: {_TXT};
+        spacing: 7px;
+        background: transparent;
     }}
     QCheckBox::indicator {{
         width: 16px;
         height: 16px;
-        border-radius: 3px;
-        border: 1px solid {COLORS['surface1']};
-        background-color: {COLORS['surface0']};
+        border-radius: 4px;
+        border: 1px solid {_LINE};
+        background-color: {_INSET};
     }}
     QCheckBox::indicator:checked {{
         background-color: {COLORS['teal']};
         border-color: {COLORS['teal']};
     }}
     QPushButton {{
-        background-color: {COLORS['surface0']};
-        color: {COLORS['text']};
-        border: 1px solid {COLORS['surface1']};
+        background-color: {_BTN};
+        color: {_TXT};
+        border: none;
         border-radius: 6px;
         padding: 6px 16px;
     }}
     QPushButton:hover {{
-        background-color: {COLORS['surface1']};
+        background-color: {_BTN_HOVER};
     }}
     QPushButton#saveBtn {{
         background-color: {COLORS['teal']};
-        color: {COLORS['base']};
+        color: {_PAGE};
         font-weight: 600;
     }}
     QPushButton#saveBtn:hover {{
         background-color: {TEAL_HOVER};
     }}
     QComboBox QAbstractItemView {{
-        background-color: {COLORS['surface0']};
-        color: {COLORS['text']};
-        selection-background-color: {COLORS['surface1']};
-        selection-color: {COLORS['text']};
-        border: 1px solid {COLORS['surface1']};
+        background-color: {_CARD};
+        color: {_TXT};
+        selection-background-color: {_BTN};
+        selection-color: {_TXT};
+        border: 1px solid {_LINE};
         outline: none;
     }}
     QScrollArea {{
@@ -91,14 +109,17 @@ DIALOG_STYLE = f"""
         border: none;
     }}
     QScrollBar:vertical {{
-        background: {COLORS['surface0']};
+        background: transparent;
         width: 10px;
         border-radius: 5px;
     }}
     QScrollBar::handle:vertical {{
-        background: {COLORS['surface2']};
+        background: {_LINE};
         border-radius: 5px;
         min-height: 28px;
+    }}
+    QScrollBar::handle:vertical:hover {{
+        background: #4a4a4a;
     }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
         height: 0;
@@ -145,16 +166,16 @@ class HotkeyEdit(QPushButton):
     def _apply_style(self, listening: bool):
         if listening:
             self.setStyleSheet(
-                f"QPushButton {{ background-color: {COLORS['surface1']}; "
+                f"QPushButton {{ background-color: {_INSET}; "
                 f"color: {COLORS['teal']}; border: 1px solid {COLORS['teal']}; "
-                f"border-radius: 4px; padding: 4px 8px; text-align: left; }}"
+                f"border-radius: 5px; padding: 5px 8px; text-align: left; }}"
             )
         else:
             self.setStyleSheet(
-                f"QPushButton {{ background-color: {COLORS['surface0']}; "
-                f"color: {COLORS['text']}; border: 1px solid {COLORS['surface1']}; "
-                f"border-radius: 4px; padding: 4px 8px; text-align: left; }}"
-                f"QPushButton:hover {{ background-color: {COLORS['surface1']}; }}"
+                f"QPushButton {{ background-color: {_INSET}; "
+                f"color: {_TXT}; border: 1px solid {_LINE}; "
+                f"border-radius: 5px; padding: 5px 8px; text-align: left; }}"
+                f"QPushButton:hover {{ border-color: {COLORS['teal']}; }}"
             )
 
     def keyPressEvent(self, event):
@@ -372,8 +393,9 @@ class SettingsDialog(QDialog):
         layout.addWidget(hotkey_group)
 
         _combo_style = (
-            f"QComboBox {{ background-color: {COLORS['surface0']}; color: {COLORS['text']}; "
-            f"border: 1px solid {COLORS['surface1']}; border-radius: 4px; padding: 4px 8px; }}"
+            f"QComboBox {{ background-color: {_INSET}; color: {_TXT}; "
+            f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
+            f"QComboBox:focus {{ border-color: {COLORS['teal']}; }}"
         )
 
         # ── OCR 설정 그룹 (화면 텍스트 인식) ──

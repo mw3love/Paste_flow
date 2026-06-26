@@ -21,7 +21,7 @@ from PyQt6.QtGui import (
 
 from pasteflow.ui.theme import (
     BASE as _BG, SURFACE0 as _SURFACE0, SURFACE1 as _BORDER, SURFACE2 as _SURFACE2,
-    TEXT as _TEXT, BLUE as _BLUE, PEACH as _PEACH, RED as _RED, GREEN as _GREEN,
+    TEXT as _TEXT, BLUE as _BLUE, PEACH as _PEACH,
 )
 from pasteflow.ui.image_preview import (
     compute_preview_pos, _CASCADE_STEP, _dark_menu_style,
@@ -45,10 +45,25 @@ _MD_MAX_H_FRAC = 0.8      # 답변 창 높이 상한(화면 비율) — 초과�
 _CHROME_W = 4 + 16
 _CHROME_H = 4 + 16
 
-# 형광펜 — 코랄 배경 + 채도 높은 빨강 글자(사용자 지정). 모델 서식 색은 _apply_marks가
-# 매번 초기화 후 재적용하므로 형광펜 글자색이 그 위를 덮는다.
-_HL_BG = QColor(255, 130, 95, 38)   # 코랄(아주 연하게) — 빨강 글자가 강조를 담당
-_HL_FG = QColor(255, 70, 70)        # 선명한 빨강 글자
+# 형광펜 — 어두운 적갈색 칩(불투명) + 선명한 빨강 글자. 예전 연코랄 배경은 빨강 글자와
+# 같은 계열이라 대비가 죽어 뿌옇게 보였다(빨강 위 빨강). 어두운 배경으로 뒤집어 글자를
+# 또렷하게 한다. 배경은 패널 중립 회색(#1e1e1e)과 구분되도록 살짝 붉은기를 둬, '그림자'가
+# 아니라 '의도된 강조'로 읽히게 한다. 모델 서식 색은 _apply_marks가 매번 초기화 후
+# 재적용하므로 형광펜 글자색이 그 위를 덮는다.
+_HL_BG = QColor(40, 20, 20)         # 어두운 적갈색 칩(#281414, 불투명) — 패널 회색과 구분
+_HL_FG = QColor(255, 90, 90)        # 선명한 빨강 글자(#ff5a5a) — 어두운 칩 위 고대비
+
+# 마크다운(AI 답변) 요소별 글자색 — 앱 전역 액센트(theme)와 분리해 답변 가독성에 맞춰
+# 독립 튜닝한다(여기를 바꿔도 버튼·테두리 색은 안 변함). 백틱/코드는 사용자 형광펜(빨강)과
+# 확실히 구분되도록 청록(teal)을 쓰고(핑크·빨강 회피), 볼드 코랄은 채도를 조금 올렸다.
+_MD_HEADING = "#89b4fa"   # 제목 — 파랑
+_MD_CODE    = "#38bdf8"   # 백틱/코드 — 파랑(형광펜 빨강과 대비). 폰트는 본문으로 통일(아래)
+_MD_BOLD    = "#ff9e5e"   # 볼드 — 코랄(채도↑, dual subtitle 느낌)
+_MD_ITALIC  = "#a6e3a1"   # 기울임 — 초록
+
+# 본문 폰트 패밀리. 코드(백틱) 구간은 Qt가 모노스페이스로 그려 본문과 폰트가 튀므로,
+# 색·밑줄만 강조로 남기고 폰트는 이 본문 폰트로 되돌려 다른 텍스트와 통일한다.
+_FONT_FAMILY = "맑은 고딕"
 # 세로 스크롤바 폭 — 마크다운 답변이 넘칠 때 텍스트를 가리지 않게 폭 보정.
 _SCROLLBAR_W = 12
 
@@ -61,8 +76,16 @@ _MD_BLOCK_MARGIN = 7.0  # 문단 사이 여백(px)
 # 옮겨('**X**') 어디서든 정상 렌더되게 한다. 직선/곡선 따옴표 모두 처리.
 _QUOTED_BOLD_RE = re.compile(r"""\*\*(['"‘’“”])(.+?)\1\*\*""")
 
+# Qt 마크다운은 볼드와 인라인코드(백틱)의 '중첩'을 렌더하지 못해 ** 가 글자로 노출된다
+# (실측 확인: `**X**`·**`X`** 둘 다 별표 잔존). 중첩을 풀어 순수 코드(`X`)로 만들고,
+# 코드 스팬 자체를 볼드로 그려(_apply_marks) '볼드+백틱' 효과를 포맷으로 살린다.
+_CODE_BOLD_RE = re.compile(r"`\*\*(.+?)\*\*`")     # `**X**` → `X`
+_BOLD_CODE_RE = re.compile(r"\*\*(`[^`]+`)\*\*")   # **`X`** → `X`
+
 
 def _fix_markdown_emphasis(text: str) -> str:
+    text = _CODE_BOLD_RE.sub(r"`\1`", text)
+    text = _BOLD_CODE_RE.sub(r"\1", text)
     return _QUOTED_BOLD_RE.sub(lambda m: f"{m.group(1)}**{m.group(2)}**{m.group(1)}", text)
 
 
@@ -114,6 +137,8 @@ class TextPreviewPopup(QWidget):
         self._markdown = markdown
         self._raw_text = ""  # 마크다운 측정용 원문 (show_preview에서 채움)
         self._marks: list[tuple[int, int]] = []  # 형광펜 범위(문서 position 좌표)
+        # 마크다운 요소(제목/볼드/코드/기울임) 스팬 — setMarkdown 직후 1회만 수집(아래).
+        self._syntax_spans: list[tuple[int, int, str, bool]] = []
         self.setObjectName("popup_root")
         self.setWindowFlags(
             Qt.WindowType.Tool
@@ -290,6 +315,9 @@ class TextPreviewPopup(QWidget):
             self._editor.setMarkdown(text)
             self._apply_block_spacing(self._editor.document())  # 줄간격·문단 여백
             self._set_list_bullets(self._editor.document())     # ○/ㅇ → •
+            # 코드 색칠이 fontFixedPitch를 끄므로(폰트 통일) 재탐지가 깨진다 → 변형 전에
+            # 1회만 수집해 두고 _apply_marks가 그 위치로 재적용한다(형광펜 시 색 증발 방지).
+            self._syntax_spans = self._collect_syntax_spans()
             self._apply_marks()  # 모델 색 + 형광펜
         else:
             self._raw_text = text
@@ -351,8 +379,9 @@ class TextPreviewPopup(QWidget):
     # ------------------------------------------------------------------
 
     def _apply_active_style(self, active: bool):
-        """비활성 시 주황, 활성(클릭) 시 파랑. 컨테이너에 적용해야 자식 위젯에 안 가려짐."""
-        border = _BLUE if active else _PEACH
+        """활성(보고 있는 창) = 코랄(주인공), 비활성 = 중립 회색(존재만 표시, 안 튐).
+        컨테이너에 적용해야 자식 위젯에 안 가려짐."""
+        border = _PEACH if active else _SURFACE2
         self._container.setStyleSheet(f"""
             QWidget#popup_container {{
                 background-color: {_BG};
@@ -383,19 +412,25 @@ class TextPreviewPopup(QWidget):
         size = max(1, round(base * self._scale_factor))
         font = QFont(self._editor.font())
         font.setPixelSize(size)
+        # 폰트 패밀리·힌팅을 명시해 한글 글자 번짐(뿌옇게 보임)을 줄인다. Qt 기본
+        # CJK 폴백 글꼴은 힌팅이 약해 작은 크기에서 흐려지므로 맑은 고딕으로 고정하고,
+        # PreferFullHinting으로 글자를 픽셀 그리드에 스냅시켜 가장자리를 또렷하게 한다.
+        font.setFamily(_FONT_FAMILY)
+        font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
         self._editor.setFont(font)
         # 폰트 변경 시 document margin도 재설정 (Qt가 setFont에서 reset 하는 경우 대비)
         self._editor.document().setDocumentMargin(0)
 
-    def _colorize_markdown(self):
-        """setMarkdown이 남긴 서식(제목/굵게/코드/기울임)에 색을 입혀 시인성을 높인다.
+    def _collect_syntax_spans(self) -> list[tuple[int, int, str, bool]]:
+        """setMarkdown이 남긴 서식(제목/굵게/코드/기울임) 스팬을 수집한다.
 
-        전경색(글자색)만 바꾼다 — 배경색은 사용자 형광펜 전용 채널로 비워둔다.
-        포맷 변경이 fragment 재분할을 유발할 수 있어 먼저 (위치,길이,색)을 모두
-        수집한 뒤 일괄 적용한다.
+        반드시 **서식 변형 전**(setMarkdown 직후)에 1회 호출해야 한다. 코드 색칠 시
+        fontFixedPitch를 끄기 때문에, 매번 재탐지하면 두 번째부터 코드를 못 찾는다.
+        수집 결과(위치·길이·색·밑줄여부)는 _syntax_spans에 저장돼 _apply_marks가
+        형광펜 토글마다 같은 위치로 재적용한다(텍스트 불변이라 position 안정).
         """
         doc = self._editor.document()
-        spans = []  # (position, length, color)
+        spans: list[tuple[int, int, str, bool]] = []
         blk = doc.begin()
         while blk.isValid():
             heading = blk.blockFormat().headingLevel()
@@ -404,28 +439,23 @@ class TextPreviewPopup(QWidget):
                 frag = it.fragment()
                 if frag.isValid():
                     cf = frag.charFormat()
+                    underline = False
                     if heading > 0:
-                        color = _BLUE
+                        color = _MD_HEADING
                     elif cf.fontFixedPitch():
-                        color = _RED
+                        color = _MD_CODE
+                        underline = True  # 백틱/코드 = 밑줄 + 볼드(_apply_marks에서)
                     elif cf.fontWeight() >= 700:
-                        color = _PEACH
+                        color = _MD_BOLD
                     elif cf.fontItalic():
-                        color = _GREEN
+                        color = _MD_ITALIC
                     else:
                         color = None
                     if color:
-                        spans.append((frag.position(), frag.length(), color))
+                        spans.append((frag.position(), frag.length(), color, underline))
                 it += 1
             blk = blk.next()
-
-        for pos, length, color in spans:
-            cur = QTextCursor(doc)
-            cur.setPosition(pos)
-            cur.setPosition(pos + length, QTextCursor.MoveMode.KeepAnchor)
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor(color))
-            cur.mergeCharFormat(fmt)
+        return spans
 
     # ------------------------------------------------------------------
     # 형광펜(하이라이트) — 좌드래그 선택 → 배경색 토글. 클릭=해당 마크 해제.
@@ -480,9 +510,23 @@ class TextPreviewPopup(QWidget):
         base = QTextCharFormat()
         base.setForeground(QColor(_TEXT))
         base.setBackground(QColor(0, 0, 0, 0))
+        base.setFontUnderline(False)  # 이전 밑줄 제거 — 마크다운 색/형광펜이 다시 입힘
         whole.mergeCharFormat(base)
 
-        self._colorize_markdown()
+        # 마크다운 요소 색 재적용 (수집은 setMarkdown 직후 1회 — _syntax_spans).
+        for pos, length, color, underline in self._syntax_spans:
+            cur = QTextCursor(doc)
+            cur.setPosition(pos)
+            cur.setPosition(pos + length, QTextCursor.MoveMode.KeepAnchor)
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(color))
+            if underline:  # 코드(백틱) = 파랑 + 밑줄 + 볼드 + 본문폰트(모노스페이스 튐 방지)
+                fmt.setFontUnderline(True)
+                fmt.setUnderlineColor(QColor(color))
+                fmt.setFontFixedPitch(False)
+                fmt.setFontFamily(_FONT_FAMILY)
+                fmt.setFontWeight(QFont.Weight.Bold)
+            cur.mergeCharFormat(fmt)
 
         for s, e in self._marks:
             c = QTextCursor(doc)
@@ -491,6 +535,8 @@ class TextPreviewPopup(QWidget):
             hf = QTextCharFormat()
             hf.setBackground(_HL_BG)
             hf.setForeground(_HL_FG)
+            hf.setFontUnderline(True)        # 사용자 형광펜 = 빨강 밑줄
+            hf.setUnderlineColor(_HL_FG)
             c.mergeCharFormat(hf)
 
     @staticmethod
