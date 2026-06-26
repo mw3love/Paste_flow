@@ -6,7 +6,7 @@ _ToastStack 싱글턴이 활성 토스트를 우하단 코너 기준으로 위�
 """
 from PyQt6.QtWidgets import QWidget, QLabel, QHBoxLayout
 from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint
-from PyQt6.QtGui import QGuiApplication, QPainter, QColor, QPen, QPixmap
+from PyQt6.QtGui import QGuiApplication, QPainter, QColor, QPen, QPixmap, QCursor
 
 from pasteflow.ui.theme import COLORS
 
@@ -29,6 +29,8 @@ class _ToastStack:
         self._toasts: list["ToastNotification"] = []
         # 우하단의 다른 위젯(붙여넣기 HUD 등)을 위해 비워둘 하단 여백 (px)
         self._bottom_reserved = 0
+        # 스택이 떠 있는 동안 고정할 모니터 (첫 토스트 등록 시 커서 모니터로 잡음)
+        self._screen = None
 
     def set_bottom_reserved(self, px: int):
         """하단 여백을 설정 — 토스트 스택이 그 위로 쌓이도록 한다."""
@@ -38,6 +40,10 @@ class _ToastStack:
             self._relayout()
 
     def add(self, toast: "ToastNotification"):
+        # 스택이 비어 있다가 새로 생기는 순간의 커서 모니터에 고정 (멀티모니터 대응) —
+        # 표시 중 다른 모니터로 커서가 가도 떠 있는 토스트가 튀지 않게 한다.
+        if not self._toasts:
+            self._screen = QGuiApplication.screenAt(QCursor.pos())
         self._toasts.append(toast)
         # 최대 개수 초과 → 가장 오래된 것을 동기 제거 후 즉시 닫음
         while len(self._toasts) > _MAX_STACK:
@@ -48,11 +54,15 @@ class _ToastStack:
     def remove(self, toast: "ToastNotification"):
         if toast in self._toasts:
             self._toasts.remove(toast)
+            if not self._toasts:
+                self._screen = None
             self._relayout()
 
     def _relayout(self):
-        """우하단 코너 기준으로 모든 토스트를 다시 배치 (최신 = 맨 아래)."""
-        screen = QGuiApplication.primaryScreen().availableGeometry()
+        """커서 모니터(고정) 우하단 기준으로 모든 토스트를 다시 배치 (최신 = 맨 아래)."""
+        scr = self._screen or QGuiApplication.screenAt(QCursor.pos()) \
+            or QGuiApplication.primaryScreen()
+        screen = scr.availableGeometry()
         x_right = screen.right() - _SCREEN_MARGIN
         y = screen.bottom() - _SCREEN_MARGIN - self._bottom_reserved
         # 리스트 끝(최신)이 코너에 오도록 역순으로 아래→위 배치
@@ -76,22 +86,34 @@ class ToastNotification(QWidget):
     def __init__(self, message: str, duration_ms: int = 3000,
                  icon: str = "✓", badge: str = None,
                  badge_position: str = "trailing",
-                 image_path: str = None):
+                 image_path: str = None,
+                 anchor: QPoint = None, center: bool = False):
         """
         badge_position: "leading"(아이콘과 본문 사이) | "trailing"(본문 뒤, 기본)
         image_path: 주어지면 아이콘과 본문 사이에 그 이미지의 썸네일을 표시
                     (이미지→경로 붙여넣기 시 "의도한 이미지 맞나" 시각 확인용).
                     로드 실패 시 조용히 생략.
+        anchor: 주어지면 우하단 스택 대신 그 지점을 기준으로 배치하고 클릭을 아래 앱으로
+                통과시킨다(작업 방해 0). 멀티모니터에서 시선이 닿는 모니터에 진행/결과를
+                표시하기 위한 모드(OCR·AI 진행 칩).
+        center: anchor와 함께 쓰며 True면 그 지점(커서) 옆이 아니라 **그 지점이 속한
+                모니터 정중앙**에 배치한다(예측 가능·가장자리 잘림 없음). False면 +16px 옆.
         """
-        super().__init__(None, Qt.WindowType.FramelessWindowHint |
-                         Qt.WindowType.WindowStaysOnTopHint |
-                         Qt.WindowType.Tool |
-                         Qt.WindowType.BypassWindowManagerHint)
+        flags = (Qt.WindowType.FramelessWindowHint |
+                 Qt.WindowType.WindowStaysOnTopHint |
+                 Qt.WindowType.Tool |
+                 Qt.WindowType.BypassWindowManagerHint)
+        # 커서 앵커 모드: 칩 아래 앱으로 클릭을 통과시켜 작업을 방해하지 않는다.
+        if anchor is not None:
+            flags |= Qt.WindowType.WindowTransparentForInput
+        super().__init__(None, flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
         self._closing = False
         self._pos_anim = None
+        self._anchor = anchor  # None=우하단 스택, QPoint=앵커 기준 배치
+        self._center = center  # True면 앵커 모니터 정중앙, False면 앵커 옆 +16px
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(24, 18, 24, 18)
@@ -140,8 +162,11 @@ class ToastNotification(QWidget):
         self.setWindowOpacity(0.0)
         self.adjustSize()
 
-        # 스택에 등록 → 위치 결정 (show 전이라 본인은 직접 배치, 기존 토스트는 위로 슬라이드)
-        _stack.add(self)
+        # 위치 결정 — 앵커 모드는 직접 배치(스택 독립), 아니면 우하단 스택 등록.
+        if anchor is not None:
+            self._place_anchored()
+        else:
+            _stack.add(self)
         self.show()
 
         # fade-in
@@ -170,7 +195,29 @@ class ToastNotification(QWidget):
         if getattr(self, "_label", None) is not None and not self._closing:
             self._label.setText(text)
             self.adjustSize()
-            _stack._relayout()
+            if self._anchor is not None:
+                self._place_anchored()
+            else:
+                _stack._relayout()
+
+    def _place_anchored(self):
+        """앵커 기준 배치 — center=True면 앵커 모니터 정중앙, 아니면 앵커 옆 +16px(경계 반전)."""
+        screen = QGuiApplication.screenAt(self._anchor) or QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        w, h = self.width(), self.height()
+        if self._center:
+            x = avail.center().x() - w // 2
+            y = avail.center().y() - h // 2
+        else:
+            x = self._anchor.x() + 16
+            y = self._anchor.y() + 16
+            if x + w > avail.right():
+                x = self._anchor.x() - w - 16
+            if y + h > avail.bottom():
+                y = self._anchor.y() - h - 16
+        x = max(avail.left(), min(x, avail.right() - w))
+        y = max(avail.top(), min(y, avail.bottom() - h))
+        self.move(x, y)
 
     def dismiss(self):
         """지속형 토스트를 fade-out으로 닫는다 (idempotent)."""

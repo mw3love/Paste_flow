@@ -911,9 +911,12 @@ class PasteFlowApp:
         `image_png`가 주어지면 이미지를 멀티모달로 함께 전송(시각 질의).
         결과/에러는 `_bridge.ai_done` / `_bridge.ai_error` 시그널로 메인 스레드에 통지.
         """
-        # 지속형 진행 토스트 + 경과 시간 카운터 시작 (답이 올 때까지 유지).
+        # 진행 칩 + 경과 시간 카운터 시작 (답이 올 때까지 유지).
         # "다운된 게 아니라 작업 중"임을 시각적으로 알린다(비스트리밍이라 %는 불가).
-        self._start_ai_progress()
+        # 앵커는 질문 제출 시점 커서(_ai_anchor) — 그 모니터 정중앙에 진행→답변을 모두 표시.
+        from PyQt6.QtGui import QCursor
+        anchor = self._ai_anchor.topLeft() if getattr(self, "_ai_anchor", None) else QCursor.pos()
+        self._start_cursor_progress("AI 생각 중…", "🤖", anchor)
 
         def _run():
             try:
@@ -929,43 +932,66 @@ class PasteFlowApp:
 
         threading.Thread(target=_run, daemon=True, name="ai-worker").start()
 
-    def _start_ai_progress(self):
-        """AI 질의 진행 표시 — 지속형 토스트 + 0.5초 간격 경과 시간/애니메이션 갱신."""
+    def _start_cursor_progress(self, prefix: str, icon: str, anchor):
+        """진행 칩 — 지속형 토스트(클릭 통과) + 0.5초 간격 경과시간/점 애니메이션.
+
+        OCR·AI 질의가 공유. anchor(QPoint)로 **커서가 있는 모니터**를 고른 뒤 그 모니터
+        정중앙에 표시한다(예측 가능·가장자리 잘림 없음). 예전엔 주 모니터 우하단 고정이라
+        보조 모니터 작업 시 시선을 돌려야 했음.
+        """
         import time
         from pasteflow.ui.toast import ToastNotification
 
-        self._stop_ai_progress()  # 중복 질의 대비 이전 진행 토스트 정리
-        self._ai_progress_toast = ToastNotification(
-            "AI 생각 중… 0:00 ●··", icon="🤖", duration_ms=0)
-        self._ai_progress_start = time.monotonic()
-        self._ai_progress_dots = 1
-        self._ai_progress_timer = QTimer()
-        self._ai_progress_timer.setInterval(500)
-        self._ai_progress_timer.timeout.connect(self._tick_ai_progress)
-        self._ai_progress_timer.start()
+        self._stop_cursor_progress()  # 중복 대비 이전 진행 칩 정리
+        self._progress_prefix = prefix
+        self._progress_toast = ToastNotification(
+            f"{prefix} 0:00 ●··", icon=icon, duration_ms=0, anchor=anchor, center=True)
+        self._progress_start = time.monotonic()
+        self._progress_dots = 1
+        self._progress_timer = QTimer()
+        self._progress_timer.setInterval(500)
+        self._progress_timer.timeout.connect(self._tick_cursor_progress)
+        self._progress_timer.start()
 
-    def _tick_ai_progress(self):
+    def _tick_cursor_progress(self):
         import time
 
-        toast = getattr(self, "_ai_progress_toast", None)
+        toast = getattr(self, "_progress_toast", None)
         if toast is None:
             return
-        elapsed = int(time.monotonic() - self._ai_progress_start)
+        elapsed = int(time.monotonic() - self._progress_start)
         m, s = divmod(elapsed, 60)
-        self._ai_progress_dots = (self._ai_progress_dots % 3) + 1
-        dots = "●" * self._ai_progress_dots + "·" * (3 - self._ai_progress_dots)
-        toast.set_message(f"AI 생각 중… {m}:{s:02d} {dots}")
+        self._progress_dots = (self._progress_dots % 3) + 1
+        dots = "●" * self._progress_dots + "·" * (3 - self._progress_dots)
+        toast.set_message(f"{self._progress_prefix} {m}:{s:02d} {dots}")
 
-    def _stop_ai_progress(self):
-        """진행 토스트·타이머 정리 (idempotent — 답변/에러 도착 시 호출)."""
-        timer = getattr(self, "_ai_progress_timer", None)
+    def _stop_cursor_progress(self):
+        """진행 칩·타이머 즉시 정리 (idempotent — 결과/에러 도착 시 호출)."""
+        timer = getattr(self, "_progress_timer", None)
         if timer is not None:
             timer.stop()
-            self._ai_progress_timer = None
-        toast = getattr(self, "_ai_progress_toast", None)
+            self._progress_timer = None
+        toast = getattr(self, "_progress_toast", None)
         if toast is not None:
             toast.dismiss()
-            self._ai_progress_toast = None
+            self._progress_toast = None
+
+    def _finish_cursor_progress(self, message: str, hold_ms: int = 1500) -> bool:
+        """진행 칩을 결과 메시지(✓ 등)로 전환 후 잠시 뒤 fade. 같은 칩 재사용으로 부드럽게 전환.
+
+        진행 칩이 없으면(이미 정리됨) False 반환 — 호출자가 일반 토스트로 폴백할 수 있다.
+        """
+        timer = getattr(self, "_progress_timer", None)
+        if timer is not None:
+            timer.stop()
+            self._progress_timer = None
+        toast = getattr(self, "_progress_toast", None)
+        if toast is None:
+            return False
+        toast.set_message(message)
+        self._progress_toast = None  # 더는 진행 칩으로 추적 안 함 (fade 예약됨)
+        QTimer.singleShot(hold_ms, toast.dismiss)
+        return True
 
     def _start_ocr_worker(self, png_bytes: bytes):
         """공용 OCR 워커 — PNG bytes를 받아 백그라운드에서 OCR 수행.
@@ -975,9 +1001,10 @@ class PasteFlowApp:
         """
         import io
         from PIL import Image
-        from pasteflow.ui.toast import ToastNotification
+        from PyQt6.QtGui import QCursor
 
-        ToastNotification("인식 중…", icon="🔤")
+        # 진행 칩을 OCR 트리거 시점 커서가 있는 모니터 정중앙에 띄운다(영역 선택 직후 / 우클릭 위치).
+        self._start_cursor_progress("인식 중…", "🔤", QCursor.pos())
 
         def _run():
             # 호출마다 COM 초기화/해제 — asyncio/WinRT 상태 오염 방지
@@ -1152,11 +1179,12 @@ class PasteFlowApp:
         popup.export_file_requested.connect(self._on_annotation_export)
 
     def _on_ocr_done(self, text: str):
-        """메인 스레드: OCR 결과 → 클립보드 + DB + 큐 + 토스트"""
-        from pasteflow.ui.toast import ToastNotification
-
+        """메인 스레드: OCR 결과 → 클립보드 + DB + 큐 + 정중앙 결과 칩(✓ 앞부분…)"""
         if not text.strip():
-            ToastNotification("텍스트를 인식하지 못했습니다", icon="🔤")
+            # 진행 칩을 결과 메시지로 전환(칩이 없으면 일반 토스트로 폴백)
+            if not self._finish_cursor_progress("인식된 텍스트 없음"):
+                from pasteflow.ui.toast import ToastNotification
+                ToastNotification("텍스트를 인식하지 못했습니다", icon="🔤")
             return
 
         item = ClipboardItem(
@@ -1167,12 +1195,18 @@ class PasteFlowApp:
         # 클립보드 먼저 입력 — _set_clipboard가 내부에서 monitor._self_triggered를 설정해
         # 클립보드 모니터가 동일 항목을 재감지(큐 중복 추가)하지 않도록 함
         self.interceptor._set_clipboard(item)
-        # OCR은 아래에서 자체 토스트를 띄우므로 복사 토스트 없는 경로 사용
+        # OCR은 아래에서 자체 칩을 띄우므로 복사 토스트 없는 경로 사용
         self._persist_clipboard_item(item)
 
-        preview = text[:30].replace("\n", " ")
-        suffix = "..." if len(text) > 30 else ""
-        ToastNotification(f"{preview}{suffix}", icon="🔤")
+        # 진행 칩을 "✓ 인식 앞부분…"으로 전환 — "내 OCR이 제대로 됐나" 시각 확인용.
+        # 전체 텍스트는 클립보드·큐로 들어가므로 칩은 앞 24자 미리보기만 보여준다.
+        flat = " ".join(text.split())  # 줄바꿈·연속 공백을 단일 공백으로
+        preview = flat[:24]
+        suffix = "…" if len(flat) > 24 else ""
+        msg = f"✓ {preview}{suffix}"
+        if not self._finish_cursor_progress(msg):
+            from pasteflow.ui.toast import ToastNotification
+            ToastNotification(msg, icon="🔤")
 
     def _on_ocr_fallback(self, failed_model: str, used_model: str):
         """모델 not_found로 폴백이 발동했을 때 사용자에게 알림.
@@ -1188,6 +1222,8 @@ class PasteFlowApp:
 
     def _on_ocr_error(self, msg: str):
         from pasteflow.ui.toast import ToastNotification
+
+        self._stop_cursor_progress()  # 진행 칩 정리(지속형이라 수동 종료 필요)
 
         # API 키 미설정 → 토스트 후 설정 다이얼로그 자동 열기
         if "API 키" in msg:
@@ -1509,7 +1545,7 @@ class PasteFlowApp:
         """AI 답변 → 임시 텍스트 미리보기 창으로 표시(읽기+복사 전용, 수정 메뉴 없음)."""
         from pasteflow.ui.toast import ToastNotification
 
-        self._stop_ai_progress()  # 진행 토스트 종료
+        self._stop_cursor_progress()  # 진행 칩 종료 (답변창이 같은 모니터 정중앙에 펼쳐짐)
 
         if not answer.strip():
             ToastNotification("답변을 받지 못했습니다", icon="🤖")
@@ -1525,16 +1561,17 @@ class PasteFlowApp:
         )
         # DB에 없는 임시 항목(id 없음) → editable=False로 수정 메뉴 숨김.
         # TextPreviewPopup._instances가 창을 닫을 때까지 참조를 유지하므로 별도 보관 불필요.
-        # 앵커: 질문 제출 시점 커서(_ai_anchor) — 다른 모니터에서 질문해도 그 자리에 답변.
+        # 앵커: 질문 제출 시점 커서(_ai_anchor) — 그 커서가 있던 모니터 정중앙에 답변창을 띄운다
+        # (center=True). 다른 모니터에서 질문해도 그 모니터 한복판에 떠 읽기 편하고 잘림이 없다.
         # markdown=True → QTextEdit+setMarkdown으로 서식 렌더링(일반 미리보기는 평문 유지).
         anchor = getattr(self, "_ai_anchor", None) or self.panel.geometry()
-        popup = TextPreviewPopup.open_new(item, anchor, editable=False, markdown=True)
+        popup = TextPreviewPopup.open_new(item, anchor, editable=False, markdown=True, center=True)
         popup.copy_requested.connect(self._on_copy_item)
 
     def _on_ai_error(self, msg: str):
         from pasteflow.ui.toast import ToastNotification
 
-        self._stop_ai_progress()  # 진행 토스트 종료
+        self._stop_cursor_progress()  # 진행 칩 종료
 
         # API 키 미설정 → 토스트 후 설정 다이얼로그 자동 열기 (OCR 에러 처리와 동일 패턴)
         if "API 키" in msg:

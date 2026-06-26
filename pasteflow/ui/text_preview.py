@@ -81,18 +81,20 @@ class TextPreviewPopup(QWidget):
 
     @classmethod
     def open_new(cls, item: ClipboardItem, panel_geom: QRect, editable: bool = True,
-                 markdown: bool = False) -> "TextPreviewPopup":
+                 markdown: bool = False, center: bool = False) -> "TextPreviewPopup":
         """새 미리보기 창을 열고 인스턴스 목록에 등록한다.
 
         editable=False면 우클릭 "수정" 메뉴를 숨긴다(AI 답변 등 DB에 없는 임시 항목 —
         id가 없어 수정·저장 경로가 무력하므로 메뉴 자체를 제거).
         markdown=True면 QTextEdit+setMarkdown으로 서식을 렌더링한다(AI 답변 전용 —
         일반 텍스트 미리보기는 원문 확인 용도라 평문 유지).
+        center=True면 panel_geom 옆이 아니라 panel_geom이 속한 모니터 정중앙에 띄운다
+        (AI 답변 전용 — _ai_anchor가 가리키는 커서 모니터 한복판).
         """
         cascade_offset = len(cls._instances) * _CASCADE_STEP
         popup = cls(item, editable=editable, markdown=markdown)
         cls._instances.append(popup)
-        popup.show_preview(panel_geom, cascade_offset)
+        popup.show_preview(panel_geom, cascade_offset, center=center)
         return popup
 
     @classmethod
@@ -280,7 +282,7 @@ class TextPreviewPopup(QWidget):
     # 표시
     # ------------------------------------------------------------------
 
-    def show_preview(self, panel_geom: QRect, cascade_offset: int = 0):
+    def show_preview(self, panel_geom: QRect, cascade_offset: int = 0, center: bool = False):
         text = self._item.text_content or self._item.preview_text or ""
         if self._markdown:
             text = _fix_markdown_emphasis(text)  # 따옴표 볼드 정상화
@@ -295,7 +297,17 @@ class TextPreviewPopup(QWidget):
         self._resize_to_content()
         screen = QApplication.screenAt(panel_geom.center()) or QApplication.primaryScreen()
         if screen:
-            self.move(compute_preview_pos(panel_geom, self.size(), screen, cascade_offset))
+            if center:
+                # panel_geom이 속한 모니터 정중앙 (연속 표시 시 cascade로 살짝 어긋나게).
+                avail = screen.availableGeometry()
+                w, h = self.width(), self.height()
+                x = avail.center().x() - w // 2 + cascade_offset
+                y = avail.center().y() - h // 2 + cascade_offset
+                x = max(avail.left(), min(x, avail.right() - w))
+                y = max(avail.top(), min(y, avail.bottom() - h))
+                self.move(x, y)
+            else:
+                self.move(compute_preview_pos(panel_geom, self.size(), screen, cascade_offset))
         self.show()
         self.raise_()
 
