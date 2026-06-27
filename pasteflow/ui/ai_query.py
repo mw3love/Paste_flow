@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QCursor, QPixmap
 
-from pasteflow.ui.theme import COLORS, TEAL_HOVER
+from pasteflow.ui.theme import COLORS, PEACH_HOVER
 
 
 class _QuestionEdit(QPlainTextEdit):
@@ -67,7 +67,7 @@ class AiQueryDialog(QDialog):
                 font-size: 13px;
             }}
             QPlainTextEdit:focus {{
-                border: 1px solid {COLORS['teal']};
+                border: 1px solid {COLORS['peach']};
             }}
             QPushButton {{
                 background-color: {COLORS['surface1']};
@@ -81,11 +81,11 @@ class AiQueryDialog(QDialog):
                 background-color: {COLORS['surface2']};
             }}
             QPushButton[text="질문"] {{
-                background-color: {COLORS['teal']};
+                background-color: {COLORS['peach']};
                 color: {COLORS['base']};
             }}
             QPushButton[text="질문"]:hover {{
-                background-color: {TEAL_HOVER};
+                background-color: {PEACH_HOVER};
             }}
         """)
 

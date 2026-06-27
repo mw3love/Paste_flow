@@ -127,6 +127,11 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        # 상단에 툴바용 공간을 '항상' 비워두고(레이아웃 top 마진), 그 빈 strip을 투명 처리해
+        # 뷰어 모드에선 안 보이게 한다(= 이미지만 떠 있는 느낌). 편집 토글은 그 예약 공간에
+        # chrome을 보였다/숨겼다 할 뿐이라 창 크기·위치가 안 바뀜 → 잔상 0, 이미지 안 가림.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setObjectName("previewroot")
 
         self._edit_mode = False
         self._zoom = 1.0
@@ -169,6 +174,15 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # chrome(타이틀바+툴바)은 레이아웃이 아니라 이미지 위에 '떠 있는' 자식 컨테이너로 둔다.
+        # 편집 토글 시 보이기/숨기기만 하므로 창 크기·위치가 안 바뀌고(= 잔상 0), 이미지도 안
+        # 움직인다. 대신 편집 중에는 툴바가 이미지 상단 일부를 덮는다(CleanShot/Snipaste식).
+        self._chrome = QWidget(self)
+        self._chrome.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        chrome_l = QVBoxLayout(self._chrome)
+        chrome_l.setContentsMargins(0, 0, 0, 0)
+        chrome_l.setSpacing(0)
+
         # 상단 드래그 핸들 (편집 모드 창 이동) — 배경색은 활성/비활성(파랑/코랄)과 통일.
         # 제목은 굵게, 단축키 힌트는 작은 secondary 색, 우측에 닫기 버튼.
         self._dragbar = _DragBar(self)
@@ -190,20 +204,24 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         close_btn.setToolTip("닫기 (ESC)")
         close_btn.clicked.connect(self.close)
         bar_l.addWidget(close_btn)
-        root.addWidget(self._dragbar)
+        chrome_l.addWidget(self._dragbar)
 
         # 툴바
         self._toolbar_host = QWidget()
         self._toolbar_host.setLayout(self._build_toolbar())
-        root.addWidget(self._toolbar_host)
+        chrome_l.addWidget(self._toolbar_host)
 
-        # 이미지 뷰 — 좌상단 정렬: 창 좌상단이 고정이므로 줌 시 이미지 좌상단이 화면에 고정되고
-        # 우하단으로 확대된다(중심 기준 확대 방지). 툴바가 더 넓어도 이미지는 좌측에 붙는다.
+        # 이미지 뷰 — 레이아웃의 유일한 위젯이라 창이 이미지에 딱 맞는다(hug). chrome은 떠 있어
+        # 레이아웃에 영향을 주지 않으므로, 편집 토글로 창 높이가 바뀌지 않는다.
         root.addWidget(self._view, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
         # 완료 버튼(복사/저장/닫기)은 툴바 오른쪽에 합쳐졌으므로 별도 액션바 없음
-        for w in (self._dragbar, self._toolbar_host):
-            w.setVisible(False)  # 뷰어 모드 시작
+        self._chrome.setVisible(False)  # 뷰어 모드 시작
+        # 상단 strip(=chrome 높이)을 항상 예약(top 마진) — 이미지는 그 아래에 배치되고,
+        # 빈 strip은 투명(WA_TranslucentBackground)이라 뷰어 모드에선 안 보인다. 편집 토글로
+        # 창 크기·위치가 안 바뀌어 잔상이 없고, 툴바는 strip 안에 떠서 이미지를 덮지 않는다.
+        self._chrome_h = self._chrome.sizeHint().height()
+        root.setContentsMargins(0, self._chrome_h, 0, 0)
 
     # ------------------------------------------------------------------
     # 표시 + hug-zoom
@@ -228,7 +246,11 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         self._apply_zoom(z0)
 
         if screen:
-            self.move(compute_preview_pos(panel_geom, self.size(), screen, cascade_offset))
+            # 창 상단엔 투명 strip(chrome_h)이 있으므로, 그만큼 창을 위로 올려 '이미지'가
+            # 의도한 위치(패널/커서 근처)에 오게 한다.
+            pos = compute_preview_pos(panel_geom, self.size(), screen, cascade_offset)
+            pos.setY(max(screen.availableGeometry().top(), pos.y() - self._chrome_h))
+            self.move(pos)
         self.show()
         self.raise_()
         # 활성화 — 이후 Space(편집 토글)·ESC(닫기)를 미리보기가 직접 받도록
@@ -243,7 +265,21 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         vw = max(1, round(sr.width() * self._zoom))
         vh = max(1, round(sr.height() * self._zoom))
         self._view.setFixedSize(vw, vh)
-        self.adjustSize()  # 보이는 chrome(편집 시 툴바/액션바)만큼만 창 크기 조정
+        self.adjustSize()  # 레이아웃 위젯은 뷰뿐 → 창이 이미지에 딱 맞는다(hug)
+        # 편집 중이면 떠 있는 chrome을 이미지 상단에 다시 배치(줌으로 폭이 바뀌었을 수 있음)
+        if getattr(self, "_chrome", None) is not None and self._chrome.isVisible():
+            self._layout_chrome()
+
+    def _layout_chrome(self):
+        """편집 모드에서 chrome(타이틀바+툴바)을 상단 예약 strip에 배치한다(이미지 위가 아님).
+        툴바가 이미지보다 넓으면 창 '폭만' 오른쪽으로 늘려 잘리지 않게 한다 — top-left를
+        고정하고 높이는 그대로라, 이미지는 가로/세로 어느 쪽으로도 움직이지 않는다(잔상 없음).
+        이미지가 툴바보다 넓은 일반적인 경우엔 창 크기 변화가 아예 없다."""
+        win_w = max(self._view.width(), self._chrome.sizeHint().width())
+        if self.width() != win_w:
+            self.resize(win_w, self.height())  # 폭만, top-left 고정
+        self._chrome.setGeometry(0, 0, win_w, self._chrome_h)
+        self._chrome.raise_()
 
     def _on_wheel_zoom(self, delta: int):
         factor = 1.15 if delta > 0 else 1 / 1.15
@@ -256,9 +292,11 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         return self._edit_mode
 
     def toggle_edit_mode(self):
+        # chrome은 레이아웃 밖 '떠 있는' 자식이라 보이기/숨기기만 해도 창 크기·위치가 안
+        # 바뀐다 → 이미지가 움직이지 않고 잔상도 없다. 편집 진입 시 chrome을 이미지 상단에
+        # 겹쳐 배치(_layout_chrome), 종료 시 숨기고 창을 이미지에 다시 딱 맞춘다.
         self._edit_mode = not self._edit_mode
-        for w in (self._dragbar, self._toolbar_host):
-            w.setVisible(self._edit_mode)
+        self._chrome.setVisible(self._edit_mode)
         if self._edit_mode:
             self.set_tool("select")  # RubberBandDrag
             self.activateWindow()
@@ -268,7 +306,10 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         self._update_arrow_dir_btn()      # 뷰어 전환 시 floating 방향 토글 숨김
         self._update_text_opts_bar()      # 뷰어 전환 시 텍스트 옵션 바 숨김
         self._update_badge_size_stepper()  # 뷰어 전환 시 번호 크기 스테퍼 숨김
-        self._apply_zoom(self._zoom)  # chrome 변화 반영해 창 재리사이즈
+        if self._edit_mode:
+            self._layout_chrome()         # 이미지 상단에 겹쳐 배치(+필요 시 폭만 확장)
+        else:
+            self._apply_zoom(self._zoom)  # 뷰어 복귀 — 창을 이미지에 다시 hug(폭 확장 되돌림)
         self._view.setFocus()
 
     def _on_escape(self):
@@ -329,7 +370,12 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
     # ------------------------------------------------------------------
     def _apply_active_style(self, active: bool):
         # 활성(보고 있는 창) = 코랄(주인공), 비활성 = 중립 회색(존재만 표시, 안 튐).
-        self.setStyleSheet(self._editor_stylesheet(_PEACH if active else _SURFACE2))
+        # 공유 스타일시트의 `QWidget{background:_BG}`가 팝업 자신에도 적용돼 투명 strip을 덮으므로,
+        # ID 선택자로 팝업 본체 배경만 투명으로 되돌린다(자식 chrome·뷰 배경은 그대로 불투명).
+        self.setStyleSheet(
+            self._editor_stylesheet(_PEACH if active else _SURFACE2)
+            + "\nQWidget#previewroot { background: transparent; }"
+        )
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange:

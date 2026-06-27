@@ -24,7 +24,7 @@ _SWP_NOACTIVATE = 0x0010
 from pasteflow.models import ClipboardItem
 from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.text_preview import TextPreviewPopup
-from pasteflow.ui.theme import COLORS, TEAL_HOVER
+from pasteflow.ui.theme import COLORS, PEACH_HOVER
 
 PANEL_WIDTH = 320
 PANEL_HEIGHT = 420
@@ -51,6 +51,7 @@ class PanelItemWidget(QWidget):
         is_done: bool = False,
         is_pinned: bool = False,
         is_selected: bool = False,
+        in_queue: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -64,7 +65,7 @@ class PanelItemWidget(QWidget):
         self._ext_drag_active = False
         self._text_label: Optional[QLabel] = None
 
-        self._setup_ui(item, is_current, is_done, is_pinned)
+        self._setup_ui(item, is_current, is_done, is_pinned, in_queue)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -72,17 +73,18 @@ class PanelItemWidget(QWidget):
     def _setup_ui(
         self, item: ClipboardItem,
         is_current: bool, is_done: bool, is_pinned: bool,
+        in_queue: bool = False,
     ):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(0)
 
-        if is_current:
-            accent_color = COLORS['teal']
-        elif is_done:
+        if is_done:
             accent_color = COLORS['surface2']
-        else:
+        elif in_queue:
             accent_color = COLORS['peach']
+        else:
+            accent_color = COLORS['surface2']
         self._accent_color = accent_color
 
         # 미리보기
@@ -171,12 +173,12 @@ class PanelItemWidget(QWidget):
         """위젯 재생성 없이 큐 상태(색상)만 업데이트.
         in_queue=False → 큐에서 제거됨, 기본 색상으로 복원.
         """
-        if is_current:
-            self._accent_color = COLORS['teal']
-        elif is_done:
+        if is_done:
             self._accent_color = COLORS['surface2']
-        else:
+        elif in_queue:
             self._accent_color = COLORS['peach']
+        else:
+            self._accent_color = COLORS['surface2']
         if self._text_label:
             text_color = COLORS['subtext0'] if is_done else "#ffffff"
             self._text_label.setStyleSheet(f"color: {text_color}; font-size: 12px;")
@@ -284,7 +286,7 @@ class PanelItemWidget(QWidget):
         """드래그 소스 위젯 강조 스타일"""
         self.setStyleSheet(
             f"background-color: {COLORS['surface2']}; border-radius: 6px;"
-            f"border: 1px solid {COLORS['teal']};"
+            f"border: 1px solid {COLORS['peach']};"
         )
 
     def mouseReleaseEvent(self, event):
@@ -401,7 +403,7 @@ class EditItemDialog(QDialog):
                 font-size: 13px;
             }}
             QPlainTextEdit:focus {{
-                border: 1px solid {COLORS['teal']};
+                border: 1px solid {COLORS['peach']};
             }}
             QPushButton {{
                 background-color: {COLORS['surface1']};
@@ -415,11 +417,11 @@ class EditItemDialog(QDialog):
                 background-color: {COLORS['surface2']};
             }}
             QPushButton[text="저장"] {{
-                background-color: {COLORS['teal']};
+                background-color: {COLORS['peach']};
                 color: {COLORS['base']};
             }}
             QPushButton[text="저장"]:hover {{
-                background-color: {TEAL_HOVER};
+                background-color: {PEACH_HOVER};
             }}
         """)
 
@@ -567,7 +569,7 @@ class ClipboardPanel(QWidget):
         self._status_label.setFixedHeight(24)
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._status_label.setStyleSheet(
-            f"color: {COLORS['teal']}; font-size: 11px; font-weight: 600; "
+            f"color: {COLORS['peach']}; font-size: 11px; font-weight: 600; "
             f"background: transparent; padding-right: 2px;"
         )
         self._status_label.hide()
@@ -702,7 +704,7 @@ class ClipboardPanel(QWidget):
             if q_idx is not None and q_idx < pointer:
                 widget.set_queue_state(is_current=False, is_done=True)
             elif q_idx is not None and q_idx == pointer:
-                widget.set_queue_state(is_current=True, is_done=False)
+                widget.set_queue_state(is_current=True, is_done=False, in_queue=True)
             elif q_idx is not None:
                 widget.set_queue_state(is_current=False, is_done=False, in_queue=True)
             else:
@@ -847,7 +849,8 @@ class ClipboardPanel(QWidget):
                 for i, item in enumerate(filtered_pinned, 1):
                     is_current_pin = False
                     is_done_pin = False
-                    if item.id in self._queue_item_ids:
+                    in_queue_pin = item.id in self._queue_item_ids
+                    if in_queue_pin:
                         q_idx = self._queue_item_ids.index(item.id)
                         if q_idx < self._pointer:
                             is_done_pin = True
@@ -859,6 +862,7 @@ class ClipboardPanel(QWidget):
                         is_current=is_current_pin,
                         is_done=is_done_pin,
                         is_selected=item.id in self._selected_ids,
+                        in_queue=in_queue_pin,
                         parent=sc,
                     )
                     self._connect_item_signals(widget)
@@ -913,7 +917,8 @@ class ClipboardPanel(QWidget):
                     # 큐 상태 계산: 큐에 있는 항목이면 포인터 기준으로 current/done 판단
                     is_current = False
                     is_done = False
-                    if item.id in self._queue_item_ids:
+                    in_queue = item.id in self._queue_item_ids
+                    if in_queue:
                         q_idx = self._queue_item_ids.index(item.id)
                         if q_idx < self._pointer:
                             is_done = True
@@ -925,6 +930,7 @@ class ClipboardPanel(QWidget):
                         is_current=is_current,
                         is_done=is_done,
                         is_selected=item.id in self._selected_ids,
+                        in_queue=in_queue,
                         parent=sc,
                     )
                     self._connect_item_signals(widget)
@@ -957,7 +963,7 @@ class ClipboardPanel(QWidget):
             return
         #  = PinnedFill (활성),   = Pin (비활성)
         self._pin_btn.setText("" if active else "")
-        color = COLORS["teal"] if active else COLORS["subtext0"]
+        color = COLORS["peach"] if active else COLORS["subtext0"]
         self._pin_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent;
@@ -1277,7 +1283,7 @@ class ClipboardPanel(QWidget):
         self._hist_drag_target_id = target_w.item_id
         target_w.setStyleSheet(
             f"background-color: {COLORS['surface1']}; border-radius: 6px;"
-            f"border: 1px dashed {COLORS['teal']};"
+            f"border: 1px dashed {COLORS['peach']};"
         )
 
     def _clear_hist_drag_highlight(self):

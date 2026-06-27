@@ -3,15 +3,15 @@ from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor
 from PyQt6.QtCore import pyqtSignal, QObject
 from pasteflow.__version__ import __version__
-from pasteflow.ui.theme import TEAL, BASE, SURFACE0, SURFACE1, TEXT
+from pasteflow.ui.theme import PEACH, BASE, SURFACE0, SURFACE1, TEXT
 
 
 def _create_default_icon() -> QIcon:
-    """기본 트레이 아이콘 생성 (16x16 teal 사각형)"""
+    """기본 트레이 아이콘 생성 (16x16 coral 사각형)"""
     pixmap = QPixmap(16, 16)
     pixmap.fill(QColor("transparent"))
     painter = QPainter(pixmap)
-    painter.setBrush(QColor(TEAL))
+    painter.setBrush(QColor(PEACH))
     painter.setPen(QColor(BASE))
     painter.drawRoundedRect(1, 1, 14, 14, 3, 3)
     painter.drawText(3, 12, "P")

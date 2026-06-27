@@ -11,12 +11,11 @@ SUBTEXT0 = "#ababab"
 TEXT     = "#d4d4d4"
 
 BLUE  = "#89b4fa"
-TEAL  = "#94e2d5"
 GREEN = "#a6e3a1"
 PEACH = "#fab387"
 RED   = "#f38ba8"
 
-TEAL_HOVER = "#7ed5c8"
+PEACH_HOVER = "#f39e62"
 RED_HOVER  = "#e07898"
 
 COLORS = {
@@ -30,7 +29,6 @@ COLORS = {
     "subtext0": SUBTEXT0,
     "text":     TEXT,
     "blue":     BLUE,
-    "teal":     TEAL,
     "green":    GREEN,
     "peach":    PEACH,
     "red":      RED,

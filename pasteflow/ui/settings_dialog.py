@@ -10,13 +10,14 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics
 
-from pasteflow.ui.theme import COLORS, TEAL_HOVER
+from pasteflow.ui.theme import COLORS, PEACH_HOVER
 
 
 # ── 옵션창 전용 팔레트 (전역 다크 테마와 분리 — 폼 가독성·정돈 우선) ──────────────
 # 깊이: 페이지(가장 어두움) → 카드(그룹박스) → 보조버튼. 입력칸은 카드에 '박힌' 느낌으로
 # 페이지색을 써서 카드와 또렷이 구분(흐릿한 동색 회색 3개로 뭉개지지 않게). 강조색은
-# teal 하나로 통일(저장 버튼·체크·포커스). (의도된 분리 — COLORS['base']로 되돌리지 말 것)
+# coral(peach) 하나로 통일(저장 버튼·체크·포커스) — 앱 전역 단일 액센트와 일치.
+# (의도된 분리 — COLORS['base']로 되돌리지 말 것)
 _PAGE = "#1a1a1a"       # 다이얼로그 배경
 _CARD = "#262626"       # 그룹박스(카드) 면
 _INSET = "#1a1a1a"      # 입력칸/체크박스 — 카드에 박힌 듯(페이지색과 동일)
@@ -60,7 +61,7 @@ DIALOG_STYLE = f"""
         padding: 5px 8px;
     }}
     QLineEdit:focus, QSpinBox:focus {{
-        border-color: {COLORS['teal']};
+        border-color: {COLORS['peach']};
     }}
     QCheckBox {{
         color: {_TXT};
@@ -75,8 +76,8 @@ DIALOG_STYLE = f"""
         background-color: {_INSET};
     }}
     QCheckBox::indicator:checked {{
-        background-color: {COLORS['teal']};
-        border-color: {COLORS['teal']};
+        background-color: {COLORS['peach']};
+        border-color: {COLORS['peach']};
     }}
     QPushButton {{
         background-color: {_BTN};
@@ -89,12 +90,12 @@ DIALOG_STYLE = f"""
         background-color: {_BTN_HOVER};
     }}
     QPushButton#saveBtn {{
-        background-color: {COLORS['teal']};
+        background-color: {COLORS['peach']};
         color: {_PAGE};
         font-weight: 600;
     }}
     QPushButton#saveBtn:hover {{
-        background-color: {TEAL_HOVER};
+        background-color: {PEACH_HOVER};
     }}
     QComboBox QAbstractItemView {{
         background-color: {_CARD};
@@ -167,7 +168,7 @@ class HotkeyEdit(QPushButton):
         if listening:
             self.setStyleSheet(
                 f"QPushButton {{ background-color: {_INSET}; "
-                f"color: {COLORS['teal']}; border: 1px solid {COLORS['teal']}; "
+                f"color: {COLORS['peach']}; border: 1px solid {COLORS['peach']}; "
                 f"border-radius: 5px; padding: 5px 8px; text-align: left; }}"
             )
         else:
@@ -175,7 +176,7 @@ class HotkeyEdit(QPushButton):
                 f"QPushButton {{ background-color: {_INSET}; "
                 f"color: {_TXT}; border: 1px solid {_LINE}; "
                 f"border-radius: 5px; padding: 5px 8px; text-align: left; }}"
-                f"QPushButton:hover {{ border-color: {COLORS['teal']}; }}"
+                f"QPushButton:hover {{ border-color: {COLORS['peach']}; }}"
             )
 
     def keyPressEvent(self, event):
@@ -392,7 +393,7 @@ class SettingsDialog(QDialog):
             key_lbl = QLabel(keys)
             key_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             key_lbl.setStyleSheet(
-                f"color: {COLORS['teal']}; font-size: 12px;"
+                f"color: {COLORS['peach']}; font-size: 12px;"
                 f" font-family: 'Consolas', monospace;"
             )
             info_layout.addWidget(action_lbl, row, 0)
@@ -405,7 +406,7 @@ class SettingsDialog(QDialog):
         _combo_style = (
             f"QComboBox {{ background-color: {_INSET}; color: {_TXT}; "
             f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
-            f"QComboBox:focus {{ border-color: {COLORS['teal']}; }}"
+            f"QComboBox:focus {{ border-color: {COLORS['peach']}; }}"
         )
 
         # ── OCR 설정 그룹 (화면 텍스트 인식) ──

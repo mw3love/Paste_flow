@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QRect, QPoint, QObject, pyqtSignal
 from PyQt6.QtGui import QPainter, QPixmap, QColor, QPen, QFont, QScreen
 
-from pasteflow.ui.theme import TEAL
+from pasteflow.ui.theme import PEACH
 
 _MIN_SEL = 5       # 유효 선택 최소 크기 (논리 px)
 _MASK_ALPHA = 100  # 어두운 마스크 알파 (0=투명, 255=불투명)
@@ -121,8 +121,8 @@ class _ScreenOverlay(QWidget):
             )
             p.drawPixmap(sel, self._screenshot, src)
 
-            # 4) Catppuccin teal 2px 테두리
-            pen = QPen(QColor(TEAL), _BORDER_W)
+            # 4) coral 2px 테두리
+            pen = QPen(QColor(PEACH), _BORDER_W)
             p.setPen(pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(sel.adjusted(0, 0, -1, -1))

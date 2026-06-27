@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QRect, QPoint, QObject, pyqtSignal, QTimer
 from PyQt6.QtGui import QPainter, QPixmap, QColor, QPen, QScreen, QCursor
 
-from pasteflow.ui.theme import TEAL
+from pasteflow.ui.theme import PEACH
 from pasteflow import uia
 
 _MASK_ALPHA = 100  # 어두운 마스크 알파
@@ -231,13 +231,13 @@ class _CaptureScreen(QWidget):
         src = QRect(round(er.x() * dpr), round(er.y() * dpr),
                     round(er.width() * dpr), round(er.height() * dpr))
         p.drawPixmap(er, self._dimmed, src)
-        # 2) 하이라이트: 마스크 없는 원본 복원 + teal 테두리 (클립 덕에 dirty 밖은 안 그려짐)
+        # 2) 하이라이트: 마스크 없는 원본 복원 + coral 테두리 (클립 덕에 dirty 밖은 안 그려짐)
         hl = self._hl_local
         if hl is not None and not hl.isEmpty():
             hsrc = QRect(round(hl.x() * dpr), round(hl.y() * dpr),
                          round(hl.width() * dpr), round(hl.height() * dpr))
             p.drawPixmap(hl, self._screenshot, hsrc)
-            pen = QPen(QColor(TEAL), _BORDER_W)
+            pen = QPen(QColor(PEACH), _BORDER_W)
             p.setPen(pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(hl.adjusted(0, 0, -1, -1))
