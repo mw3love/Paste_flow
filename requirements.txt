@@ -4,4 +4,5 @@ Pillow
 winocr          # Windows WinRT OCR (winrt-* 패키지 포함, Python 3.14+ 지원)
 comtypes        # Windows UI Automation (마그네틱 캡처 — ElementFromPoint)
 google-generativeai     # Google Gemini OCR (lazy import)
+google-genai            # 신 SDK — 공식 AI 질의의 웹 검색(grounding)용 (lazy import)
 openai                  # OpenAI 호환 게이트웨이 OCR (lazy import, base_url 사용 시)

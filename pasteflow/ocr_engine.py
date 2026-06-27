@@ -109,6 +109,17 @@ def _is_model_not_found(exc: Exception) -> bool:
     return False
 
 
+def _is_quota_error(exc: Exception) -> bool:
+    """호출 예외가 할당량 초과(429 RESOURCE_EXHAUSTED)를 의미하는지 휴리스틱 판정.
+
+    AI 질의는 google_search(grounding)를 항상 붙이는데, 일부 모델(gemini-3.1-flash-lite
+    등)은 검색 도구에 무료 할당량이 없어 grounding 호출이 429난다. 이때 검색이 되는
+    안전망 모델로 폴백할지 판단하는 데 쓴다. SDK·버전마다 예외 타입이 달라 메시지 기반.
+    """
+    msg = str(exc).lower()
+    return "429" in msg or "resource_exhausted" in msg or "quota" in msg
+
+
 def select_fallback_model(failed_model: str, backend: str) -> Optional[str]:
     """OCR 호출이 실패한 모델에 대해 backend 호환 폴백 후보 1개.
 
@@ -486,7 +497,8 @@ class OcrEngine:
         OCR과 동일한 Gemini 배관(게이트웨이/공식 분기·자동 폴백·_normalize_base_url)을
         재사용한다. `image_png`가 주어지면 질문과 함께 이미지를 멀티모달로 전송(시각 질의),
         없으면 텍스트 컨텍스트+질문만 보낸다. 게이트웨이는 OpenAI 호환 chat.completions,
-        공식 API는 google.generativeai로 갈린다(_recognize_gemini와 동일 구조).
+        공식 API는 신 SDK google-genai로 갈린다(google_search 도구로 웹 검색 grounding —
+        OCR 경로의 구 google.generativeai와 달리 실시간 질문에 답함, _ask_google_genai 참고).
         동기 호출이므로 호출자가 워커 스레드에서 실행해야 UI 블로킹이 없다.
         """
         import os
@@ -506,17 +518,26 @@ class OcrEngine:
             )
 
         try:
-            import google.generativeai as genai
+            from google import genai
         except ImportError:
-            raise RuntimeError("google-generativeai 패키지 미설치: pip install google-generativeai")
+            raise RuntimeError("google-genai 패키지 미설치: pip install google-genai")
 
-        genai.configure(api_key=api_key)
+        client = genai.Client(api_key=api_key)
         model_name = self.model or "gemini-2.5-flash"
-        return self._call_with_fallback(
-            model_name,
-            backend="official",
-            call=lambda m: self._ask_google_genai(genai, prompt, m, image_png),
-        )
+        call = lambda m: self._ask_google_genai(client, prompt, m, image_png)
+        try:
+            return self._call_with_fallback(model_name, backend="official", call=call)
+        except Exception as exc:
+            # grounding(웹 검색) 할당량 막힘(429): flash-lite 등 일부 모델은 검색 도구에
+            # 무료 할당량이 없어 grounding 호출이 429난다. AI 답변은 항상 검색을 붙이므로
+            # 이 경우 검색이 되는 안전망 모델(_FALLBACK_DEFAULT=gemini-2.5-flash)로 1회
+            # 재시도한다. OCR과 분리(OCR은 검색을 안 써 이 폴백이 불필요·유해). last_*는
+            # main이 폴백 토스트로 표시. 2026-06-27 실호출 검증(flash-lite 검색 429 재현).
+            if _is_quota_error(exc) and model_name != _FALLBACK_DEFAULT:
+                self.last_fallback_from = model_name
+                self.last_used_model = _FALLBACK_DEFAULT
+                return self._ask_google_genai(client, prompt, _FALLBACK_DEFAULT, image_png)
+            raise
 
     def _ask_openai_compat(
         self, prompt: str, api_key: str, base_url: str, model: str, image_png: bytes | None = None
@@ -549,17 +570,33 @@ class OcrEngine:
         return (resp.choices[0].message.content or "").strip()
 
     def _ask_google_genai(
-        self, genai_module, prompt: str, model_name: str, image_png: bytes | None = None
+        self, client, prompt: str, model_name: str, image_png: bytes | None = None
     ) -> str:
-        """공식 Google API 질의 단일 호출 (폴백 없음). image_png가 있으면 멀티모달."""
-        model = genai_module.GenerativeModel(
-            model_name, system_instruction=AI_SYSTEM_PROMPT)
+        """공식 Google API 질의 단일 호출 (폴백 없음). 신 SDK google-genai 사용.
+
+        google_search 도구를 항상 붙여 모델이 필요할 때만 웹 검색하게 한다(실시간
+        날씨·뉴스 등 grounding). 구 SDK(google-generativeai 0.8.x)는 proto에 필드는
+        있으나 요청에 이 도구를 실어 보내지 못해 검색이 동작하지 않으므로 신 SDK로
+        이전했다(2026-06-27 실호출 검증: 구 SDK 4방식 모두 미검색, 신 SDK 검색 동작).
+        image_png가 있으면 멀티모달(시각 질의) — 이미지+grounding 동시도 정상.
+        max_output_tokens=16384는 thinking 모델 본문 잘림 방지(OCR과 동일 사유).
+        """
+        from google.genai import types
+        config = types.GenerateContentConfig(
+            system_instruction=AI_SYSTEM_PROMPT,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            max_output_tokens=16384,
+        )
         if image_png:
-            parts = [{"mime_type": "image/png", "data": image_png}, prompt]
-            response = model.generate_content(parts)
+            contents = [
+                types.Part.from_bytes(data=image_png, mime_type="image/png"),
+                prompt,
+            ]
         else:
-            response = model.generate_content(prompt)
-        return (response.text or "").strip()
+            contents = prompt
+        resp = client.models.generate_content(
+            model=model_name, contents=contents, config=config)
+        return (resp.text or "").strip()
 
 
 # ── 단독 실행 검증 ────────────────────────────────────────────────────────

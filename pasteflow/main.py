@@ -1248,7 +1248,7 @@ class PasteFlowApp:
         """
         from pasteflow.ui.toast import ToastNotification
         ToastNotification(
-            f"{failed_model} 없음 → {used_model}로 폴백",
+            f"{failed_model} → {used_model}로 폴백",
             icon="🔤",
         )
 
