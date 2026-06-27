@@ -13,10 +13,11 @@ import re
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QApplication, QMenu, QPlainTextEdit, QTextEdit, QFrame,
 )
-from PyQt6.QtCore import Qt, QPoint, QRect, QEvent, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, QEvent, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QTextOption, QFont, QTextDocument, QTextCursor, QTextCharFormat, QColor,
     QTextListFormat, QTextBlockFormat,
+    QImage, QPainter, QPixmap, QPalette, QAbstractTextDocumentLayout,
 )
 
 from pasteflow.ui.theme import (
@@ -97,6 +98,7 @@ class TextPreviewPopup(QWidget):
     # 우클릭 메뉴 → main 핸들러로 전달
     copy_requested = pyqtSignal(object)   # ClipboardItem
     edit_requested = pyqtSignal(int)      # item_id
+    copy_as_image_requested = pyqtSignal(object)  # QPixmap (AI 답변 전용 — 답변 전체를 이미지로)
 
     # ------------------------------------------------------------------
     # 클래스 메서드
@@ -349,6 +351,12 @@ class TextPreviewPopup(QWidget):
 
         copy_action = menu.addAction("전체 복사")
         copy_action.triggered.connect(self._emit_copy)
+
+        # AI 답변(마크다운)만 — 답변 전체(스크롤 포함)를 이미지로 복사. 일반 미리보기는
+        # 원문 확인 용도라 이미지화 수요가 없어 노출하지 않는다.
+        if self._markdown:
+            img_action = menu.addAction("이미지로 복사")
+            img_action.triggered.connect(self._emit_copy_as_image)
 
         if self._editable and self._item.content_type != "image":
             edit_action = menu.addAction("수정")
@@ -614,6 +622,56 @@ class TextPreviewPopup(QWidget):
         if self._markdown:
             self._item.text_content = self._marked_markdown()
         self.copy_requested.emit(self._item)
+
+    def _emit_copy_as_image(self):
+        """답변 전체를 한 장의 이미지로 렌더 → main이 클립보드(DIB)+히스토리에 저장."""
+        try:
+            pix = self._render_answer_pixmap()
+        except Exception:
+            return
+        if pix is not None and not pix.isNull():
+            self.copy_as_image_requested.emit(pix)
+
+    def _render_answer_pixmap(self) -> QPixmap:
+        """현재 답변 문서 전체(스크롤로 가려진 부분 포함)를 한 장의 픽맵으로 렌더.
+
+        살아있는 에디터 문서를 clone해 현재 표시 폭으로 줄바꿈을 고정한 뒤 단독 렌더한다
+        (clone은 형광펜·요소색 등 char 포맷을 모두 보존). 본문 기본 글자색은 QSS로만
+        지정돼 있어 단독 렌더 시 검게 나오므로, PaintContext의 palette Text 색에 본문색
+        (_TEXT)을 주입한다 — 명시 char 포맷(제목·볼드·코드·형광펜)은 그대로 우선 적용된다.
+        배경(_BG)+여백을 입혀 '팝업 스샷'처럼 보이게 한다. HiDPI는 devicePixelRatio로 보정.
+        """
+        src = self._editor.document()
+        doc = src.clone(self)
+        text_w = src.textWidth()
+        if text_w <= 0:
+            text_w = float(self._editor.viewport().width())
+        doc.setTextWidth(text_w)
+        doc.setDocumentMargin(0)
+
+        size = doc.size()  # QSizeF
+        pad = 18
+        dpr = self.devicePixelRatioF() or 1.0
+        w = int(math.ceil(size.width() + pad * 2))
+        h = int(math.ceil(size.height() + pad * 2))
+        img = QImage(int(w * dpr), int(h * dpr), QImage.Format.Format_ARGB32_Premultiplied)
+        img.setDevicePixelRatio(dpr)
+        img.fill(QColor(_BG))
+
+        painter = QPainter(img)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            painter.translate(pad, pad)
+            ctx = QAbstractTextDocumentLayout.PaintContext()
+            pal = ctx.palette
+            pal.setColor(QPalette.ColorRole.Text, QColor(_TEXT))
+            ctx.palette = pal
+            ctx.clip = QRectF(0, 0, size.width(), size.height())
+            doc.documentLayout().draw(painter, ctx)
+        finally:
+            painter.end()
+        return QPixmap.fromImage(img)
 
     def _clear_marks(self):
         """형광펜 전체 해제 (모델 서식 색은 그대로)."""

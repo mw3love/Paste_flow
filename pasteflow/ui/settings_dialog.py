@@ -236,6 +236,7 @@ class HotkeyEdit(QPushButton):
             Qt.Key.Key_F4: "f4", Qt.Key.Key_F5: "f5", Qt.Key.Key_F6: "f6",
             Qt.Key.Key_F7: "f7", Qt.Key.Key_F8: "f8", Qt.Key.Key_F9: "f9",
             Qt.Key.Key_F10: "f10", Qt.Key.Key_F11: "f11", Qt.Key.Key_F12: "f12",
+            Qt.Key.Key_QuoteLeft: "`", Qt.Key.Key_AsciiTilde: "`",
         }
         if key in _MAP:
             return _MAP[key]
@@ -260,6 +261,7 @@ class SettingsDialog(QDialog):
     KEY_IMAGE_TO_PATH_HOTKEY = "hotkey_image_to_path"
     KEY_PIN_IMAGE_HOTKEY = "hotkey_pin_image"
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
+    KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
     KEY_CAPTURE_FOLDER = "capture_save_folder"
     KEY_OCR_LANG = "ocr_language"
     KEY_OCR_ENGINE = "ocr_engine"
@@ -361,6 +363,14 @@ class SettingsDialog(QDialog):
             "ESC 또는 우클릭으로 취소합니다."
         )
         hotkey_form.addRow("영역 캡처:", self._capture_hotkey)
+
+        self._ask_ai_hotkey = HotkeyEdit()
+        self._ask_ai_hotkey.setToolTip(
+            "컨텍스트 없이 즉석에서 AI에게 질문하는 입력창을 띄웁니다.\n"
+            "클립보드 항목과 무관하게 아무 때나 한 키로 AI를 호출해 자유 질문하고 답변을 받습니다.\n"
+            "(우클릭 'AI에게 질문'은 선택한 항목을 컨텍스트로 묻는 방식 — 이건 컨텍스트 없는 자유 질문)"
+        )
+        hotkey_form.addRow("AI 자유질문:", self._ask_ai_hotkey)
 
         # ── 기본 단축키 그룹 (고정) — 복사/붙여넣기 등 변경 불가한 핵심 기능. 맨 위 배치 ──
         info_group = QGroupBox("기본 단축키 (고정)")
@@ -631,6 +641,9 @@ class SettingsDialog(QDialog):
         self._capture_hotkey.set_value(
             self._settings.get(self.KEY_CAPTURE_HOTKEY, "alt+f2")
         )
+        self._ask_ai_hotkey.set_value(
+            self._settings.get(self.KEY_ASK_AI_HOTKEY, "alt+`")
+        )
         self._capture_folder_edit.setText(
             self._settings.get(self.KEY_CAPTURE_FOLDER, "")
         )
@@ -832,6 +845,7 @@ class SettingsDialog(QDialog):
             self.KEY_IMAGE_TO_PATH_HOTKEY: self._image_to_path_hotkey.value() or "ctrl+shift+p",
             self.KEY_PIN_IMAGE_HOTKEY: self._pin_image_hotkey.value() or "alt+f3",
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
+            self.KEY_ASK_AI_HOTKEY: self._ask_ai_hotkey.value() or "alt+`",
             self.KEY_CAPTURE_FOLDER: self._capture_folder_edit.text(),
             self.KEY_OCR_LANG: self._ocr_lang_combo.currentText(),
             self.KEY_OCR_ENGINE: engine,

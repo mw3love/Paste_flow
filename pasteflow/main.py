@@ -633,6 +633,7 @@ class _SignalBridge(QObject):
     image_to_path      = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 경로 텍스트로 교체 후 Ctrl+V
     pin_image          = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 화면에 핀(떠 있는 창)으로 띄우기
     capture_requested  = pyqtSignal()        # 훅 스레드 → 메인: 영역 캡처 오버레이 띄우기
+    ask_ai             = pyqtSignal()        # 훅 스레드 → 메인: AI 자유질문 입력창 띄우기
     ai_done            = pyqtSignal(str, str)  # AI 워커 스레드 → 메인: (질문, 답변)
     ai_error           = pyqtSignal(str)     # AI 워커 스레드 → 메인: 에러 메시지
 
@@ -668,6 +669,7 @@ class PasteFlowApp:
         self._bridge.image_to_path.connect(self._on_image_to_path_hotkey)
         self._bridge.pin_image.connect(self._on_pin_hotkey)
         self._bridge.capture_requested.connect(self._on_capture_requested)
+        self._bridge.ask_ai.connect(self._on_ask_ai_hotkey)
         self._bridge.ai_done.connect(self._on_ai_done)
         self._bridge.ai_error.connect(self._on_ai_error)
 
@@ -694,6 +696,7 @@ class PasteFlowApp:
             on_image_to_path=self._bridge.image_to_path.emit,
             on_pin_image=self._bridge.pin_image.emit,
             on_capture=self._bridge.capture_requested.emit,
+            on_ask_ai=self._bridge.ask_ai.emit,
         )
         self.hotkey_manager = HotkeyManager()
 
@@ -775,6 +778,9 @@ class PasteFlowApp:
 
         capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         self.interceptor.set_capture_hotkey(capture_hotkey)
+
+        ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+`")
+        self.interceptor.set_ask_ai_hotkey(ask_ai_hotkey)
 
 
     def _persist_clipboard_item(self, item: ClipboardItem) -> ClipboardItem:
@@ -1139,6 +1145,32 @@ class PasteFlowApp:
         ToastNotification(
             f"경로 붙여넣음: {os.path.basename(saved_path)}",
             icon="", image_path=saved_path)
+
+    def _on_ask_ai_hotkey(self):
+        """AI 자유질문 단축키(기본 Alt+`) — 컨텍스트 없이 즉석에서 AI에게 질문한다.
+
+        상시 켜져 있는 PasteFlow에서 한 키로 질문 입력창을 띄워 자유 질문하고 답변을 받는다.
+        컨텍스트가 없으므로 `AiQueryDialog`는 컨텍스트 미리보기 없이 질문 입력칸만 표시하고,
+        `_start_ai_worker(question, "")`가 `ocr_engine._ask_prompt`의 '컨텍스트 없음 → 질문만
+        전송' 경로를 탄다(우클릭 "AI에게 질문"의 텍스트 분기와 동일 배관, 컨텍스트만 비움).
+        답변 표시·위치(커서 모니터 정중앙)는 항목 질의와 동일한 `_on_ai_done`을 공유한다.
+        """
+        from PyQt6.QtWidgets import QDialog
+        from PyQt6.QtGui import QCursor
+        from PyQt6.QtCore import QRect
+        from pasteflow.ui.ai_query import AiQueryDialog
+
+        # 답변창을 입력창이 떠 있던 자리(커서)에 띄우기 위해 트리거 시점 커서를 기록.
+        cur = QCursor.pos()
+        self._ai_anchor = QRect(cur.x(), cur.y(), 1, 1)
+
+        dialog = AiQueryDialog("", self.panel)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        question = dialog.get_question()
+        if not question:
+            return
+        self._start_ai_worker(question, "")
 
     def _on_pin_hotkey(self):
         """화면에 핀 단축키(기본 Alt+F3) — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다.
@@ -1567,6 +1599,29 @@ class PasteFlowApp:
         anchor = getattr(self, "_ai_anchor", None) or self.panel.geometry()
         popup = TextPreviewPopup.open_new(item, anchor, editable=False, markdown=True, center=True)
         popup.copy_requested.connect(self._on_copy_item)
+        popup.copy_as_image_requested.connect(self._on_answer_image_copy)
+
+    def _on_answer_image_copy(self, pixmap):
+        """AI 답변창 우클릭 '이미지로 복사' — 렌더된 답변 픽맵을 클립보드(DIB)+히스토리에 저장.
+
+        클립보드·히스토리 처리는 영역 캡처(_on_capture_region)와 동일 패턴: _set_clipboard로
+        모니터 재감지를 막은 뒤 _persist_clipboard_item으로 히스토리·큐에 추가. 붙여넣기
+        호환성이 가장 넓은 CF_DIB로 넣는다.
+        """
+        from pasteflow.ui.toast import ToastNotification
+
+        if pixmap is None or pixmap.isNull():
+            ToastNotification("이미지를 만들지 못했습니다", icon="🖼")
+            return
+        dib = _qpixmap_to_dib(pixmap)
+        item = ClipboardItem(
+            content_type="image",
+            image_data=dib,
+            thumbnail=self.monitor._create_thumbnail(dib),
+        )
+        self.interceptor._set_clipboard(item)
+        self._persist_clipboard_item(item)
+        ToastNotification("답변을 이미지로 복사 + 히스토리 저장됨", icon="🖼")
 
     def _on_ai_error(self, msg: str):
         from pasteflow.ui.toast import ToastNotification
@@ -1734,6 +1789,7 @@ class PasteFlowApp:
             "hotkey_image_to_path": self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p"),
             "hotkey_pin_image": self.db.get_setting("hotkey_pin_image", "alt+f3"),
             "hotkey_capture": self.db.get_setting("hotkey_capture", "alt+f2"),
+            "hotkey_ask_ai": self.db.get_setting("hotkey_ask_ai", "alt+`"),
             "capture_save_folder": self.db.get_setting("capture_save_folder", "") or _default_capture_folder(),
             "ocr_language": self.db.get_setting("ocr_language", "ko"),
             "ocr_engine": self.db.get_setting("ocr_engine", "winrt"),
@@ -1762,6 +1818,7 @@ class PasteFlowApp:
         old_img2path_hotkey = self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p")
         old_pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
+        old_ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+`")
 
         from pasteflow.crypto import protect
         for key, value in new_settings.items():
@@ -1793,6 +1850,11 @@ class PasteFlowApp:
         new_capture_hotkey = new_settings.get("hotkey_capture", "alt+f2")
         if old_capture_hotkey != new_capture_hotkey:
             self.interceptor.set_capture_hotkey(new_capture_hotkey)
+
+        # AI 자유질문 단축키 재설정
+        new_ask_ai_hotkey = new_settings.get("hotkey_ask_ai", "alt+`")
+        if old_ask_ai_hotkey != new_ask_ai_hotkey:
+            self.interceptor.set_ask_ai_hotkey(new_ask_ai_hotkey)
 
         # 자동 시작
         auto_start = new_settings.get("auto_start", "0") == "1"

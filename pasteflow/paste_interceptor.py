@@ -211,6 +211,7 @@ class PasteInterceptor:
         on_image_to_path: Optional[Callable[[], None]] = None,
         on_pin_image: Optional[Callable[[], None]] = None,
         on_capture: Optional[Callable[[], None]] = None,
+        on_ask_ai: Optional[Callable[[], None]] = None,
     ):
         self.queue = paste_queue
         self.monitor = clipboard_monitor
@@ -222,6 +223,7 @@ class PasteInterceptor:
         self.on_image_to_path = on_image_to_path
         self.on_pin_image = on_pin_image
         self.on_capture = on_capture
+        self.on_ask_ai = on_ask_ai
         self._hook = None
         self._thread: Optional[threading.Thread] = None
         self._hook_thread_id: int = 0
@@ -253,6 +255,11 @@ class PasteInterceptor:
         self._capture_need_ctrl: bool = False
         self._capture_need_shift: bool = False
         self._capture_need_alt: bool = False
+        # AI 자유질문 단축키 (패널 토글과 동일 구조)
+        self._ask_ai_vk: int = 0
+        self._ask_ai_need_ctrl: bool = False
+        self._ask_ai_need_shift: bool = False
+        self._ask_ai_need_alt: bool = False
         # 콜백 참조 유지 (GC 방지)
         self._hook_proc = HOOKPROC(self._low_level_keyboard_proc)
 
@@ -321,6 +328,19 @@ class PasteInterceptor:
             self._capture_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._capture_vk = 0
+
+    def set_ask_ai_hotkey(self, hotkey_str: str):
+        """AI 자유질문 단축키 설정 — 컨텍스트 없이 즉석에서 AI 질문 입력창을 띄운다."""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._ask_ai_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._ask_ai_need_shift = "shift" in parts
+        self._ask_ai_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._ask_ai_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._ask_ai_vk = 0
 
     def start(self):
         """저수준 키보드 훅 시작 (별도 스레드)"""
@@ -472,6 +492,20 @@ class PasteInterceptor:
                     if self.on_capture:
                         try:
                             self.on_capture()
+                        except Exception:
+                            pass
+                    return 1  # suppress
+
+                # AI 자유질문 단축키 감지 (기본 Alt+`)
+                if (self._ask_ai_vk and vk_code == self._ask_ai_vk
+                        and ctrl_pressed  == self._ask_ai_need_ctrl
+                        and shift_pressed == self._ask_ai_need_shift
+                        and alt_pressed   == self._ask_ai_need_alt):
+                    # 질문 입력 다이얼로그가 포그라운드를 잡도록 잠금 해제 (OCR 트리거와 동일)
+                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
+                    if self.on_ask_ai:
+                        try:
+                            self.on_ask_ai()
                         except Exception:
                             pass
                     return 1  # suppress
