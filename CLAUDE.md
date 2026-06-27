@@ -36,7 +36,7 @@ pasteflow/
 ├── database.py             # SQLite CRUD (clipboard_items, settings)
 ├── models.py               # ClipboardItem 데이터 모델
 ├── crypto.py               # DPAPI 시크릿 보호 (API 키 암호화 저장)
-├── uia.py                  # Windows UI Automation hit-test (ElementFromPoint — 마그네틱 캡처용, comtypes)
+├── uia.py                  # 커서 아래 요소 hit-test (MSAA AccessibleObjectFromPoint 우선 + UIA ElementFromPoint 폴백 — 마그네틱 캡처용, comtypes)
 ├── ocr_engine.py           # OCR 추상화 — winocr(WinRT) 동기 래퍼
 └── ui/
     ├── panel.py            # 전체 클립보드 패널
@@ -161,8 +161,8 @@ Snipaste를 대체하는 캡처 기능군. 단축키 추가는 모두 기존 패
 
 - **화면 핀 (Alt+F3)** — `main._on_pin_hotkey`: 클립보드 이미지를 읽어(`_read_image_from_clipboard`) `ImagePreviewPopup.open_new(..., native=True)`로 화면에 띄움(원본 1:1 크기, 화면 초과 시만 축소 / 다중 창·ESC 닫기·Space 주석 편집은 image_preview가 이미 제공). 이미지가 없으면 클립보드 **텍스트를 다크 배경 PNG로 렌더**(`_render_text_to_png` — 맑은 고딕 18px, 워드랩, 배경 `theme.BASE`+글자 `theme.TEXT`로 앱 다크 테마와 통일)해서 띄움(텍스트도 주석 가능 = 사실상 이미지화). 커서 우측에 배치. **`image_preview._bg_item.setTransformationMode(Smooth)`**: QGraphicsPixmapItem 기본 Fast(nearest)가 뷰의 SmoothPixmapTransform을 덮어써 비정수 배율에서 이미지·텍스트가 거칠게 보이던 것 수정(모든 미리보기 공통 개선).
 - **영역 캡처 (Alt+F2)** — `main._on_capture_region`: 마그네틱 캡처 오버레이(`_capture_overlay` = `CaptureOverlay`)가 선택 영역 QPixmap을 emit → **DIB**(`_qpixmap_to_dib` — 24bpp BI_RGB, 붙여넣기 호환 최광)로 변환 → `interceptor._set_clipboard`+`_persist_clipboard_item`(OCR 결과와 동일 무중복 경로: 클립보드+히스토리+큐) → `_save_image_to_folder`(설정 `capture_save_folder`, 기본 `_default_capture_folder()` = `<Pictures>\PasteFlow`, 없으면 생성) → 썸네일 토스트(`📷`). 설정에 캡처 단축키 행 + 저장 폴더 행(`QFileDialog`).
-- **마그네틱 캡처 (완료, v1.9.0)** — `uia.py`(`rect_at(x,y)` = UIA `ElementFromPoint`로 커서 아래 요소의 물리픽셀 사각형, comtypes·CUIAutomation 1회 생성 재사용) + `ui/capture_overlay.py`(`Qt.WindowType.WindowTransparentForInput` 클릭-통과 오버레이 — ElementFromPoint가 아래 실제 창을 짚도록. QTimer ~16ms(~60fps)로 `GetCursorPos`→`uia.rect_at`→물리→논리 변환(`MonitorFromPoint` 물리원점+QScreen DPR)→요소 하이라이트(무거운 hover UIA hit-test는 `_UIA_MIN_INTERVAL`≈30ms로 스로틀해 과호출 방지), ESC 폴링). **`_capture_overlay`로 main에 연결**(Alt+F2). 동작:
-  - **요소 클릭 캡처(3b)**: WH_MOUSE_LL 마우스 훅을 캡처 시작 시 전용 데몬 스레드에 설치(`paste_interceptor`의 키보드 훅 패턴 복제)·종료 시 해제. **콜백은 trivial**(좌/우 버튼 flag만 세팅 후 suppress, 실제 UIA·crop은 메인 스레드 QTimer가 flag를 보고 처리 — 콜백이 무거우면 시스템 마우스가 끊김). 좌클릭=현재 하이라이트 요소 캡처, 우클릭=취소. **좌·우 모두 down/up을 suppress하고 동작은 up에서 트리거** — down에서 취소/캡처하면 훅이 up 전에 풀려 up이 아래 앱으로 새어(우클릭 시 컨텍스트 메뉴가 뜸) 버그가 됨.
+- **마그네틱 캡처 (완료, v1.9.0)** — `uia.py`(`rect_at(x,y)` = 커서 아래 요소의 물리픽셀 사각형 — **MSAA `AccessibleObjectFromPoint`+`accLocation` 우선 + UIA `ElementFromPoint` 폴백**, comtypes `oleacc`/CUIAutomation 1회 생성 재사용. 크롬 최대화 북마크 바 중앙에서 UIA는 개별 버튼 대신 거친 pane만 주지만 MSAA는 개별 북마크를 정확히 줌 — Snipaste도 OLEACC 사용, v1.17.0에서 UIA→MSAA 전환) + `ui/capture_overlay.py`(`Qt.WindowType.WindowTransparentForInput` 클릭-통과 오버레이 — hit-test가 아래 실제 창을 짚도록. QTimer ~16ms(~60fps)로 `GetCursorPos`→`uia.rect_at`→물리→논리 변환(`MonitorFromPoint` 물리원점+QScreen DPR)→요소 하이라이트(무거운 hover hit-test는 `_UIA_MIN_INTERVAL`≈30ms로 스로틀해 과호출 방지), ESC 폴링). **`_capture_overlay`로 main에 연결**(Alt+F2). 동작:
+  - **요소 클릭 캡처(3b)**: WH_MOUSE_LL 마우스 훅을 캡처 시작 시 전용 데몬 스레드에 설치(`paste_interceptor`의 키보드 훅 패턴 복제)·종료 시 해제. **콜백은 trivial**(좌/우 버튼 flag만 세팅 후 suppress, 실제 hit-test·crop은 메인 스레드 QTimer가 flag를 보고 처리 — 콜백이 무거우면 시스템 마우스가 끊김). 좌클릭=현재 하이라이트 요소 캡처, 우클릭=취소. **좌·우 모두 down/up을 suppress하고 동작은 up에서 트리거** — down에서 취소/캡처하면 훅이 up 전에 풀려 up이 아래 앱으로 새어(우클릭 시 컨텍스트 메뉴가 뜸) 버그가 됨.
   - **자유드래그 폴백(3c)**: 좌버튼 누른 채 `_DRAG_THRESHOLD`(4px) 이상 이동하면 클릭 대신 자유 사각형(시작점~현재 커서, 요소 무시). 안 움직이고 떼면 요소 클릭. 빈 영역을 드래그 없이 클릭하면 무시(`_capture(None)`).
   - **크로스 모니터 합성(`_crop_global`)**: 선택 영역이 단일 모니터면 그 화면 스크린샷에서 바로 crop, 여러 모니터에 걸치면 가장 높은 DPR을 타깃으로 빈 캔버스에 각 화면 조각을 제 위치에 그려 합성(배율 다른 조각은 타깃 DPR로 스케일 — 기하학 정확, 저DPI 조각은 약간 소프트). 100/125/150% 트리플 모니터 실조건 검증 완료.
   - 결과 QPixmap → `region_captured` → 기존 `_on_capture_region`(DIB+클립보드+히스토리+파일+토스트, 무수정).
