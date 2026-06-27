@@ -433,13 +433,15 @@ def _read_image_from_clipboard() -> bytes | None:
 
 
 def _render_text_to_png(text: str) -> bytes:
-    """클립보드 텍스트를 흰 배경 이미지(PNG bytes)로 렌더링한다.
+    """클립보드 텍스트를 다크 배경 이미지(PNG bytes)로 렌더링한다.
 
     Snipaste의 'paste text to screen'처럼, 텍스트도 화면 핀·주석이 가능하도록
     이미지화한다. 줄바꿈은 보존하고, 최대폭을 넘으면 워드랩한다.
+    앱 전체가 다크 테마이므로 배경도 어둡게(테마 BASE) + 밝은 글자(TEXT)로 렌더한다.
     """
     from PyQt6.QtGui import QPixmap, QPainter, QFont, QFontMetrics, QColor
     from PyQt6.QtCore import QRect, Qt, QBuffer, QByteArray
+    from pasteflow.ui.theme import BASE, TEXT
 
     pad = 16
     max_w = 700
@@ -458,11 +460,11 @@ def _render_text_to_png(text: str) -> bytes:
     h = max(1, bounds.height()) + pad * 2
 
     pm = QPixmap(w, h)
-    pm.fill(QColor("#ffffff"))
+    pm.fill(QColor(BASE))
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
     p.setFont(font)
-    p.setPen(QColor("#1e1e2e"))  # 흰 배경 위 어두운 글자
+    p.setPen(QColor(TEXT))  # 다크 배경 위 밝은 글자
     p.drawText(QRect(pad, pad, w - pad * 2, h - pad * 2), flags, text)
     p.end()
 
@@ -733,8 +735,29 @@ class PasteFlowApp:
         # DB에서 설정 로드 및 적용
         self._apply_settings_from_db()
 
+        # AI 답변창 F 스냅 프리셋 주입 (방향별 사용자 크기 — 그립 리사이즈 시 자동 저장).
+        from pasteflow.ui.text_preview import configure_snap_presets
+        configure_snap_presets(self._load_snap_presets(), self._save_snap_preset)
+
         # 시그널 연결
         self._connect_signals()
+
+    def _load_snap_presets(self) -> dict:
+        """DB에서 방향별 F 스냅 프리셋(`WxH`)을 읽어 {orient: (w,h)} 로 반환."""
+        presets = {}
+        for orient in ("landscape", "portrait"):
+            raw = self.db.get_setting(f"snap_preset_{orient}", "") or ""
+            if "x" in raw:
+                try:
+                    w, h = raw.lower().split("x", 1)
+                    presets[orient] = (int(w), int(h))
+                except ValueError:
+                    pass
+        return presets
+
+    def _save_snap_preset(self, orientation: str, w: int, h: int):
+        """그립 리사이즈 시 호출(메인 스레드) — 방향별 F 프리셋을 DB에 영속화."""
+        self.db.set_setting(f"snap_preset_{orientation}", f"{w}x{h}")
 
     def _connect_signals(self):
         """모든 시그널 연결"""
@@ -1600,6 +1623,26 @@ class PasteFlowApp:
         popup = TextPreviewPopup.open_new(item, anchor, editable=False, markdown=True, center=True)
         popup.copy_requested.connect(self._on_copy_item)
         popup.copy_as_image_requested.connect(self._on_answer_image_copy)
+        popup.copy_text_requested.connect(self._on_copy_selected_text)
+
+    def _on_copy_selected_text(self, text: str):
+        """AI 답변창 '선택→복사' 모드 — 드래그로 선택한 부분 텍스트를 클립보드+히스토리에 저장.
+
+        선택 즉시 복사되어 다른 곳에 바로 붙여넣을 수 있다(부분 발췌용). 클립보드·히스토리
+        처리는 답변 이미지 복사와 동일 패턴(_set_clipboard로 모니터 재감지 차단 → 히스토리 저장).
+        """
+        from pasteflow.ui.toast import ToastNotification
+
+        if not text.strip():
+            return
+        item = ClipboardItem(
+            content_type="text",
+            text_content=text,
+            preview_text=text[:200],
+        )
+        self.interceptor._set_clipboard(item)
+        self._persist_clipboard_item(item)
+        ToastNotification("선택한 텍스트 복사됨", icon="📋")
 
     def _on_answer_image_copy(self, pixmap):
         """AI 답변창 우클릭 '이미지로 복사' — 렌더된 답변 픽맵을 클립보드(DIB)+히스토리에 저장.

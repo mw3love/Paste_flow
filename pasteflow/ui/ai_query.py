@@ -136,22 +136,52 @@ class AiQueryDialog(QDialog):
         layout.addLayout(btn_row)
 
     def showEvent(self, event):
-        """첫 표시 시 커서가 있는 모니터에서 커서 옆으로 이동(듀얼/트리플 모니터 대응).
+        """첫 표시 시 커서가 있는 모니터 정중앙으로 이동하고, 즉시 타이핑 가능하도록
+        창을 포그라운드로 활성화한 뒤 입력칸에 포커스를 준다.
 
-        QDialog 기본은 부모(패널) 중앙 정렬이라, 핀·미리보기를 다른 모니터에서
-        우클릭해 띄우면 패널 모니터에 떠버린다. 트리거 위치(커서)를 따라가게 한다.
+        - 위치: 알림창처럼 커서가 있는 모니터 한복판(듀얼/트리플 모니터 대응). QDialog
+          기본 부모(패널) 중앙 정렬이나 커서 옆 배치는 다른 모니터에서 띄울 때 시선이
+          분산돼, 답변창과 동일하게 활성 모니터 중앙으로 통일한다.
+        - 포커스: PasteFlow는 백그라운드 상주 앱이라 단축키로 띄운 창이 포그라운드를
+          못 가져와 한 번 클릭해야 타이핑되던 문제를 강제 활성화로 해결한다.
         """
         super().showEvent(event)
-        if getattr(self, "_positioned", False):
-            return
-        self._positioned = True
-        cursor = QCursor.pos()
-        screen = QApplication.screenAt(cursor) or QApplication.primaryScreen()
-        avail = screen.availableGeometry()
-        w, h = self.width(), self.height()
-        x = min(max(cursor.x() + 16, avail.left()), avail.right() - w)
-        y = min(max(cursor.y() + 16, avail.top()), avail.bottom() - h)
-        self.move(x, y)
+        if not getattr(self, "_positioned", False):
+            self._positioned = True
+            cursor = QCursor.pos()
+            screen = QApplication.screenAt(cursor) or QApplication.primaryScreen()
+            avail = screen.availableGeometry()
+            w, h = self.width(), self.height()
+            x = min(max(avail.center().x() - w // 2, avail.left()), avail.right() - w)
+            y = min(max(avail.center().y() - h // 2, avail.top()), avail.bottom() - h)
+            self.move(x, y)
+        self._force_foreground()
+        self.raise_()
+        self.activateWindow()
+        self._editor.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    def _force_foreground(self):
+        """백그라운드 앱이 띄운 창에 포그라운드 포커스를 강제로 가져온다(Windows).
+
+        Windows의 포그라운드 잠금(다른 앱이 포그라운드일 때 SetForegroundWindow 무시)을
+        AttachThreadInput으로 우회한다 — 패널 드래그 붙여넣기에서 쓰는 것과 동일 기법.
+        """
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hwnd = int(self.winId())
+            fg = user32.GetForegroundWindow()
+            cur_tid = kernel32.GetCurrentThreadId()
+            fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+            if fg_tid and fg_tid != cur_tid:
+                user32.AttachThreadInput(fg_tid, cur_tid, True)
+                user32.SetForegroundWindow(hwnd)
+                user32.AttachThreadInput(fg_tid, cur_tid, False)
+            else:
+                user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
 
     def _try_submit(self):
         if self._editor.toPlainText().strip():

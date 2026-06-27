@@ -12,6 +12,7 @@ import re
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QApplication, QMenu, QPlainTextEdit, QTextEdit, QFrame,
+    QPushButton,
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, QEvent, QTimer, pyqtSignal
 from PyQt6.QtGui import (
@@ -90,6 +91,70 @@ def _fix_markdown_emphasis(text: str) -> str:
     return _QUOTED_BOLD_RE.sub(lambda m: f"{m.group(1)}**{m.group(2)}**{m.group(1)}", text)
 
 
+# F 스냅 프리셋(방향별 크기). AI 답변창은 답변마다 새 인스턴스로 생겼다 닫히는 짧은 수명이라
+# 인스턴스에 기억시키면 다음 답변창에 안 넘어간다 → 모듈 레벨에 보관하고, DB 영속화(재시작 후
+# 유지)는 main이 주입한 콜백으로 처리한다(UI 위젯이 DB를 직접 만지지 않게 분리).
+_SNAP_PRESETS: dict[str, tuple[int, int]] = {}      # {"landscape": (w,h), "portrait": (w,h)}
+_SNAP_PERSIST = None                                  # callable(orientation:str, w:int, h:int)
+
+
+def configure_snap_presets(presets: dict, persist_cb) -> None:
+    """main이 시작 시 1회 호출 — DB에서 읽은 방향별 F 프리셋과 저장 콜백을 주입한다."""
+    global _SNAP_PERSIST
+    _SNAP_PRESETS.clear()
+    if presets:
+        _SNAP_PRESETS.update(presets)
+    _SNAP_PERSIST = persist_cb
+
+
+class _ResizeGrip(QWidget):
+    """우하단 코너 그립 — 드래그로 부모 팝업을 자유 리사이즈(AI 답변창 전용).
+
+    프레임리스 창이라 OS 리사이즈 핸들이 없어 직접 구현한다. 가운데클릭=창 이동과
+    충돌하지 않도록 좌클릭 드래그만 처리하며, 드래그 시작 시 부모의 수동 크기 모드를
+    켠다(이후 줌이 자동 크기로 되돌리지 않음)."""
+
+    _SIZE = 24  # 잡기 편하도록 넉넉히 (꼭짓점에 flush 배치)
+
+    def __init__(self, popup: "TextPreviewPopup"):
+        super().__init__(popup)
+        self._popup = popup
+        self.setFixedSize(self._SIZE, self._SIZE)
+        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        self._press = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press = (event.globalPosition().toPoint(), self._popup.size())
+            self._moved = False
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._press is not None:
+            start, sz = self._press
+            d = event.globalPosition().toPoint() - start
+            self._moved = True
+            self._popup._apply_manual_resize(sz.width() + d.x(), sz.height() + d.y())
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        # 실제 드래그로 크기를 바꿨을 때만 그 크기를 방향별 F 프리셋으로 기억(메모리+DB).
+        if self._press is not None and self._moved:
+            self._popup._commit_snap_preset()
+        self._press = None
+        event.accept()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QColor(_SURFACE2))
+        s = self._SIZE
+        # 우하단 꼭짓점 기준 대각선 3줄(크기조절 핸들 관용 표기).
+        for off in (4, 10, 16):
+            p.drawLine(s - off, s - 3, s - 3, s - off)
+        p.end()
+
+
 class TextPreviewPopup(QWidget):
     """텍스트 전체 미리보기 — 다중 창 동시 표시 지원"""
 
@@ -99,6 +164,7 @@ class TextPreviewPopup(QWidget):
     copy_requested = pyqtSignal(object)   # ClipboardItem
     edit_requested = pyqtSignal(int)      # item_id
     copy_as_image_requested = pyqtSignal(object)  # QPixmap (AI 답변 전용 — 답변 전체를 이미지로)
+    copy_text_requested = pyqtSignal(str)  # 선택 텍스트 (AI 답변 전용 — 선택→복사 모드)
 
     # ------------------------------------------------------------------
     # 클래스 메서드
@@ -139,6 +205,11 @@ class TextPreviewPopup(QWidget):
         self._markdown = markdown
         self._raw_text = ""  # 마크다운 측정용 원문 (show_preview에서 채움)
         self._marks: list[tuple[int, int]] = []  # 형광펜 범위(문서 position 좌표)
+        # 형광펜(True) ↔ 선택→복사(False, 기본) 모드. 우상단 버튼·Shift+백틱으로 토글.
+        # 답변이 처음 열릴 땐 선택→복사 모드 — 부분 발췌가 흔하고, 형광펜은 필요할 때만 켠다.
+        self._highlight_mode = False
+        self._manual_size = False  # 코너 그립으로 수동 리사이즈하면 자동 크기 산정 중단
+        self._snapped = False      # F 키로 모니터 방향 영역에 스냅된 상태인지(토글용)
         # 마크다운 요소(제목/볼드/코드/기울임) 스팬 — setMarkdown 직후 1회만 수집(아래).
         self._syntax_spans: list[tuple[int, int, str, bool]] = []
         self.setObjectName("popup_root")
@@ -233,6 +304,27 @@ class TextPreviewPopup(QWidget):
         # viewport 클릭/휠 → popup이 처리 (전체 창 드래그·휠 줌)
         self._editor.viewport().installEventFilter(self)
 
+        # AI 답변(마크다운) 전용 오버레이: 우상단 형광펜/선택 토글 버튼 + 우하단 리사이즈 그립.
+        self._hl_btn: QPushButton | None = None
+        self._grip: _ResizeGrip | None = None
+        if markdown:
+            self._hl_btn = QPushButton(self)
+            self._hl_btn.setFixedSize(26, 26)
+            self._hl_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self._hl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._hl_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {_SURFACE0};
+                    border: 1px solid {_SURFACE2};
+                    border-radius: 6px;
+                    font-size: 14px;
+                }}
+                QPushButton:hover {{ background: {_SURFACE2}; }}
+            """)
+            self._hl_btn.clicked.connect(self._toggle_highlight_mode)
+            self._update_hl_btn()
+            self._grip = _ResizeGrip(self)
+
         self._apply_active_style(False)
         self._apply_scale()
         self.hide()
@@ -257,11 +349,10 @@ class TextPreviewPopup(QWidget):
                     self._apply_scale()
                     self._resize_to_content()
                 return True
-            # 창 이동 버튼: 마크다운=가운데클릭(좌클릭은 형광펜 선택용), 일반=좌클릭.
-            move_btn = (Qt.MouseButton.MiddleButton if self._markdown
-                        else Qt.MouseButton.LeftButton)
+            # 창 이동: 휠(가운데)클릭은 어느 모드에서나 이동. 좌클릭은 일반 미리보기에서만
+            # 이동(마크다운=AI 답변은 좌클릭=텍스트 선택). (_is_move_button 참조)
             if et == QEvent.Type.MouseButtonPress:
-                if event.button() == move_btn:
+                if self._is_move_button(event.button()):
                     self.activateWindow()
                     self._drag_pos = (
                         event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -271,11 +362,11 @@ class TextPreviewPopup(QWidget):
                     self.activateWindow()
                     return False  # QTextEdit가 텍스트 선택 처리하도록 통과
             elif et == QEvent.Type.MouseMove:
-                if self._drag_pos is not None and event.buttons() & move_btn:
+                if self._drag_pos is not None and event.buttons():
                     self.move(event.globalPosition().toPoint() - self._drag_pos)
                     return True
             elif et == QEvent.Type.MouseButtonRelease:
-                if event.button() == move_btn and self._drag_pos is not None:
+                if self._drag_pos is not None and self._is_move_button(event.button()):
                     self._drag_pos = None
                     return True
                 if self._markdown and event.button() == Qt.MouseButton.LeftButton:
@@ -284,12 +375,18 @@ class TextPreviewPopup(QWidget):
                     return False
         return super().eventFilter(obj, event)
 
+    def _is_move_button(self, btn) -> bool:
+        """창 이동 트리거 버튼인지 — 휠(가운데)클릭은 항상, 좌클릭은 일반 미리보기에서만."""
+        if btn == Qt.MouseButton.MiddleButton:
+            return True
+        return btn == Qt.MouseButton.LeftButton and not self._markdown
+
     # ------------------------------------------------------------------
     # 본체에서 직접 발생한 마우스 이벤트 (자식이 안 잡은 영역: 컨테이너 테두리 등)
     # ------------------------------------------------------------------
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
+        if self._is_move_button(event.button()):
             self.activateWindow()
             self._drag_pos = (
                 event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -297,7 +394,7 @@ class TextPreviewPopup(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._drag_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
+        if self._drag_pos is not None and event.buttons():
             self.move(event.globalPosition().toPoint() - self._drag_pos)
         super().mouseMoveEvent(event)
 
@@ -379,8 +476,31 @@ class TextPreviewPopup(QWidget):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             self.close()
-        else:
-            super().keyPressEvent(event)
+            return
+        # Shift+백틱 → 형광펜/선택복사 모드 토글 (마크다운=AI 답변 전용).
+        # Shift+` 는 키보드 레이아웃에 따라 ~ (AsciiTilde) 또는 ` (QuoteLeft)로 들어온다.
+        if (self._markdown
+                and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                and event.key() in (Qt.Key.Key_QuoteLeft, Qt.Key.Key_AsciiTilde)):
+            self._toggle_highlight_mode()
+            return
+        # Ctrl+C → 현재 선택 텍스트 복사(선택→복사 모드에서 드래그로 선택한 부분 발췌).
+        # 에디터는 NoFocus라 키 이벤트가 팝업으로 오므로 여기서 직접 처리한다.
+        if ((event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                and event.key() == Qt.Key.Key_C):
+            cur = self._editor.textCursor()
+            if cur.hasSelection():
+                txt = cur.selectedText().replace(chr(0x2029), chr(10))
+                if txt.strip():
+                    self.copy_text_requested.emit(txt)
+            return
+        # F → 현재 모니터 방향에 맞춘 중앙 영역으로 스냅 ↔ 내용맞춤 크기 복귀 토글(AI 답변 전용).
+        if (self._markdown
+                and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                and event.key() == Qt.Key.Key_F):
+            self._toggle_snap_zone()
+            return
+        super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
     # 활성화 외곽선 — 비활성 시 주황(상시), 활성 시 파랑
@@ -401,6 +521,98 @@ class TextPreviewPopup(QWidget):
         if event.type() == QEvent.Type.ActivationChange and hasattr(self, "_container"):
             self._apply_active_style(self.isActiveWindow())
         super().changeEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_overlays()
+
+    def _position_overlays(self):
+        """우상단 토글 버튼·우하단 리사이즈 그립을 현재 창 크기에 맞춰 재배치(마크다운 전용)."""
+        m = 6  # 컨테이너 테두리(2px) 바깥쪽 여백
+        btn = getattr(self, "_hl_btn", None)  # __init__ 중 이른 resize 대비 가드
+        grip = getattr(self, "_grip", None)
+        if btn is not None:
+            btn.move(self.width() - btn.width() - m, m)
+            btn.raise_()
+        if grip is not None:
+            # 우하단 꼭짓점에 flush — 모서리 자체가 크기조절 영역이 되도록(2px 인셋 제거).
+            grip.move(self.width() - grip.width(), self.height() - grip.height())
+            grip.raise_()
+
+    def _toggle_snap_zone(self):
+        """F 키 — 현재 창이 올라가 있는 모니터의 방향(가로/세로)에 맞춘 중앙 영역으로
+        스냅한다. 다시 누르면 내용맞춤(자동) 크기로 복귀(FancyZones식 토글).
+
+        크기: 사용자가 그립으로 맞춰 저장한 방향별 프리셋(_SNAP_PRESETS)이 있으면 그 크기,
+        없으면 기본 비율(가로 = 폭 80%×높이 90% / 세로 = 폭 90%×높이 40%).
+        스냅 시 wrap을 강제 on해 새 폭에 맞춰 내용이 재배치되고, 길면 세로 스크롤로 본다.
+        """
+        if self._snapped:
+            # 복귀: 자동 크기 산정 재개 → 내용맞춤 크기로
+            self._snapped = False
+            self._manual_size = False
+            self._resize_to_content()
+            self._clamp_to_screen(self._current_avail())
+            return
+        avail = self._current_avail()
+        orient = self._orientation_of(avail)
+        preset = _SNAP_PRESETS.get(orient)
+        if preset:  # 그립으로 저장해 둔 사용자 크기(현재 모니터를 못 넘게 clamp)
+            w = min(preset[0], avail.width())
+            h = min(preset[1], avail.height())
+        elif orient == "landscape":
+            w = round(avail.width() * 0.80)
+            h = round(avail.height() * 0.90)
+        else:
+            w = round(avail.width() * 0.90)
+            h = round(avail.height() * 0.40)
+        x = avail.left() + (avail.width() - w) // 2
+        y = avail.top() + (avail.height() - h) // 2
+        self._manual_size = True   # 스냅 크기를 줌·재표시가 덮어쓰지 않게
+        self._snapped = True
+        self._set_line_wrap(True)  # 새 폭에 맞춰 내용 재배치(가로 잘림 방지)
+        self.resize(w, h)
+        self.move(x, y)
+
+    def _current_avail(self):
+        """현재 창이 속한 모니터의 작업 영역(availableGeometry)."""
+        screen = (self.screen()
+                  or QApplication.screenAt(self.geometry().center())
+                  or QApplication.primaryScreen())
+        return screen.availableGeometry()
+
+    @staticmethod
+    def _orientation_of(avail) -> str:
+        return "landscape" if avail.width() >= avail.height() else "portrait"
+
+    def _commit_snap_preset(self):
+        """그립 리사이즈 완료 시 — 현재 크기를 현재 모니터 방향의 F 프리셋으로 저장(메모리+DB).
+
+        이후 그 방향 모니터에서 F를 누르면 기본 비율 대신 이 크기로 스냅된다.
+        영속화 콜백은 main이 configure_snap_presets로 주입(없으면 메모리에만 — 세션 한정)."""
+        avail = self._current_avail()
+        orient = self._orientation_of(avail)
+        w, h = self.width(), self.height()
+        _SNAP_PRESETS[orient] = (w, h)
+        if _SNAP_PERSIST is not None:
+            try:
+                _SNAP_PERSIST(orient, w, h)
+            except Exception:
+                pass
+
+    def _apply_manual_resize(self, w: int, h: int):
+        """코너 그립 드래그 → 자유 리사이즈. 이후 자동 크기 산정은 중단하고, 폭에 맞춰
+        내용이 재배치되도록 wrap을 강제 on(좁히면 가로 잘림 방지)."""
+        self._manual_size = True
+        self._snapped = False  # 수동 조절하면 스냅 토글 상태 해제(다음 F는 스냅으로)
+        self._set_line_wrap(True)
+        screen = (self.screen()
+                  or QApplication.screenAt(self.geometry().center())
+                  or QApplication.primaryScreen())
+        avail = screen.availableGeometry()
+        w = max(220, min(w, avail.width()))
+        h = max(140, min(h, avail.height()))
+        self.resize(w, h)
 
     # ------------------------------------------------------------------
     # 생명주기 — _instances 목록 정리
@@ -471,7 +683,16 @@ class TextPreviewPopup(QWidget):
     # ------------------------------------------------------------------
 
     def _on_left_select_release(self):
-        """좌클릭 릴리스: 선택이 있으면 그 범위 형광펜 토글, 없으면(클릭) 마크 해제."""
+        """좌클릭 릴리스 — 모드에 따라 갈린다.
+
+        형광펜 모드: 선택이 있으면 그 범위 형광펜 토글, 없으면(클릭) 마크 해제.
+        선택→복사 모드: 선택 텍스트를 클립보드로 복사(선택 표시는 유지해 무엇을 복사했는지
+        시각 확인). 형광펜은 건드리지 않는다.
+        """
+        # 선택→복사 모드: 드래그는 일반 텍스트 선택만 한다(자동복사 없음). 선택 후
+        # Ctrl+C로 복사(keyPressEvent에서 처리). 형광펜은 건드리지 않는다.
+        if not self._highlight_mode:
+            return
         cur = self._editor.textCursor()
         if cur.hasSelection():
             s, e = cur.selectionStart(), cur.selectionEnd()
@@ -480,6 +701,33 @@ class TextPreviewPopup(QWidget):
             self._toggle_mark(s, e)
         else:
             self._remove_mark_at(cur.position())
+
+    def _toggle_highlight_mode(self):
+        """형광펜 ↔ 선택→복사 모드 전환 (우상단 버튼·Shift+백틱).
+
+        선택→복사 모드에서 텍스트를 먼저 드래그 선택해 둔 뒤 형광펜 모드로 진입하면,
+        그 선택 범위에 즉시 형광펜을 적용한다(드래그→모드전환 순서도 자연스럽게 동작).
+        버튼·Shift+백틱 모두 에디터 선택을 건드리지 않으므로 선택이 그대로 살아 있다.
+        """
+        self._highlight_mode = not self._highlight_mode
+        self._update_hl_btn()
+        if self._highlight_mode:
+            cur = self._editor.textCursor()
+            if cur.hasSelection():
+                s, e = cur.selectionStart(), cur.selectionEnd()
+                cur.clearSelection()
+                self._editor.setTextCursor(cur)
+                self._toggle_mark(s, e)
+
+    def _update_hl_btn(self):
+        if self._hl_btn is None:
+            return
+        if self._highlight_mode:
+            self._hl_btn.setText("🖍")
+            self._hl_btn.setToolTip("형광펜 모드 — 드래그로 강조 (클릭/Shift+` 로 선택·복사 모드 전환)")
+        else:
+            self._hl_btn.setText("✂")
+            self._hl_btn.setToolTip("선택→복사 모드 — 드래그로 선택하면 바로 복사 (클릭/Shift+` 로 형광펜 모드 전환)")
 
     @staticmethod
     def _merge_marks(marks):
@@ -702,7 +950,12 @@ class TextPreviewPopup(QWidget):
 
         한계는 화면 크기. PREVIEW_INITIAL_MAX_*는 첫 표시 시점에만 의미가
         있고, 사용자가 zoom-in 하면 화면 한계까지 자유롭게 확장된다.
+
+        단, 코너 그립으로 수동 리사이즈한 뒤에는(_manual_size) 자동 산정을 건너뛴다 —
+        사용자가 정한 크기를 줌·재표시가 덮어쓰지 않게 한다(내용은 wrap+스크롤로 흡수).
         """
+        if self._manual_size:
+            return
         screen = (self.screen()
                   or QApplication.screenAt(self.geometry().center())
                   or QApplication.primaryScreen())

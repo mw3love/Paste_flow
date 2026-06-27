@@ -6,7 +6,7 @@ _ToastStack 싱글턴이 활성 토스트를 우하단 코너 기준으로 위�
 """
 from PyQt6.QtWidgets import QWidget, QLabel, QHBoxLayout
 from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint
-from PyQt6.QtGui import QGuiApplication, QPainter, QColor, QPen, QPixmap, QCursor
+from PyQt6.QtGui import QGuiApplication, QPainter, QColor, QPen, QPixmap
 
 from pasteflow.ui.theme import COLORS
 
@@ -40,10 +40,11 @@ class _ToastStack:
             self._relayout()
 
     def add(self, toast: "ToastNotification"):
-        # 스택이 비어 있다가 새로 생기는 순간의 커서 모니터에 고정 (멀티모니터 대응) —
-        # 표시 중 다른 모니터로 커서가 가도 떠 있는 토스트가 튀지 않게 한다.
+        # 스택 토스트(시작 알림·복사 알림 등 수동적 알림)는 항상 주모니터 우하단에 고정한다.
+        # 예측 가능한 위치 — 커서를 따라 모니터를 옮겨다니지 않는다. (능동적으로 기다리는
+        # AI·OCR 진행/결과는 스택이 아니라 anchor/center 모드로 활성 모니터 중앙에 뜬다.)
         if not self._toasts:
-            self._screen = QGuiApplication.screenAt(QCursor.pos())
+            self._screen = QGuiApplication.primaryScreen()
         self._toasts.append(toast)
         # 최대 개수 초과 → 가장 오래된 것을 동기 제거 후 즉시 닫음
         while len(self._toasts) > _MAX_STACK:
@@ -59,9 +60,8 @@ class _ToastStack:
             self._relayout()
 
     def _relayout(self):
-        """커서 모니터(고정) 우하단 기준으로 모든 토스트를 다시 배치 (최신 = 맨 아래)."""
-        scr = self._screen or QGuiApplication.screenAt(QCursor.pos()) \
-            or QGuiApplication.primaryScreen()
+        """주모니터(고정) 우하단 기준으로 모든 토스트를 다시 배치 (최신 = 맨 아래)."""
+        scr = self._screen or QGuiApplication.primaryScreen()
         screen = scr.availableGeometry()
         x_right = screen.right() - _SCREEN_MARGIN
         y = screen.bottom() - _SCREEN_MARGIN - self._bottom_reserved
