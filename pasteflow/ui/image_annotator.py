@@ -271,12 +271,29 @@ def _bg_swatch_icon(bg) -> QIcon:
 # ---------------------------------------------------------------------------
 
 class _HandleResizeMixin:
-    _HANDLE = 9.0  # 화면 px
+    # 핸들 크기는 주석의 표시 크기에 비례(작은 변 기준)하되 씬 단위로 클램프한다 —
+    # 작은 주석에서 핸들이 상대적으로 거대해 보이던 문제 해결. 너무 작아 못 잡는 일은
+    # 하한으로, 우스꽝스럽게 커지는 일은 상한으로 막는다.
+    _HANDLE_FRAC = 0.22  # 작은 변 대비 핸들 비율
+    _HANDLE_MIN = 5.0    # 씬 단위 하한(항상 잡히게)
+    _HANDLE_MAX = 12.0   # 씬 단위 상한
+    _ROT_GAP = 14.0  # 도형 윗변 ~ 회전 원 사이 빈 줄기(씬 단위, 원 크기와 무관하게 일정)
+
+    def _handle_px(self) -> float:
+        """핸들 한 변(로컬 단위). 주석 표시 크기에 비례 + [MIN,MAX] 클램프."""
+        s = self._scale_or_1()
+        cr = self._content_rect()
+        scene_dim = min(cr.width(), cr.height()) * s  # 주석 작은 변(씬 단위)
+        h_scene = max(self._HANDLE_MIN, min(scene_dim * self._HANDLE_FRAC, self._HANDLE_MAX))
+        return h_scene / s
 
     def _init_resize(self):
         self._resizing = False
+        self._rotating = False
         self._press_scale = 1.0
         self._press_dist = 1.0
+        self._press_rot = 0.0
+        self._press_angle = 0.0
 
     # 선택된 도형에 현재 색/두께 적용 — pen 기반(rect/ellipse/line/path) 공통 구현.
     # arrow/badge/text는 pen이 없거나 색 보관 방식이 달라 각자 오버라이드한다.
@@ -292,10 +309,12 @@ class _HandleResizeMixin:
             pen.setWidthF(float(width))
             self.setPen(pen)
 
-    # 복제 시 위치·스케일·z·플래그(이동/선택 가능) 공통 복사. 타입별 기하/색은 각 clone()이 채운다.
+    # 복제 시 위치·스케일·회전·z·플래그(이동/선택 가능) 공통 복사. 타입별 기하/색은 각 clone()이 채운다.
     def _copy_common_to(self, dst):
         dst.setPos(self.pos())
         dst.setScale(self.scale())
+        dst.setTransformOriginPoint(self.transformOriginPoint())
+        dst.setRotation(self.rotation())
         dst.setZValue(self.zValue())
         dst.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsMovable
@@ -307,10 +326,39 @@ class _HandleResizeMixin:
         s = self.scale()
         return s if s else 1.0
 
+    # 타이트 경계(선택박스·핸들 기준). 도형별로 override한다(기본은 Qt 기본 boundingRect).
+    def _content_rect(self) -> QRectF:
+        return super().boundingRect()
+
+    # 핸들 hit-test의 기준 영역(선택 시 핸들 미포함). 기본은 Qt 기본 shape;
+    # boundingRect 기반 shape를 쓰는 도형(arrow/badge)은 content_rect로 override해
+    # 회전 핸들 여유분이 클릭 영역에 새는 것을 막는다.
+    def _base_shape(self):
+        return super().shape()
+
+    # 실제 boundingRect = content ∪ 회전 핸들 영역(상시 예약 → 선택 해제 시 핸들 잔상 방지).
+    # 위쪽뿐 아니라 좌우도 덮어야 함 — 얇은 도형(세로선 등)은 핸들 원이 content보다 가로로
+    # 넓어 좌우로 삐져나오므로. 여유분은 scale 의존이라, 크기조절 중 mouseMove에서
+    # prepareGeometryChange로 갱신한다.
+    def boundingRect(self) -> QRectF:
+        pad = 3.0 / self._scale_or_1()
+        return self._content_rect().united(self._rot_handle_rect().adjusted(-pad, -pad, pad, pad))
+
     def _handle_local_rect(self) -> QRectF:
-        h = self._HANDLE / self._scale_or_1()
-        c = self.boundingRect().bottomRight()
+        h = self._handle_px()
+        c = self._content_rect().bottomRight()
         return QRectF(c.x() - h, c.y() - h, h, h)
+
+    def _rot_handle_center(self) -> QPointF:
+        # 원이 가리는 부분(반지름)을 간격에 더해, 보이는 줄기(gap)가 핸들 크기와 무관하게 일정.
+        cr = self._content_rect()
+        r = self._handle_px() * 0.5  # 원 반지름(= 사각 변의 절반 → 사각과 같은 지름)
+        return QPointF(cr.center().x(), cr.top() - self._ROT_GAP / self._scale_or_1() - r)
+
+    def _rot_handle_rect(self) -> QRectF:
+        d = self._handle_px()  # 원 지름 = 크기조절 사각 변
+        c = self._rot_handle_center()
+        return QRectF(c.x() - d / 2, c.y() - d / 2, d, d)
 
     def _owner_tool(self):
         """현재 활성 도구를 뷰→owner 경로로 조회(없으면 None)."""
@@ -336,35 +384,69 @@ class _HandleResizeMixin:
     def _paint_handle(self, painter: QPainter):
         if not self._handle_active():
             return
+        s = self._scale_or_1()
+        # 회전 핸들 — content 상단 중앙 위에 줄기 + 코랄 원
+        cr = self._content_rect()
+        top_mid = QPointF(cr.center().x(), cr.top())
+        rc = self._rot_handle_center()
+        rh = self._handle_px() * 0.5  # 반지름 — 지름이 크기조절 사각 변과 같게
+        painter.setPen(QPen(QColor(_PEACH), 1.0 / s))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawLine(top_mid, rc)
+        painter.setBrush(QBrush(QColor(_PEACH)))
+        painter.drawEllipse(rc, rh, rh)
+        # 크기조절 핸들 — 우하단 파란 사각
         r = self._handle_local_rect()
-        painter.setPen(QPen(QColor("white"), 1.0 / self._scale_or_1()))
+        painter.setPen(QPen(QColor("white"), 1.0 / s))
         painter.setBrush(QBrush(QColor(_BLUE)))
         painter.drawRect(r)
 
     def shape(self):
         # 선택 시 핸들 영역을 클릭 영역에 포함 — 속 빈 도형도 핸들을 잡을 수 있게.
-        base = super().shape()
+        base = self._base_shape()
         if self._handle_active():
             hp = QPainterPath()
             hp.addRect(self._handle_local_rect())
+            hp.addEllipse(self._rot_handle_rect())
             return base.united(hp)
         return base
 
     def mousePressEvent(self, event):
-        if self._handle_active() and self._handle_local_rect().contains(event.pos()):
-            self._resizing = True
-            self.setTransformOriginPoint(self.boundingRect().center())
-            center = self.mapToScene(self.boundingRect().center())
-            d = QLineF(center, event.scenePos()).length()
-            self._press_dist = d if d > 1 else 1.0
-            self._press_scale = self._scale_or_1()
-            event.accept()
-            return
+        if self._handle_active():
+            # 회전 핸들이 바깥쪽이라 먼저 검사한다.
+            if self._rot_handle_rect().contains(event.pos()):
+                self._rotating = True
+                self.setTransformOriginPoint(self._content_rect().center())
+                center = self.mapToScene(self._content_rect().center())
+                self._press_angle = QLineF(center, event.scenePos()).angle()
+                self._press_rot = self.rotation()
+                event.accept()
+                return
+            if self._handle_local_rect().contains(event.pos()):
+                self._resizing = True
+                self.setTransformOriginPoint(self._content_rect().center())
+                center = self.mapToScene(self._content_rect().center())
+                d = QLineF(center, event.scenePos()).length()
+                self._press_dist = d if d > 1 else 1.0
+                self._press_scale = self._scale_or_1()
+                event.accept()
+                return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if getattr(self, "_rotating", False):
+            center = self.mapToScene(self._content_rect().center())
+            cur = QLineF(center, event.scenePos()).angle()
+            # QLineF.angle()은 반시계(+)·setRotation은 시계(+) → 부호 반전
+            new_rot = self._press_rot - (cur - self._press_angle)
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                new_rot = round(new_rot / 15.0) * 15.0  # 15° 스냅
+            self.setRotation(new_rot % 360)
+            event.accept()
+            return
         if getattr(self, "_resizing", False):
-            center = self.mapToScene(self.boundingRect().center())
+            self.prepareGeometryChange()  # 회전 여유분이 scale 의존 → 경계 캐시 갱신
+            center = self.mapToScene(self._content_rect().center())
             d = QLineF(center, event.scenePos()).length()
             new = self._press_scale * (d / self._press_dist)
             self.setScale(max(0.15, min(new, 25.0)))
@@ -373,7 +455,8 @@ class _HandleResizeMixin:
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if getattr(self, "_resizing", False):
+        if getattr(self, "_rotating", False) or getattr(self, "_resizing", False):
+            self._rotating = False
             self._resizing = False
             event.accept()
             return
@@ -417,7 +500,7 @@ class _EllipseItem(_HandleResizeMixin, QGraphicsEllipseItem):
         c.setBrush(QBrush(self.brush()))
         return self._copy_common_to(c)
 
-    def boundingRect(self):
+    def _content_rect(self):
         # _LineItem과 동일 사이클 방지: QGraphicsEllipseItem.boundingRect()는 펜 두께가
         # 0이 아니면 shape()를 호출하므로, 사각형 기하에서 직접 계산해 재귀를 끊는다.
         extra = self.pen().widthF() / 2.0 + 1.0
@@ -438,7 +521,7 @@ class _LineItem(_HandleResizeMixin, QGraphicsLineItem):
         c.setPen(QPen(self.pen()))
         return self._copy_common_to(c)
 
-    def boundingRect(self):
+    def _content_rect(self):
         # Qt 기본 QGraphicsLineItem.boundingRect()는 펜 두께가 0이 아니면 내부적으로
         # shape()를 호출하는데, 믹스인 shape()가 핸들 계산에 다시 boundingRect()를 부르므로
         # 무한 재귀(스택 오버플로 → 프로세스 abort)가 된다. 선 기하에서 직접 계산해 사이클을 끊는다.
@@ -461,7 +544,7 @@ class _PathItem(_HandleResizeMixin, QGraphicsPathItem):
         c.setPen(QPen(self.pen()))
         return self._copy_common_to(c)
 
-    def boundingRect(self):
+    def _content_rect(self):
         # _LineItem과 동일 사이클 방지: QGraphicsPathItem.boundingRect()는 brush가 NoBrush일 때
         # shape()를 호출하므로, 패스 기하에서 직접 계산해 믹스인 shape()와의 재귀를 끊는다.
         extra = self.pen().widthF() / 2.0 + 1.0
@@ -514,9 +597,16 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         c.set_points(QPointF(self._p1), QPointF(self._p2))
         return self._copy_common_to(c)
 
-    def boundingRect(self) -> QRectF:
+    def _content_rect(self) -> QRectF:
         extra = self._width + max(14, self._width * 3) + 4
         return QRectF(self._p1, self._p2).normalized().adjusted(-extra, -extra, extra, extra)
+
+    def _base_shape(self):
+        # QGraphicsItem 기본 shape는 boundingRect(회전 여유 포함) 기반 → content로 한정해
+        # 화살표 위쪽 빈 공간이 클릭 영역에 새지 않게 한다.
+        p = QPainterPath()
+        p.addRect(self._content_rect())
+        return p
 
     def paint(self, painter, option, widget=None):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -549,7 +639,7 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
                             Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.drawPolygon(head)
         if self.isSelected():
-            _draw_selection_box(painter, self.boundingRect(), self._scale_or_1())
+            _draw_selection_box(painter, self._content_rect(), self._scale_or_1())
         self._paint_handle(painter)
 
 
@@ -568,9 +658,14 @@ class _BadgeItem(_HandleResizeMixin, QGraphicsItem):
             | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
         )
 
-    def boundingRect(self) -> QRectF:
+    def _content_rect(self) -> QRectF:
         r = self._R + 2
         return QRectF(-r, -r, 2 * r, 2 * r)
+
+    def _base_shape(self):
+        p = QPainterPath()
+        p.addEllipse(self._content_rect())
+        return p
 
     def apply_color(self, color):
         self._color = QColor(color)
@@ -593,7 +688,7 @@ class _BadgeItem(_HandleResizeMixin, QGraphicsItem):
         painter.drawText(QRectF(-self._R, -self._R, 2 * self._R, 2 * self._R),
                          Qt.AlignmentFlag.AlignCenter, str(self._number))
         if self.isSelected():
-            _draw_selection_box(painter, self.boundingRect(), self._scale_or_1())
+            _draw_selection_box(painter, self._content_rect(), self._scale_or_1())
         self._paint_handle(painter)
 
 
@@ -664,7 +759,7 @@ class _TextItem(_HandleResizeMixin, QGraphicsTextItem):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(self._bg))
-            painter.drawRoundedRect(self.boundingRect().adjusted(1, 1, -1, -1), 4, 4)
+            painter.drawRoundedRect(self._content_rect().adjusted(1, 1, -1, -1), 4, 4)
         super().paint(painter, option, widget)
         self._paint_handle(painter)
 
