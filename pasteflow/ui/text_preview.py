@@ -9,6 +9,7 @@ UX 정책:
 """
 import math
 import re
+import webbrowser
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QApplication, QMenu, QPlainTextEdit, QTextEdit, QFrame,
@@ -62,6 +63,7 @@ _MD_HEADING = "#89b4fa"   # 제목 — 파랑
 _MD_CODE    = "#38bdf8"   # 백틱/코드 — 파랑(형광펜 빨강과 대비). 폰트는 본문으로 통일(아래)
 _MD_BOLD    = "#ff9e5e"   # 볼드 — 코랄(채도↑, dual subtitle 느낌)
 _MD_ITALIC  = "#a6e3a1"   # 기울임 — 초록
+_MD_LINK    = "#60a5fa"   # 하이퍼링크 — 밝은 파랑 + 밑줄(클릭 가능 표시, 제목 파랑과 톤 구분)
 
 # 본문 폰트 패밀리. 코드(백틱) 구간은 Qt가 모노스페이스로 그려 본문과 폰트가 튀므로,
 # 색·밑줄만 강조로 남기고 폰트는 이 본문 폰트로 되돌려 다른 텍스트와 통일한다.
@@ -210,6 +212,7 @@ class TextPreviewPopup(QWidget):
         self._highlight_mode = False
         self._manual_size = False  # 코너 그립으로 수동 리사이즈하면 자동 크기 산정 중단
         self._snapped = False      # F 키로 모니터 방향 영역에 스냅된 상태인지(토글용)
+        self._pressed_anchor = ""  # 좌클릭 누른 위치의 링크 URL(드래그 없이 떼면 브라우저로 염)
         # 마크다운 요소(제목/볼드/코드/기울임) 스팬 — setMarkdown 직후 1회만 수집(아래).
         self._syntax_spans: list[tuple[int, int, str, bool]] = []
         self.setObjectName("popup_root")
@@ -244,10 +247,13 @@ class TextPreviewPopup(QWidget):
         # markdown=True → QTextEdit(서식 렌더링), 아니면 QPlainTextEdit(평문, 기존 정책).
         self._editor = QTextEdit() if markdown else QPlainTextEdit()
         self._editor.setReadOnly(True)
-        # 마크다운(AI 답변)은 형광펜용 텍스트 선택 허용(좌드래그=선택→형광펜),
+        # 마크다운(AI 답변)은 형광펜용 텍스트 선택 허용(좌드래그=선택→형광펜) + 링크 호버
+        # 인식(LinksAccessibleByMouse — 링크 위 손가락 커서). 실제 링크 열기는 QTextEdit가
+        # 자동으로 안 하므로(QTextBrowser와 달리) 클릭 위치의 anchor를 잡아 직접 연다.
         # 일반 미리보기는 선택 불가(창 전체 드래그=이동) 기존 정책 유지.
         self._editor.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse if markdown
+            (Qt.TextInteractionFlag.TextSelectableByMouse
+             | Qt.TextInteractionFlag.LinksAccessibleByMouse) if markdown
             else Qt.TextInteractionFlag.NoTextInteraction)
         self._editor.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         # 양쪽 스크롤바 모두 영구 차단 — "미리보기는 한 번에 다 보여야 한다"는 정책.
@@ -360,11 +366,20 @@ class TextPreviewPopup(QWidget):
                     return True
                 if self._markdown and event.button() == Qt.MouseButton.LeftButton:
                     self.activateWindow()
+                    # 누른 위치에 링크가 있으면 기억 — 드래그 없이 떼면 release에서 연다.
+                    self._pressed_anchor = self._editor.anchorAt(event.position().toPoint())
                     return False  # QTextEdit가 텍스트 선택 처리하도록 통과
             elif et == QEvent.Type.MouseMove:
                 if self._drag_pos is not None and event.buttons():
                     self.move(event.globalPosition().toPoint() - self._drag_pos)
                     return True
+                # 링크 위에선 손모양, 그 외엔 I빔 — 뷰포트 커서를 IBeam으로 고정해 둬서
+                # Qt의 자동 링크 호버 커서가 안 떠, 마우스 이동마다 직접 토글한다(드래그 중 제외).
+                if self._markdown:
+                    href = self._editor.anchorAt(event.position().toPoint())
+                    self._editor.viewport().setCursor(
+                        Qt.CursorShape.PointingHandCursor if href
+                        else Qt.CursorShape.IBeamCursor)
             elif et == QEvent.Type.MouseButtonRelease:
                 if self._drag_pos is not None and self._is_move_button(event.button()):
                     self._drag_pos = None
@@ -662,6 +677,9 @@ class TextPreviewPopup(QWidget):
                     underline = False
                     if heading > 0:
                         color = _MD_HEADING
+                    elif cf.isAnchor() and cf.anchorHref():
+                        color = _MD_LINK
+                        underline = True  # 하이퍼링크 = 파랑 + 밑줄
                     elif cf.fontFixedPitch():
                         color = _MD_CODE
                         underline = True  # 백틱/코드 = 밑줄 + 볼드(_apply_marks에서)
@@ -689,6 +707,15 @@ class TextPreviewPopup(QWidget):
         선택→복사 모드: 선택 텍스트를 클립보드로 복사(선택 표시는 유지해 무엇을 복사했는지
         시각 확인). 형광펜은 건드리지 않는다.
         """
+        # 링크 클릭: 누른 곳에 링크가 있고 드래그(선택)가 없으면 기본 브라우저로 연다.
+        # 두 모드(형광펜/선택→복사) 공통으로 먼저 처리한다. 드래그로 선택했으면 링크로
+        # 안 보고 모드별 로직(선택·형광펜)으로 넘긴다.
+        anchor = self._pressed_anchor
+        self._pressed_anchor = ""
+        if anchor and not self._editor.textCursor().hasSelection():
+            webbrowser.open(anchor)
+            return
+
         # 선택→복사 모드: 드래그는 일반 텍스트 선택만 한다(자동복사 없음). 선택 후
         # Ctrl+C로 복사(keyPressEvent에서 처리). 형광펜은 건드리지 않는다.
         if not self._highlight_mode:
@@ -776,12 +803,13 @@ class TextPreviewPopup(QWidget):
             cur.setPosition(pos + length, QTextCursor.MoveMode.KeepAnchor)
             fmt = QTextCharFormat()
             fmt.setForeground(QColor(color))
-            if underline:  # 코드(백틱) = 파랑 + 밑줄 + 볼드 + 본문폰트(모노스페이스 튐 방지)
+            if underline:  # 코드(백틱)·링크 공통 = 색 + 밑줄
                 fmt.setFontUnderline(True)
                 fmt.setUnderlineColor(QColor(color))
-                fmt.setFontFixedPitch(False)
-                fmt.setFontFamily(_FONT_FAMILY)
-                fmt.setFontWeight(QFont.Weight.Bold)
+                if color == _MD_CODE:  # 코드만 볼드 + 본문폰트(모노스페이스 튐 방지). 링크는 비볼드.
+                    fmt.setFontFixedPitch(False)
+                    fmt.setFontFamily(_FONT_FAMILY)
+                    fmt.setFontWeight(QFont.Weight.Bold)
             cur.mergeCharFormat(fmt)
 
         for s, e in self._marks:
