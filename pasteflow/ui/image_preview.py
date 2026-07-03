@@ -20,6 +20,7 @@ from pasteflow.ui.theme import (
 from pasteflow.models import ClipboardItem
 from pasteflow.ui.image_annotator import (
     _EditorMixin, _AnnotatorView, _DragBar, _pixmap_from_data, _tool_icon,
+    flatten_scene_to_png,
 )
 
 PREVIEW_MAX_W = 640
@@ -336,18 +337,39 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         self._win_drag = None
 
     # ------------------------------------------------------------------
+    # 주석 반영 (비파괴) — 씬에 주석이 있으면 평탄화본을, 없으면 원본을 대상으로.
+    # 원본 self._item·벡터 주석은 씬에 그대로 남아 재편집·undo 가능.
+    # ------------------------------------------------------------------
+    def _has_annotations(self) -> bool:
+        return any(it is not self._bg_item for it in self._scene.items())
+
+    def _effective_item(self) -> ClipboardItem:
+        if self._pixmap_ok and self._has_annotations():
+            png = flatten_scene_to_png(self._scene)
+            return ClipboardItem(content_type="image", image_data=png)  # id=None(임시)
+        return self._item
+
+    # ------------------------------------------------------------------
     # 우클릭 메뉴 (뷰어 모드) — 복사 / OCR / 주석 편집 / 닫기
     # ------------------------------------------------------------------
     def contextMenuEvent(self, event):
         if self._edit_mode:
             return  # 편집 모드에선 그리기 우선 (메뉴 없음)
+        target = self._effective_item()  # 주석 있으면 평탄화본, 없으면 원본
         menu = QMenu(self)
         menu.setStyleSheet(_dark_menu_style())
-        menu.addAction("복사").triggered.connect(lambda: self.copy_requested.emit(self._item))
-        menu.addAction("텍스트 추출(OCR)").triggered.connect(lambda: self.ocr_requested.emit(self._item))
-        menu.addAction("AI에게 질문").triggered.connect(lambda: self.ai_requested.emit(self._item))
+        if target is self._item:
+            menu.addAction("복사").triggered.connect(lambda: self.copy_requested.emit(target))
+        else:
+            # 평탄화본(임시, id 없음)의 복사는 주석 편집 완료 복사와 동일 경로로 —
+            # 클립보드 + 히스토리 저장 + 토스트. copy_requested는 DB 항목을 전제해
+            # id 없는 항목이면 히스토리에 안 남고 피드백도 없다.
+            menu.addAction("복사").triggered.connect(
+                lambda: self.annotated_copy_requested.emit(target.image_data))
+        menu.addAction("텍스트 추출(OCR)").triggered.connect(lambda: self.ocr_requested.emit(target))
+        menu.addAction("AI에게 질문").triggered.connect(lambda: self.ai_requested.emit(target))
         menu.addAction("파일로 저장 후 경로 복사").triggered.connect(
-            lambda: self.copy_as_path_requested.emit(self._item))
+            lambda: self.copy_as_path_requested.emit(target))
         menu.addAction("주석 편집").triggered.connect(self.toggle_edit_mode)
         menu.addSeparator()
         menu.addAction("닫기").triggered.connect(self.close)

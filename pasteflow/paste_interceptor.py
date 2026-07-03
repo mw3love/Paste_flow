@@ -192,6 +192,31 @@ def _send_ctrl_v_plain():
     ])
 
 
+def _png_to_dib(png_bytes: bytes) -> Optional[bytes]:
+    """PNG bytes → CF_DIB bytes (24bpp BMP에서 14바이트 파일 헤더 제거).
+
+    클립보드에 "PNG" 등록 포맷만 올리면 그것을 읽는 앱(크롬 계열 등)에서만 붙고
+    그림판·한글 등 CF_DIB만 읽는 앱에선 붙여넣기가 무반응이라, PNG 항목은
+    CF_DIB를 병행 등재한다. DIB 24bpp는 알파가 없으므로 투명 픽셀은 흰 배경 합성.
+    """
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(png_bytes))
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            rgba = img.convert("RGBA")
+            bg = Image.new("RGB", rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.getchannel("A"))
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="BMP")
+        return buf.getvalue()[14:]  # BITMAPFILEHEADER(14B) 제거 → DIB
+    except Exception:
+        return None
+
+
 class PasteInterceptor:
     """Ctrl+Shift+V / 패널 토글 / OCR 단축키 감지 (저수준 키보드 훅)
 
@@ -719,22 +744,28 @@ class PasteInterceptor:
                 except Exception:
                     pass
 
-            # 이미지 (PNG 또는 DIB — 원본 포맷 복원)
+            # 이미지 (PNG 또는 DIB — 원본 포맷 복원. PNG는 CF_DIB 병행 등재로
+            # "PNG" 포맷을 못 읽는 앱(그림판·한글 등)에서도 붙여넣기 보장)
             if item.image_data:
                 is_png = item.image_data[:4] == b'\x89PNG'
-                cf = CF_PNG if is_png else _CF_DIB
-                try:
-                    h = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(item.image_data))
-                    if h:
-                        p = _kernel32.GlobalLock(h)
-                        if p:
-                            ctypes.memmove(p, item.image_data, len(item.image_data))
-                            _kernel32.GlobalUnlock(h)
-                            _user32.SetClipboardData(cf, h)
-                        else:
-                            _kernel32.GlobalFree(h)
-                except Exception:
-                    pass
+                payloads = [(CF_PNG if is_png else _CF_DIB, item.image_data)]
+                if is_png:
+                    dib = _png_to_dib(item.image_data)
+                    if dib:
+                        payloads.append((_CF_DIB, dib))
+                for cf, data in payloads:
+                    try:
+                        h = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(data))
+                        if h:
+                            p = _kernel32.GlobalLock(h)
+                            if p:
+                                ctypes.memmove(p, data, len(data))
+                                _kernel32.GlobalUnlock(h)
+                                _user32.SetClipboardData(cf, h)
+                            else:
+                                _kernel32.GlobalFree(h)
+                    except Exception:
+                        pass
 
             # 기타 포맷 복원 (노션 등 앱 전용)
             if item.extra_formats:
