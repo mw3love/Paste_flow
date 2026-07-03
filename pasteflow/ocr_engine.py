@@ -221,6 +221,15 @@ def _ask_prompt(question: str, context_text: str = "") -> str:
     return question
 
 
+def build_ask_prompt(question: str, context_text: str = "") -> str:
+    """첫 대화 턴의 user 컨텐츠(컨텍스트 임베드 프롬프트)를 만드는 공개 헬퍼.
+
+    멀티턴 대화에서 main이 첫 질문의 프롬프트를 구성해 대화 히스토리에 보관할 때 쓴다
+    (이후 후속 질문은 원문 그대로 히스토리에 쌓인다). `_ask_prompt`의 공개 래퍼.
+    """
+    return _ask_prompt(question, context_text)
+
+
 # ── 엔진 ────────────────────────────────────────────────────────────────────
 
 
@@ -492,14 +501,24 @@ class OcrEngine:
     # ── 텍스트 AI 질의 (OCR과 동일 배관 재사용) ──
 
     def ask(self, question: str, context_text: str = "", image_png: bytes | None = None) -> str:
-        """AI 질의 — 클립보드 항목(텍스트 또는 이미지)을 컨텍스트로 질문에 답한다.
+        """AI 질의(단발) — 클립보드 항목(텍스트/이미지)을 컨텍스트로 질문에 답한다.
 
-        OCR과 동일한 Gemini 배관(게이트웨이/공식 분기·자동 폴백·_normalize_base_url)을
-        재사용한다. `image_png`가 주어지면 질문과 함께 이미지를 멀티모달로 전송(시각 질의),
-        없으면 텍스트 컨텍스트+질문만 보낸다. 게이트웨이는 OpenAI 호환 chat.completions,
-        공식 API는 신 SDK google-genai로 갈린다(google_search 도구로 웹 검색 grounding —
-        OCR 경로의 구 google.generativeai와 달리 실시간 질문에 답함, _ask_google_genai 참고).
+        단일 user 턴을 만들어 `ask_messages`에 위임한다(멀티턴 배관과 동일 경로).
+        `image_png`가 주어지면 질문과 함께 이미지를 멀티모달로 전송(시각 질의).
         동기 호출이므로 호출자가 워커 스레드에서 실행해야 UI 블로킹이 없다.
+        """
+        prompt = _ask_prompt(question, context_text)
+        return self.ask_messages([{"role": "user", "content": prompt}], image_png=image_png)
+
+    def ask_messages(self, messages: list[dict], image_png: bytes | None = None) -> str:
+        """멀티턴 AI 질의 — `messages`는 [{"role":"user"/"assistant","content":str}, ...].
+
+        마지막 항목이 방금 던진 user 질문이고, 앞선 턴들은 직전까지의 대화(웹 챗봇처럼
+        이전 문답을 인지한 상태로 답하게 함). `image_png`는 **첫 user 턴에만** 멀티모달로
+        실린다(이미지는 한 번만 전송, 이후 턴은 텍스트만). OCR과 동일한 Gemini 배관
+        (게이트웨이/공식 분기·자동 폴백·_normalize_base_url·max_tokens=16384)을 재사용하고,
+        시스템 프롬프트(AI_SYSTEM_PROMPT)를 주입한다. 공식 경로는 google_search(grounding)
+        도구를 붙여 실시간 질문에도 답한다. 동기 호출이라 워커 스레드에서 실행해야 한다.
         """
         import os
         api_key = self.api_key or os.environ.get("GOOGLE_API_KEY", "")
@@ -507,14 +526,13 @@ class OcrEngine:
             raise RuntimeError("API 키가 설정되지 않았습니다. 설정에서 Gemini API 키를 입력하세요.")
 
         self.last_fallback_from = None
-        prompt = _ask_prompt(question, context_text)
 
         if self.base_url:
             model_name = self.model or "gemini-3.1-flash-lite"
             return self._call_with_fallback(
                 model_name,
                 backend="gateway",
-                call=lambda m: self._ask_openai_compat(prompt, api_key, self.base_url, m, image_png),
+                call=lambda m: self._ask_openai_compat(messages, api_key, self.base_url, m, image_png),
             )
 
         try:
@@ -524,7 +542,7 @@ class OcrEngine:
 
         client = genai.Client(api_key=api_key)
         model_name = self.model or "gemini-2.5-flash"
-        call = lambda m: self._ask_google_genai(client, prompt, m, image_png)
+        call = lambda m: self._ask_google_genai(client, messages, m, image_png)
         try:
             return self._call_with_fallback(model_name, backend="official", call=call)
         except Exception as exc:
@@ -536,49 +554,56 @@ class OcrEngine:
             if _is_quota_error(exc) and model_name != _FALLBACK_DEFAULT:
                 self.last_fallback_from = model_name
                 self.last_used_model = _FALLBACK_DEFAULT
-                return self._ask_google_genai(client, prompt, _FALLBACK_DEFAULT, image_png)
+                return self._ask_google_genai(client, messages, _FALLBACK_DEFAULT, image_png)
             raise
 
     def _ask_openai_compat(
-        self, prompt: str, api_key: str, base_url: str, model: str, image_png: bytes | None = None
+        self, messages: list[dict], api_key: str, base_url: str, model: str,
+        image_png: bytes | None = None,
     ) -> str:
-        """OpenAI 호환 게이트웨이 질의 단일 호출 (폴백 없음). image_png가 있으면 멀티모달."""
+        """OpenAI 호환 게이트웨이 멀티턴 질의 단일 호출 (폴백 없음).
+
+        system 프롬프트를 맨 앞에 두고 대화 히스토리를 그대로 실어 보낸다(role은 user/
+        assistant 그대로 OpenAI chat.completions에 매핑). image_png가 있으면 **첫 user 턴**의
+        content를 image_url+text 멀티모달 배열로 감싼다(OCR _openai_compat_call과 동일 형식).
+        max_tokens=16384는 OCR과 동일(thinking 토큰 잘림 방지).
+        """
         import base64
         try:
             import openai
         except ImportError:
             raise RuntimeError("openai 패키지 미설치: pip install openai")
         client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
-        # 이미지가 있으면 OCR(_openai_compat_call)과 동일한 image_url+text 멀티모달 content,
-        # 없으면 텍스트만. max_tokens=16384는 OCR과 동일(thinking 토큰 잘림 방지).
-        if image_png:
-            b64 = base64.standard_b64encode(image_png).decode()
-            content = [
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-                {"type": "text", "text": prompt},
-            ]
-        else:
-            content = prompt
+
+        out = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
+        first_user_done = False
+        for m in messages:
+            role, content = m["role"], m["content"]
+            if role == "user" and not first_user_done:
+                first_user_done = True
+                if image_png:
+                    b64 = base64.standard_b64encode(image_png).decode()
+                    content = [
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                        {"type": "text", "text": content},
+                    ]
+            out.append({"role": role, "content": content})
+
         resp = client.chat.completions.create(
-            model=model,
-            max_tokens=16384,
-            messages=[
-                {"role": "system", "content": AI_SYSTEM_PROMPT},
-                {"role": "user", "content": content},
-            ],
-        )
+            model=model, max_tokens=16384, messages=out)
         return (resp.choices[0].message.content or "").strip()
 
     def _ask_google_genai(
-        self, client, prompt: str, model_name: str, image_png: bytes | None = None
+        self, client, messages: list[dict], model_name: str, image_png: bytes | None = None
     ) -> str:
-        """공식 Google API 질의 단일 호출 (폴백 없음). 신 SDK google-genai 사용.
+        """공식 Google API 멀티턴 질의 단일 호출 (폴백 없음). 신 SDK google-genai 사용.
 
+        대화 히스토리를 types.Content 리스트로 변환한다(user→"user", assistant→"model").
         google_search 도구를 항상 붙여 모델이 필요할 때만 웹 검색하게 한다(실시간
         날씨·뉴스 등 grounding). 구 SDK(google-generativeai 0.8.x)는 proto에 필드는
         있으나 요청에 이 도구를 실어 보내지 못해 검색이 동작하지 않으므로 신 SDK로
         이전했다(2026-06-27 실호출 검증: 구 SDK 4방식 모두 미검색, 신 SDK 검색 동작).
-        image_png가 있으면 멀티모달(시각 질의) — 이미지+grounding 동시도 정상.
+        image_png가 있으면 **첫 user 턴**에 멀티모달로 실린다 — 이미지+grounding 동시도 정상.
         max_output_tokens=16384는 thinking 모델 본문 잘림 방지(OCR과 동일 사유).
         """
         from google.genai import types
@@ -587,13 +612,18 @@ class OcrEngine:
             tools=[types.Tool(google_search=types.GoogleSearch())],
             max_output_tokens=16384,
         )
-        if image_png:
-            contents = [
-                types.Part.from_bytes(data=image_png, mime_type="image/png"),
-                prompt,
-            ]
-        else:
-            contents = prompt
+        contents = []
+        first_user_done = False
+        for m in messages:
+            role = "user" if m["role"] == "user" else "model"
+            parts = []
+            if role == "user" and not first_user_done:
+                first_user_done = True
+                if image_png:
+                    parts.append(types.Part.from_bytes(data=image_png, mime_type="image/png"))
+            parts.append(types.Part(text=m["content"]))
+            contents.append(types.Content(role=role, parts=parts))
+
         resp = client.models.generate_content(
             model=model_name, contents=contents, config=config)
         return (resp.text or "").strip()

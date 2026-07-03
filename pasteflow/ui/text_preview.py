@@ -12,12 +12,12 @@ import re
 import webbrowser
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QApplication, QMenu, QPlainTextEdit, QTextEdit, QFrame,
-    QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QApplication, QMenu, QPlainTextEdit, QTextEdit,
+    QFrame, QPushButton, QLineEdit,
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, QEvent, QTimer, pyqtSignal
 from PyQt6.QtGui import (
-    QTextOption, QFont, QTextDocument, QTextCursor, QTextCharFormat, QColor,
+    QTextOption, QFont, QFontMetrics, QTextDocument, QTextCursor, QTextCharFormat, QColor,
     QTextListFormat, QTextBlockFormat,
     QImage, QPainter, QPixmap, QPalette, QAbstractTextDocumentLayout,
 )
@@ -99,6 +99,9 @@ def _fix_markdown_emphasis(text: str) -> str:
 _SNAP_PRESETS: dict[str, tuple[int, int]] = {}      # {"landscape": (w,h), "portrait": (w,h)}
 _SNAP_PERSIST = None                                  # callable(orientation:str, w:int, h:int)
 
+# 펜딩 탭 답변 자리 sentinel — 후속 질문 엔터 직후 답이 아직 없는 턴을 표시(is 비교로 식별).
+_PENDING = object()
+
 
 def configure_snap_presets(presets: dict, persist_cb) -> None:
     """main이 시작 시 1회 호출 — DB에서 읽은 방향별 F 프리셋과 저장 콜백을 주입한다."""
@@ -167,6 +170,7 @@ class TextPreviewPopup(QWidget):
     edit_requested = pyqtSignal(int)      # item_id
     copy_as_image_requested = pyqtSignal(object)  # QPixmap (AI 답변 전용 — 답변 전체를 이미지로)
     copy_text_requested = pyqtSignal(str)  # 선택 텍스트 (AI 답변 전용 — 선택→복사 모드)
+    followup_requested = pyqtSignal(str)  # 이어서 질문 (AI 답변 전용 — 하단 입력칸 Enter)
 
     # ------------------------------------------------------------------
     # 클래스 메서드
@@ -174,7 +178,8 @@ class TextPreviewPopup(QWidget):
 
     @classmethod
     def open_new(cls, item: ClipboardItem, panel_geom: QRect, editable: bool = True,
-                 markdown: bool = False, center: bool = False) -> "TextPreviewPopup":
+                 markdown: bool = False, center: bool = False,
+                 initial_turn: tuple[str, str] | None = None) -> "TextPreviewPopup":
         """새 미리보기 창을 열고 인스턴스 목록에 등록한다.
 
         editable=False면 우클릭 "수정" 메뉴를 숨긴다(AI 답변 등 DB에 없는 임시 항목 —
@@ -183,10 +188,14 @@ class TextPreviewPopup(QWidget):
         일반 텍스트 미리보기는 원문 확인 용도라 평문 유지).
         center=True면 panel_geom 옆이 아니라 panel_geom이 속한 모니터 정중앙에 띄운다
         (AI 답변 전용 — _ai_anchor가 가리키는 커서 모니터 한복판).
+        initial_turn=(질문, 답변)이면 첫 대화 턴으로 설정한 뒤 표시한다(AI 답변 전용 —
+        show 전에 턴을 넣어 빈 화면 깜빡임·재사이즈를 피한다).
         """
         cascade_offset = len(cls._instances) * _CASCADE_STEP
         popup = cls(item, editable=editable, markdown=markdown)
         cls._instances.append(popup)
+        if initial_turn is not None:
+            popup._append_turn_data(initial_turn[0], initial_turn[1])
         popup.show_preview(panel_geom, cascade_offset, center=center)
         return popup
 
@@ -243,6 +252,27 @@ class TextPreviewPopup(QWidget):
         container_layout = QVBoxLayout(self._container)
         container_layout.setContentsMargins(2, 2, 2, 2)
         container_layout.setSpacing(0)
+
+        # AI 답변(마크다운) 전용 — 상단 "턴 탭" 바(Q1/Q2/… 답변별 페이지). 데이터는 add_turn이
+        # 채운다. 한 턴일 땐 숨기고(첫 답변은 예전 모습 그대로), 두 번째 답변부터 나타난다.
+        # 목적: 대화가 이어져도 한 화면에 한 문답만 보여 스크롤이 무한정 길어지지 않게(사용자
+        # 요청). 모델은 여전히 전체 대화를 인지하며, 탭은 표시만 나눈다.
+        self._turns: list[tuple[str, str]] = []   # [(질문 원문, 답변 or _PENDING), ...]
+        self._current_tab: int = 0
+        self._think_timer: QTimer | None = None   # 펜딩 탭 "생각 중" 애니메이션 타이머
+        self._pending_dots: int = 1
+        self._tab_btns: list[QPushButton] = []
+        self._tabbar: QWidget | None = None
+        self._tab_layout: QHBoxLayout | None = None
+        if markdown:
+            self._tabbar = QWidget()
+            self._tabbar.setFixedHeight(34)
+            self._tab_layout = QHBoxLayout(self._tabbar)
+            # 우측 여백 38px = 우상단 형광펜 토글 버튼(_hl_btn) 자리 확보(탭이 그 밑으로 안 감).
+            self._tab_layout.setContentsMargins(4, 4, 38, 2)
+            self._tab_layout.setSpacing(4)
+            self._tabbar.setVisible(False)
+            container_layout.addWidget(self._tabbar)
 
         # markdown=True → QTextEdit(서식 렌더링), 아니면 QPlainTextEdit(평문, 기존 정책).
         self._editor = QTextEdit() if markdown else QPlainTextEdit()
@@ -305,7 +335,38 @@ class TextPreviewPopup(QWidget):
                 background: transparent;
             }}
         """)
-        container_layout.addWidget(self._editor)
+        # 에디터가 남는 세로 공간을 차지하고 하단 입력칸은 고정 높이를 유지하도록 stretch=1.
+        # (일반 미리보기는 입력칸이 없어 stretch가 무의미하므로 무해.)
+        container_layout.addWidget(self._editor, 1)
+
+        # AI 답변(마크다운) 전용 — 하단 "이어서 질문" 입력칸(웹 챗봇식 후속 대화).
+        # 답변을 인지한 상태로 추가 질문을 받는다(main이 대화 히스토리를 팝업에 보관).
+        self._input: QLineEdit | None = None
+        if markdown:
+            self._input = QLineEdit()
+            self._input.setPlaceholderText("이어서 질문…  (Enter 전송)")
+            # 폰트를 위젯에 명시(맑은 고딕 13px) 후 그 폰트 메트릭으로 높이를 잡는다 —
+            # 스타일시트 font-size는 sizeHint에 안 반영돼, 예전엔 기본 폰트 기준 낮은 높이로
+            # 고정돼 한글 디센더(ㅁ/ㅇ/질 아랫부분)가 잘렸다. +14는 상하 패딩·디센더 여유.
+            _ifont = self._input.font()
+            _ifont.setPixelSize(13)
+            _ifont.setFamily(_FONT_FAMILY)
+            self._input.setFont(_ifont)
+            self._input.setFixedHeight(max(32, QFontMetrics(_ifont).height() + 14))
+            self._input.setStyleSheet(f"""
+                QLineEdit {{
+                    background: {_SURFACE0};
+                    color: {_TEXT};
+                    border: none;
+                    border-top: 1px solid {_SURFACE2};
+                    padding: 4px 8px;
+                    font-size: 13px;
+                }}
+                QLineEdit:focus {{ border-top: 1px solid {_PEACH}; }}
+                QLineEdit:disabled {{ color: {_SURFACE2}; }}
+            """)
+            self._input.returnPressed.connect(self._submit_followup)
+            container_layout.addWidget(self._input)
 
         # viewport 클릭/휠 → popup이 처리 (전체 창 드래그·휠 줌)
         self._editor.viewport().installEventFilter(self)
@@ -422,18 +483,13 @@ class TextPreviewPopup(QWidget):
     # ------------------------------------------------------------------
 
     def show_preview(self, panel_geom: QRect, cascade_offset: int = 0, center: bool = False):
-        text = self._item.text_content or self._item.preview_text or ""
         if self._markdown:
-            text = _fix_markdown_emphasis(text)  # 따옴표 볼드 정상화
-            self._raw_text = text
-            self._editor.setMarkdown(text)
-            self._apply_block_spacing(self._editor.document())  # 줄간격·문단 여백
-            self._set_list_bullets(self._editor.document())     # ○/ㅇ → •
-            # 코드 색칠이 fontFixedPitch를 끄므로(폰트 통일) 재탐지가 깨진다 → 변형 전에
-            # 1회만 수집해 두고 _apply_marks가 그 위치로 재적용한다(형광펜 시 색 증발 방지).
-            self._syntax_spans = self._collect_syntax_spans()
-            self._apply_marks()  # 모델 색 + 형광펜
+            if self._turns:
+                self._render_current_turn()  # 현재 턴만 렌더(탭)
+            else:
+                self._render_markdown(self._item.text_content or self._item.preview_text or "")
         else:
+            text = self._item.text_content or self._item.preview_text or ""
             self._raw_text = text
             self._editor.setPlainText(text)
         self._resize_to_content()
@@ -452,6 +508,218 @@ class TextPreviewPopup(QWidget):
                 self.move(compute_preview_pos(panel_geom, self.size(), screen, cascade_offset))
         self.show()
         self.raise_()
+
+    def _render_markdown(self, text: str):
+        """마크다운 본문을 에디터에 렌더(따옴표 볼드 정상화 → setMarkdown → 줄간격/불릿 →
+        요소색 스팬 수집 → 형광펜). show_preview와 후속 대화 갱신(update_answer)이 공유한다.
+
+        코드 색칠이 fontFixedPitch를 끄므로(폰트 통일) 재탐지가 깨진다 → 변형 전에
+        1회만 수집해 두고 _apply_marks가 그 위치로 재적용한다(형광펜 시 색 증발 방지).
+        """
+        text = _fix_markdown_emphasis(text)  # 따옴표 볼드 정상화
+        self._raw_text = text
+        self._editor.setMarkdown(text)
+        self._apply_block_spacing(self._editor.document())  # 줄간격·문단 여백
+        self._set_list_bullets(self._editor.document())     # ○/ㅇ → •
+        self._syntax_spans = self._collect_syntax_spans()
+        self._apply_marks()  # 모델 색 + 형광펜
+
+    # ------------------------------------------------------------------
+    # 이어서 질문(AI 답변 전용) — 하단 입력칸 + 대화 갱신
+    # ------------------------------------------------------------------
+
+    def _submit_followup(self):
+        """하단 입력칸 Enter — 새 펜딩 탭을 즉시 띄우고(질문+생각중 애니메이션) 질문을 main에
+        전달한다.
+
+        엔터 즉시 새 탭(Q_n+1)을 만들어 그 자리에 "🤔 AI가 생각하고 있어요…"를 보여줘,
+        답이 올 때까지 '멈춘 게 아니라 일하는 중'임을 확실히 알린다(사용자 요청). 실제 대화
+        히스토리·워커 호출은 main이 처리한다(followup_requested → 재질의 → resolve_pending).
+        """
+        if self._input is None:
+            return
+        text = self._input.text().strip()
+        if not text:
+            return
+        self._input.clear()
+        self.begin_followup(text)
+        self.followup_requested.emit(text)
+
+    def set_thinking(self, thinking: bool):
+        """후속 질의 진행 표시 — 입력칸을 비활성화하고 placeholder를 전환한다."""
+        if self._input is None:
+            return
+        self._input.setEnabled(not thinking)
+        self._input.setPlaceholderText(
+            "AI 생각 중…" if thinking else "이어서 질문…  (Enter 전송)")
+
+    # ------------------------------------------------------------------
+    # 펜딩 탭 — 후속 질문 엔터 즉시 "생각 중" 표시 (답 도착 시 실제 답변으로 교체)
+    # ------------------------------------------------------------------
+
+    def begin_followup(self, question: str):
+        """새 펜딩 탭을 추가해 "생각 중" 애니메이션을 시작한다(답변은 아직 없음).
+
+        답변 자리를 sentinel(_PENDING)로 둔 턴을 하나 넣고 최신 탭으로 전환한다. 창 크기는
+        재산정하지 않아(이전 답변 크기 유지) 답 도착 전까지 깜빡임이 없다.
+        """
+        import time
+        self._append_turn_data(question, _PENDING)
+        self.set_thinking(True)
+        self._pending_start = time.monotonic()
+        self._pending_dots = 1
+        self._render_current_turn()  # 크기 재산정 없이 본문만 "생각 중"으로
+        self._editor.verticalScrollBar().setValue(0)
+        if self._think_timer is None:
+            self._think_timer = QTimer(self)
+            self._think_timer.setInterval(500)
+            self._think_timer.timeout.connect(self._tick_pending)
+        self._think_timer.start()
+
+    def _tick_pending(self):
+        """펜딩 탭 본문의 경과시간·점 애니메이션을 0.5초마다 갱신(가벼운 setMarkdown)."""
+        if not (self._turns and self._turns[self._current_tab][1] is _PENDING):
+            return
+        self._pending_dots = (self._pending_dots % 3) + 1
+        self._render_current_turn()
+
+    def _stop_think_timer(self):
+        if self._think_timer is not None:
+            self._think_timer.stop()
+
+    def resolve_pending(self, answer: str):
+        """펜딩 탭을 실제 답변으로 교체하고 렌더·크기 재산정한다(add_turn의 완료 절반).
+
+        후속 질의가 정상 종료되면 main이 호출. 형광펜은 턴이 바뀌었으므로 초기화한다.
+        """
+        self._stop_think_timer()
+        if self._turns and self._turns[self._current_tab][1] is _PENDING:
+            q = self._turns[self._current_tab][0]
+            self._turns[self._current_tab] = (q, answer)
+        self._marks = []
+        self._render_current_turn()
+        self.set_thinking(False)
+        if not self._manual_size:
+            self._resize_to_content()
+        self._editor.verticalScrollBar().setValue(0)  # 새 답변은 상단부터
+
+    def cancel_pending(self):
+        """펜딩 탭을 제거하고 직전 탭으로 복귀한다(후속 질의 에러 시 main이 호출)."""
+        self._stop_think_timer()
+        if not (self._turns and self._turns[self._current_tab][1] is _PENDING):
+            self.set_thinking(False)
+            return
+        self._turns.pop()
+        self._current_tab = max(0, len(self._turns) - 1)
+        self._rebuild_tabs()
+        self._marks = []
+        self._render_current_turn()
+        self.set_thinking(False)
+        if not self._manual_size:
+            self._resize_to_content()
+
+    def _append_turn_data(self, question: str, answer: str):
+        """대화 턴 데이터 추가 + 탭 바 갱신(현재 탭=최신). 렌더는 호출자가 한다."""
+        self._turns.append((question, answer))
+        self._current_tab = len(self._turns) - 1
+        self._rebuild_tabs()
+
+    def add_turn(self, question: str, answer: str):
+        """새 대화 턴(후속 질문 응답) 추가 — 최신 탭으로 전환해 렌더하고 상단부터 보여준다.
+
+        각 탭은 그 턴의 문답 한 쌍만 표시하므로 스크롤이 무한정 길어지지 않는다(사용자 요청).
+        형광펜(_marks)은 문서 position이 바뀌므로 초기화한다.
+        """
+        self._append_turn_data(question, answer)
+        self._marks = []
+        self._render_current_turn()
+        self.set_thinking(False)
+        if not self._manual_size:
+            self._resize_to_content()
+        self._editor.verticalScrollBar().setValue(0)  # 새 답변은 상단부터
+
+    def _render_current_turn(self):
+        """현재 탭의 문답을 마크다운으로 렌더. 우클릭 복사·이미지화가 이 턴을 담도록
+        _item.text_content도 현재 턴으로 맞춘다(보고 있는 것 = 복사되는 것).
+
+        펜딩 턴(답변 미도착)이면 "생각 중" 애니메이션을 렌더하고 _item은 건드리지 않는다
+        (복사 시 '생각 중' 문구가 딸려가지 않게)."""
+        import time
+        q, a = self._turns[self._current_tab]
+        if a is _PENDING:
+            elapsed = int(time.monotonic() - getattr(self, "_pending_start", time.monotonic()))
+            m, s = divmod(elapsed, 60)
+            dots = "●" * self._pending_dots + "·" * (3 - self._pending_dots)
+            text = (f"**Q.** {q}\n\n---\n\n"
+                    f"🤔 AI가 생각하고 있어요…  ({m}:{s:02d}) {dots}")
+            self._render_markdown(text)
+            return
+        text = f"**Q.** {q}\n\n---\n\n{a}"
+        self._item.text_content = text
+        self._render_markdown(text)
+
+    def _select_tab(self, idx: int):
+        """탭 클릭 → 해당 턴으로 전환(상단부터 표시). 형광펜은 턴마다 초기화."""
+        if idx == self._current_tab or not (0 <= idx < len(self._turns)):
+            return
+        self._current_tab = idx
+        self._marks = []
+        self._render_current_turn()
+        self._update_tab_styles()
+        # 펜딩 탭(생각 중)은 본문이 짧아 재산정하면 창이 확 줄어든다 → 이전 크기 유지
+        # (begin_followup과 동일 정책). 완성된 탭으로 갈 때만 그 내용에 맞춰 재산정.
+        if not self._manual_size and self._turns[idx][1] is not _PENDING:
+            self._resize_to_content()
+        self._editor.verticalScrollBar().setValue(0)
+
+    def _rebuild_tabs(self):
+        """턴 수에 맞춰 탭 버튼(Q1/Q2/…)을 다시 만든다. 한 턴이면 탭 바를 숨긴다."""
+        if self._tabbar is None:
+            return
+        lay = self._tab_layout
+        while lay.count():
+            it = lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.setParent(None)
+        self._tab_btns = []
+        for i in range(len(self._turns)):
+            b = QPushButton(f"Q{i + 1}")
+            b.setFixedHeight(24)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.clicked.connect(lambda _=False, idx=i: self._select_tab(idx))
+            lay.addWidget(b)
+            self._tab_btns.append(b)
+        lay.addStretch(1)
+        self._update_tab_styles()
+        # 한 턴이면 숨김(첫 답변은 예전 모습). 두 번째부터 탭 노출.
+        self._tabbar.setVisible(len(self._turns) > 1)
+
+    def _update_tab_styles(self):
+        """현재 탭=코랄 강조, 나머지=중립. (앱 2톤 체계와 동일)"""
+        for i, b in enumerate(self._tab_btns):
+            if i == self._current_tab:
+                b.setStyleSheet(
+                    f"QPushButton{{background:{_PEACH};color:{_BG};border:none;"
+                    f"border-radius:5px;padding:2px 10px;font-size:12px;font-weight:bold;}}")
+            else:
+                b.setStyleSheet(
+                    f"QPushButton{{background:{_SURFACE0};color:{_TEXT};"
+                    f"border:1px solid {_SURFACE2};border-radius:5px;padding:2px 10px;"
+                    f"font-size:12px;}}QPushButton:hover{{background:{_SURFACE2};}}")
+
+    def _top_reserve(self) -> int:
+        """상단 턴 탭 바가 차지하는 높이(두 턴 이상일 때만 — 자동 크기 산정에서 예약)."""
+        tb = getattr(self, "_tabbar", None)
+        if tb is not None and len(self._turns) > 1:
+            return tb.height()
+        return 0
+
+    def _bottom_reserve(self) -> int:
+        """하단 입력칸이 차지하는 높이(자동 크기 산정·그립 배치에서 예약)."""
+        inp = getattr(self, "_input", None)
+        return inp.height() if inp is not None else 0
 
     # ------------------------------------------------------------------
     # 우클릭 메뉴 — 전체 복사 / 수정 / 닫기 (패널 메뉴와 동일 명칭·순서)
@@ -550,8 +818,9 @@ class TextPreviewPopup(QWidget):
             btn.move(self.width() - btn.width() - m, m)
             btn.raise_()
         if grip is not None:
-            # 우하단 꼭짓점에 flush — 모서리 자체가 크기조절 영역이 되도록(2px 인셋 제거).
-            grip.move(self.width() - grip.width(), self.height() - grip.height())
+            # 하단 "이어서 질문" 입력칸이 있으면 그 위에, 없으면 우하단 꼭짓점에 flush.
+            grip_y = self.height() - grip.height() - self._bottom_reserve()
+            grip.move(self.width() - grip.width(), grip_y)
             grip.raise_()
 
     def _toggle_snap_zone(self):
@@ -634,6 +903,7 @@ class TextPreviewPopup(QWidget):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event):
+        self._stop_think_timer()  # 펜딩 애니메이션 타이머 정리(누수 방지)
         type(self)._instances = [p for p in type(self)._instances if p is not self]
         super().closeEvent(event)
 
@@ -1034,7 +1304,9 @@ class TextPreviewPopup(QWidget):
         text_h = tmp.size().height()
 
         w = text_w + _CHROME_W
-        full_h = round(text_h) + _CHROME_H
+        # 상단 턴 탭 바 + 하단 "이어서 질문" 입력칸(마크다운=AI 답변 전용) 높이도 예약해
+        # 에디터(본문)가 눌리지 않게 한다.
+        full_h = round(text_h) + _CHROME_H + self._top_reserve() + self._bottom_reserve()
         h = min(max_h, full_h)
         # 마크다운 답변이 화면 상한을 넘어 세로 스크롤이 생기면, 스크롤바가 텍스트
         # 오른쪽을 가리지 않도록 그만큼 폭을 더한다.

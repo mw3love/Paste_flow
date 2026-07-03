@@ -636,7 +636,7 @@ class _SignalBridge(QObject):
     pin_image          = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 화면에 핀(떠 있는 창)으로 띄우기
     capture_requested  = pyqtSignal()        # 훅 스레드 → 메인: 영역 캡처 오버레이 띄우기
     ask_ai             = pyqtSignal()        # 훅 스레드 → 메인: AI 자유질문 입력창 띄우기
-    ai_done            = pyqtSignal(str, str)  # AI 워커 스레드 → 메인: (질문, 답변)
+    ai_turn_done       = pyqtSignal(object)  # AI 워커 스레드 → 메인: 대화 턴 결과 dict(팝업·답변·히스토리)
     ai_error           = pyqtSignal(str)     # AI 워커 스레드 → 메인: 에러 메시지
 
 
@@ -672,8 +672,9 @@ class PasteFlowApp:
         self._bridge.pin_image.connect(self._on_pin_hotkey)
         self._bridge.capture_requested.connect(self._on_capture_requested)
         self._bridge.ask_ai.connect(self._on_ask_ai_hotkey)
-        self._bridge.ai_done.connect(self._on_ai_done)
+        self._bridge.ai_turn_done.connect(self._on_ai_turn_done)
         self._bridge.ai_error.connect(self._on_ai_error)
+        self._ai_inflight_popup: TextPreviewPopup | None = None  # 진행 중 후속질의 답변창(에러 시 재활성화)
 
         self._saved_panel_geometry = None
         self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
@@ -933,29 +934,49 @@ class PasteFlowApp:
         )
 
     def _start_ai_worker(self, question: str, context_text: str, image_png: bytes | None = None):
-        """AI 질의 워커 — 질문+컨텍스트(텍스트 또는 이미지)를 받아 백그라운드에서 Gemini에 질의.
+        """AI 질의(첫 턴) — 질문+컨텍스트로 대화 히스토리를 시작해 워커에 넘긴다.
 
-        OCR과 동일한 게이트웨이/공식 배관(`OcrEngine.ask`)을 재사용한다. OCR 엔진 설정과
-        무관하게 항상 gemini 경로를 사용(이미지→텍스트 OCR이 winrt여도 AI 질의는 게이트웨이).
-        `image_png`가 주어지면 이미지를 멀티모달로 함께 전송(시각 질의).
-        결과/에러는 `_bridge.ai_done` / `_bridge.ai_error` 시그널로 메인 스레드에 통지.
+        첫 user 턴의 컨텐츠는 `build_ask_prompt`로 컨텍스트를 임베드한 프롬프트이고, 화면
+        표시용 원문 질문은 `display`에 따로 담는다(트랜스크립트 렌더는 display를 쓴다).
+        이후 후속 질문은 `_on_ai_followup`이 같은 히스토리에 쌓아 재질의한다.
         """
-        # 진행 칩 + 경과 시간 카운터 시작 (답이 올 때까지 유지).
-        # "다운된 게 아니라 작업 중"임을 시각적으로 알린다(비스트리밍이라 %는 불가).
-        # 앵커는 질문 제출 시점 커서(_ai_anchor) — 그 모니터 정중앙에 진행→답변을 모두 표시.
+        from pasteflow.ocr_engine import build_ask_prompt
+        prompt = build_ask_prompt(question, context_text)
+        conversation = [{"role": "user", "content": prompt, "display": question}]
+        self._run_ai_turn(conversation, image_png, popup=None)
+
+    def _run_ai_turn(self, conversation: list, image_png: bytes | None, popup):
+        """대화 한 턴을 백그라운드에서 질의한다(첫 질문·후속 질문 공용).
+
+        OCR과 동일한 게이트웨이/공식 배관(`OcrEngine.ask_messages`)을 재사용한다. OCR 엔진
+        설정과 무관하게 항상 gemini 경로. `image_png`는 첫 user 턴에만 멀티모달로 실린다.
+        진행 표시는 첫 턴이면 커서 모니터 정중앙 진행 칩, 후속 턴이면 답변창 하단 입력칸의
+        'AI 생각 중…'(팝업 `_submit_followup`이 이미 잠금)으로 갈린다. 결과/에러는
+        `ai_turn_done` / `ai_error` 시그널로 메인 스레드에 통지.
+        """
         from PyQt6.QtGui import QCursor
-        anchor = self._ai_anchor.topLeft() if getattr(self, "_ai_anchor", None) else QCursor.pos()
-        self._start_cursor_progress("AI 생각 중…", "🤖", anchor)
+        self._ai_inflight_popup = popup  # 에러 시 입력칸 재활성화 대상(후속 턴만 non-None)
+        if popup is None:
+            # 첫 턴: "다운된 게 아니라 작업 중"임을 진행 칩으로 알린다(비스트리밍이라 %는 불가).
+            anchor = self._ai_anchor.topLeft() if getattr(self, "_ai_anchor", None) else QCursor.pos()
+            self._start_cursor_progress("AI 생각 중…", "🤖", anchor)
+
+        # 엔진에는 role/content만 넘긴다(display는 표시 전용 — 트랜스크립트 렌더에서만 사용).
+        messages = [{"role": t["role"], "content": t["content"]} for t in conversation]
 
         def _run():
             try:
                 from pasteflow.ocr_engine import OcrEngine
                 api_key, base_url, model = self._resolve_gemini_cfg()
                 engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url, model=model)
-                answer = engine.ask(question, context_text, image_png=image_png)
+                answer = engine.ask_messages(messages, image_png=image_png)
                 if engine.last_fallback_from and engine.last_used_model:
                     self._bridge.ocr_fallback.emit(engine.last_fallback_from, engine.last_used_model)
-                self._bridge.ai_done.emit(question, answer)
+                new_conv = conversation + [{"role": "assistant", "content": answer}]
+                self._bridge.ai_turn_done.emit({
+                    "popup": popup, "answer": answer,
+                    "conversation": new_conv, "image_png": image_png,
+                })
             except Exception as e:
                 self._bridge.ai_error.emit(str(e))
 
@@ -1176,7 +1197,7 @@ class PasteFlowApp:
         컨텍스트가 없으므로 `AiQueryDialog`는 컨텍스트 미리보기 없이 질문 입력칸만 표시하고,
         `_start_ai_worker(question, "")`가 `ocr_engine._ask_prompt`의 '컨텍스트 없음 → 질문만
         전송' 경로를 탄다(우클릭 "AI에게 질문"의 텍스트 분기와 동일 배관, 컨텍스트만 비움).
-        답변 표시·위치(커서 모니터 정중앙)는 항목 질의와 동일한 `_on_ai_done`을 공유한다.
+        답변 표시·위치(커서 모니터 정중앙)는 항목 질의와 동일한 `_on_ai_turn_done`을 공유한다.
         """
         from PyQt6.QtWidgets import QDialog
         from PyQt6.QtGui import QCursor
@@ -1596,34 +1617,70 @@ class PasteFlowApp:
             return
         self._start_ai_worker(question, context_text)
 
-    def _on_ai_done(self, question: str, answer: str):
-        """AI 답변 → 임시 텍스트 미리보기 창으로 표시(읽기+복사 전용, 수정 메뉴 없음)."""
+    def _on_ai_turn_done(self, payload: dict):
+        """AI 대화 턴 결과 → 답변창 생성(첫 턴) 또는 새 턴 탭 추가(후속 턴).
+
+        답변창은 대화를 '턴 탭'(Q1/Q2/…)으로 나눠 보여준다 — 이어질수록 스크롤이 무한정
+        길어지지 않게(사용자 요청). 모델은 전체 대화(payload['conversation'])를 인지한다.
+        """
         from pasteflow.ui.toast import ToastNotification
 
-        self._stop_cursor_progress()  # 진행 칩 종료 (답변창이 같은 모니터 정중앙에 펼쳐짐)
+        popup = payload["popup"]
+        answer = payload["answer"]
+        conversation = payload["conversation"]
+        image_png = payload["image_png"]
+        self._ai_inflight_popup = None
+
+        if popup is None:
+            self._stop_cursor_progress()  # 첫 턴 진행 칩 종료 (답변창이 같은 정중앙에 펼쳐짐)
 
         if not answer.strip():
-            ToastNotification("답변을 받지 못했습니다", icon="🤖")
+            if popup is not None:
+                popup.cancel_pending()  # 후속 턴: 펜딩 탭 제거·입력칸 재활성화
+            else:
+                ToastNotification("답변을 받지 못했습니다", icon="🤖")
             return
 
-        # 마크다운 렌더링용 본문 — 질문은 굵게, 구분선 후 답변.
-        # 클립보드 복사는 이 원문(마크다운)을 유지해 다른 곳에 붙일 때 서식 보존.
-        body = f"**Q.** {question}\n\n---\n\n{answer}"
-        item = ClipboardItem(
-            content_type="text",
-            text_content=body,
-            preview_text=answer[:200],
-        )
-        # DB에 없는 임시 항목(id 없음) → editable=False로 수정 메뉴 숨김.
-        # TextPreviewPopup._instances가 창을 닫을 때까지 참조를 유지하므로 별도 보관 불필요.
-        # 앵커: 질문 제출 시점 커서(_ai_anchor) — 그 커서가 있던 모니터 정중앙에 답변창을 띄운다
-        # (center=True). 다른 모니터에서 질문해도 그 모니터 한복판에 떠 읽기 편하고 잘림이 없다.
-        # markdown=True → QTextEdit+setMarkdown으로 서식 렌더링(일반 미리보기는 평문 유지).
-        anchor = getattr(self, "_ai_anchor", None) or self.panel.geometry()
-        popup = TextPreviewPopup.open_new(item, anchor, editable=False, markdown=True, center=True)
-        popup.copy_requested.connect(self._on_copy_item)
-        popup.copy_as_image_requested.connect(self._on_answer_image_copy)
-        popup.copy_text_requested.connect(self._on_copy_selected_text)
+        # 방금 답한 질문(표시용 원문) = assistant 바로 앞의 user 턴. 첫 턴 content는 컨텍스트가
+        # 임베드돼 있어 지저분하므로 display를 쓴다(후속 턴은 원문=display 동일).
+        q_turn = conversation[-2] if len(conversation) >= 2 else {"display": ""}
+        q_display = q_turn.get("display", q_turn.get("content", ""))
+
+        if popup is None:
+            # 첫 턴 — 새 답변창 생성. DB에 없는 임시 항목(id 없음) → editable=False로 수정 메뉴 숨김.
+            # 앵커: 질문 제출 시점 커서(_ai_anchor) — 그 모니터 정중앙에 답변창(center=True).
+            # markdown=True → 서식 렌더링(상단 턴 탭 + 하단 "이어서 질문" 입력칸 포함).
+            # initial_turn으로 첫 문답을 show 전에 넣어 빈 화면 깜빡임을 피한다.
+            item = ClipboardItem(content_type="text", text_content="", preview_text=answer[:200])
+            anchor = getattr(self, "_ai_anchor", None) or self.panel.geometry()
+            popup = TextPreviewPopup.open_new(
+                item, anchor, editable=False, markdown=True, center=True,
+                initial_turn=(q_display, answer))
+            popup.copy_requested.connect(self._on_copy_item)
+            popup.copy_as_image_requested.connect(self._on_answer_image_copy)
+            popup.copy_text_requested.connect(self._on_copy_selected_text)
+            popup.followup_requested.connect(
+                lambda text, p=popup: self._on_ai_followup(p, text))
+        else:
+            # 후속 턴 — 엔터 즉시 만든 펜딩 탭(생각 중)을 실제 답변으로 교체.
+            popup.resolve_pending(answer)
+
+        # 대화 상태를 답변창에 보관 — 다음 후속 질문에 사용(이미지는 첫 턴에만 실림).
+        popup._conversation = conversation
+        popup._image_png = image_png
+
+    def _on_ai_followup(self, popup, text: str):
+        """답변창 하단 입력칸 Enter → 이전 문답을 인지한 상태로 후속 질의.
+
+        답변창이 보관한 대화 히스토리에 새 user 질문을 쌓아 같은 창을 대상으로 재질의한다.
+        진행 표시는 팝업 입력칸의 'AI 생각 중…'(팝업이 이미 잠금) — 별도 진행 칩 없음.
+        """
+        conversation = getattr(popup, "_conversation", None)
+        if conversation is None:
+            return
+        image_png = getattr(popup, "_image_png", None)
+        new_conv = conversation + [{"role": "user", "content": text, "display": text}]
+        self._run_ai_turn(new_conv, image_png, popup=popup)
 
     def _on_copy_selected_text(self, text: str):
         """AI 답변창 '선택→복사' 모드 — 드래그로 선택한 부분 텍스트를 클립보드+히스토리에 저장.
@@ -1670,6 +1727,11 @@ class PasteFlowApp:
         from pasteflow.ui.toast import ToastNotification
 
         self._stop_cursor_progress()  # 진행 칩 종료
+        # 후속 질의 실패면 답변창 입력칸을 다시 열어 재시도 가능하게 한다.
+        popup = self._ai_inflight_popup
+        self._ai_inflight_popup = None
+        if popup is not None:
+            popup.cancel_pending()  # 펜딩 탭 제거·직전 탭 복귀·입력칸 재활성화
 
         # API 키 미설정 → 토스트 후 설정 다이얼로그 자동 열기 (OCR 에러 처리와 동일 패턴)
         if "API 키" in msg:
