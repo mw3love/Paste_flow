@@ -94,9 +94,10 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
     # ------------------------------------------------------------------
     @classmethod
     def open_new(cls, item: ClipboardItem, panel_geom: QRect,
-                 native: bool = False) -> "ImagePreviewPopup":
+                 native: bool = False, place_rect: QRect | None = None) -> "ImagePreviewPopup":
         # native=True면 이미지를 원본 픽셀 크기(1:1)로 띄운다(화면 초과 시만 축소).
         # 캡처(Alt+F2)→핀(Alt+F3) 시 "캡처한 크기 그대로" 보이게 하는 용도.
+        # place_rect(논리 전역)가 주어지면 그 사각형에 이미지를 정확히 덮고 등장 반짝을 준다(핀 제자리).
         # cascade는 "총 창 수"가 아니라 "새 앵커(커서/패널) 근처에 이미 떠 있는 창 수"에만
         # 비례한다. 핀(Alt+F3)은 매번 커서를 앵커로 쓰므로, 커서를 옮겨 새로 핀하면
         # 근처 창이 0개 → offset 0 → 커서 바로 옆에 뜨고, 같은 자리에 연속 핀할 때만
@@ -109,7 +110,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         cascade_offset = near * _CASCADE_STEP
         popup = cls(item)
         cls._instances.append(popup)
-        popup.show_preview(panel_geom, cascade_offset, native=native)
+        popup.show_preview(panel_geom, cascade_offset, native=native, place_rect=place_rect)
         return popup
 
     @classmethod
@@ -227,8 +228,12 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
     # ------------------------------------------------------------------
     # 표시 + hug-zoom
     # ------------------------------------------------------------------
-    def show_preview(self, panel_geom: QRect, cascade_offset: int = 0, native: bool = False):
+    def show_preview(self, panel_geom: QRect, cascade_offset: int = 0, native: bool = False,
+                     place_rect: QRect | None = None):
         if not self._pixmap_ok:
+            return
+        if place_rect is not None and not place_rect.isEmpty():
+            self._show_in_place(place_rect)
             return
         screen = QApplication.screenAt(panel_geom.center()) or QApplication.primaryScreen()
         sr = self._scene.sceneRect()
@@ -256,6 +261,44 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         self.raise_()
         # 활성화 — 이후 Space(편집 토글)·ESC(닫기)를 미리보기가 직접 받도록
         self.activateWindow()
+
+    def _show_in_place(self, place_rect: QRect):
+        """캡처한 논리 전역 사각형(place_rect)에 이미지를 1:1로 정확히 덮어 띄운다(핀 제자리).
+
+        줌은 픽맵 픽셀→place_rect 논리폭 비율로 잡아 DPI 배율과 무관하게 딱 맞춘다. 이미지는
+        상단 투명 strip(_chrome_h) 아래에 놓이므로 창을 그만큼 위로 올려 이미지 좌상단이
+        place_rect 좌상단에 오게 한다. 등장 시 테두리를 1회 반짝여 '떠 있는 핀'임을 알린다.
+        """
+        sr = self._scene.sceneRect()
+        z = place_rect.width() / sr.width() if sr.width() > 0 else 1.0
+        self._apply_zoom(z)
+        # 이미지 좌상단 = 창 좌상단 + (0, _chrome_h) 이므로 창을 strip 높이만큼 위로.
+        self.move(place_rect.left(), place_rect.top() - self._chrome_h)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._flash_border()
+
+    def _flash_border(self):
+        """등장 시 1회 반짝 — 밝은 흰 테두리로 켰다가 코랄로 가라앉힌다(상시 깜빡임 아님).
+
+        `_flashing` 동안 changeEvent(활성화 변화)가 흰 테두리를 코랄로 덮지 않게 막는다
+        — activateWindow()가 큐잉하는 ActivationChange가 반짝을 즉시 지우는 것을 방지.
+        """
+        from PyQt6.QtCore import QTimer
+        self._flashing = True
+        self.setStyleSheet(
+            self._editor_stylesheet("#ffffff")
+            + "\nQWidget#previewroot { background: transparent; }"
+        )
+        QTimer.singleShot(160, self._end_flash)
+
+    def _end_flash(self):
+        self._flashing = False
+        try:  # 160ms 안에 창을 닫으면(WA_DeleteOnClose) C++ 객체가 이미 삭제됨 — 무시
+            self._apply_active_style(self.isActiveWindow())
+        except RuntimeError:
+            pass
 
     def _apply_zoom(self, z: float):
         """zoom factor z로 뷰 변환·크기를 맞추고 창을 이미지에 hug되게 리사이즈."""
@@ -400,7 +443,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         )
 
     def changeEvent(self, event):
-        if event.type() == QEvent.Type.ActivationChange:
+        if event.type() == QEvent.Type.ActivationChange and not getattr(self, "_flashing", False):
             self._apply_active_style(self.isActiveWindow())
         super().changeEvent(event)
 

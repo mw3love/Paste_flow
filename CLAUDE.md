@@ -36,7 +36,7 @@ pasteflow/
 ├── database.py             # SQLite CRUD (clipboard_items, settings)
 ├── models.py               # ClipboardItem 데이터 모델
 ├── crypto.py               # DPAPI 시크릿 보호 (API 키 암호화 저장)
-├── uia.py                  # 커서 아래 요소 hit-test (MSAA AccessibleObjectFromPoint 우선 + UIA ElementFromPoint 폴백 — 마그네틱 캡처용, comtypes)
+├── uia.py                  # 커서 아래 요소 hit-test — 창-스코프 rect_in_window_at(MSAA AccessibleObjectFromWindow+accHitTest — 마그네틱 캡처가 사용) + 점-기반 rect_at(MSAA AccessibleObjectFromPoint+UIA 폴백 — 현재 캡처 미사용), comtypes
 ├── ocr_engine.py           # OCR 추상화 — winocr(WinRT) 동기 래퍼
 └── ui/
     ├── panel.py            # 전체 클립보드 패널
@@ -47,7 +47,7 @@ pasteflow/
     ├── paste_hud.py        # 순차 붙여넣기 진행 HUD (큐 목록·포인터 실시간)
     ├── settings_dialog.py  # 설정 화면
     ├── ocr_overlay.py      # OCR 영역 선택 오버레이
-    ├── capture_overlay.py  # 마그네틱 영역 캡처 오버레이 (Snipaste식 — 요소 스냅·자유드래그·크로스모니터 합성)
+    ├── capture_overlay.py  # 마그네틱 영역 캡처 오버레이 (Snipaste식 입력-소유 오버레이 — 얼린 최상위창+창-스코프 요소 스냅·자유드래그·크로스모니터 합성)
     ├── ai_query.py         # AI 질의 입력 다이얼로그 (우클릭 "AI에게 질문")
     └── tray.py             # 시스템 트레이
 
@@ -161,15 +161,17 @@ tests/
 
 Snipaste를 대체하는 캡처 기능군. 단축키 추가는 모두 기존 패턴(`set_*_hotkey` + 훅 감지 블록 + 브리지 시그널 + 설정 배선) 복제.
 
-- **화면 핀 (Alt+F3)** — `main._on_pin_hotkey`: 클립보드 이미지를 읽어(`_read_image_from_clipboard`) `ImagePreviewPopup.open_new(..., native=True)`로 화면에 띄움(원본 1:1 크기, 화면 초과 시만 축소 / 다중 창·ESC 닫기·Space 주석 편집은 image_preview가 이미 제공). 이미지가 없으면 클립보드 **텍스트를 다크 배경 PNG로 렌더**(`_render_text_to_png` — 맑은 고딕 18px, 워드랩, 배경 `theme.BASE`+글자 `theme.TEXT`로 앱 다크 테마와 통일)해서 띄움(텍스트도 주석 가능 = 사실상 이미지화). 커서 우측에 배치. **`image_preview._bg_item.setTransformationMode(Smooth)`**: QGraphicsPixmapItem 기본 Fast(nearest)가 뷰의 SmoothPixmapTransform을 덮어써 비정수 배율에서 이미지·텍스트가 거칠게 보이던 것 수정(모든 미리보기 공통 개선).
-- **영역 캡처 (Alt+F2)** — `main._on_capture_region`: 마그네틱 캡처 오버레이(`_capture_overlay` = `CaptureOverlay`)가 선택 영역 QPixmap을 emit → **DIB**(`_qpixmap_to_dib` — 24bpp BI_RGB, 붙여넣기 호환 최광)로 변환 → `interceptor._set_clipboard`+`_persist_clipboard_item`(OCR 결과와 동일 무중복 경로: 클립보드+히스토리+큐) → `_save_image_to_folder`(설정 `capture_save_folder`, 기본 `_default_capture_folder()` = `<Pictures>\PasteFlow`, 없으면 생성) → 썸네일 토스트(`📷`). 설정에 캡처 단축키 행 + 저장 폴더 행(`QFileDialog`).
-- **마그네틱 캡처 (완료, v1.9.0)** — `uia.py`(`rect_at(x,y)` = 커서 아래 요소의 물리픽셀 사각형 — **MSAA `AccessibleObjectFromPoint`+`accLocation` 우선 + UIA `ElementFromPoint` 폴백**, comtypes `oleacc`/CUIAutomation 1회 생성 재사용. 크롬 최대화 북마크 바 중앙에서 UIA는 개별 버튼 대신 거친 pane만 주지만 MSAA는 개별 북마크를 정확히 줌 — Snipaste도 OLEACC 사용, v1.17.0에서 UIA→MSAA 전환) + `ui/capture_overlay.py`(`Qt.WindowType.WindowTransparentForInput` 클릭-통과 오버레이 — hit-test가 아래 실제 창을 짚도록. QTimer ~16ms(~60fps)로 `GetCursorPos`→`uia.rect_at`→물리→논리 변환(`MonitorFromPoint` 물리원점+QScreen DPR)→요소 하이라이트(무거운 hover hit-test는 `_UIA_MIN_INTERVAL`≈30ms로 스로틀해 과호출 방지), ESC 폴링). **`_capture_overlay`로 main에 연결**(Alt+F2). 동작:
-  - **요소 클릭 캡처(3b)**: WH_MOUSE_LL 마우스 훅을 캡처 시작 시 전용 데몬 스레드에 설치(`paste_interceptor`의 키보드 훅 패턴 복제)·종료 시 해제. **콜백은 trivial**(좌/우 버튼 flag만 세팅 후 suppress, 실제 hit-test·crop은 메인 스레드 QTimer가 flag를 보고 처리 — 콜백이 무거우면 시스템 마우스가 끊김). 좌클릭=현재 하이라이트 요소 캡처, 우클릭=취소. **좌·우 모두 down/up을 suppress하고 동작은 up에서 트리거** — down에서 취소/캡처하면 훅이 up 전에 풀려 up이 아래 앱으로 새어(우클릭 시 컨텍스트 메뉴가 뜸) 버그가 됨.
+- **화면 핀 (Alt+F3)** — `main._on_pin_hotkey`: 클립보드 이미지를 읽어(`_read_image_from_clipboard`) `ImagePreviewPopup.open_new(..., native=True)`로 화면에 띄움(원본 1:1 크기, 화면 초과 시만 축소 / 다중 창·ESC 닫기·Space 주석 편집은 image_preview가 이미 제공). 이미지가 없으면 클립보드 **텍스트를 다크 배경 PNG로 렌더**(`_render_text_to_png` — 맑은 고딕 18px, 워드랩, 배경 `theme.BASE`+글자 `theme.TEXT`로 앱 다크 테마와 통일)해서 띄움(텍스트도 주석 가능 = 사실상 이미지화). **배치(v1.23.0)**: 방금 Alt+F2로 캡처한 이미지면(중간에 다른 걸 복사 안 함) `place_rect`로 **캡처한 그 자리에 1:1로 정확히 덮고**(줌=사각형폭/픽맵폭이라 DPI 무관) **등장 시 테두리 1회 반짝**(`_flash_border` — 흰→코랄, `_flashing` 플래그로 활성화 이벤트가 안 덮게 가드), 아니면 커서 우측에 배치(폴백). **`image_preview._bg_item.setTransformationMode(Smooth)`**: QGraphicsPixmapItem 기본 Fast(nearest)가 뷰의 SmoothPixmapTransform을 덮어써 비정수 배율에서 이미지·텍스트가 거칠게 보이던 것 수정(모든 미리보기 공통 개선).
+- **영역 캡처 (Alt+F2)** — `main._on_capture_region(pixmap, rect)`: 마그네틱 캡처 오버레이(`_capture_overlay` = `CaptureOverlay`)가 선택 영역 QPixmap + **캡처한 논리 전역 사각형**을 `region_captured(QPixmap, QRect)`로 emit → **DIB**(`_qpixmap_to_dib` — 24bpp BI_RGB, 붙여넣기 호환 최광)로 변환 → `interceptor._set_clipboard`+`_persist_clipboard_item`(OCR 결과와 동일 무중복 경로: 클립보드+히스토리+큐) → `_save_image_to_folder`(설정 `capture_save_folder`, 기본 `_default_capture_folder()` = `<Pictures>\PasteFlow`, 없으면 생성) → 썸네일 토스트(`📷`). 캡처 사각형은 `self._pin_place_rect`에 기억해 **직후 Alt+F3 핀이 제자리 덮기**에 쓰고, 외부 복사(`_on_new_clipboard_item`)가 들어오면 무효화(=방금 캡처한 이미지일 때만 적용). 설정에 캡처 단축키 행 + 저장 폴더 행(`QFileDialog`).
+- **마그네틱 캡처 (v1.23.0 재작성 — 입력-소유 + 얼린 최상위창 + 창-스코프 요소 스냅)** — `uia.py`(`rect_in_window_at(hwnd,x,y)` = 특정 창 안 커서 아래 최말단 요소의 물리픽셀 사각형 — **MSAA `AccessibleObjectFromWindow`(창-스코프)로 IAccessible 루트를 얻고 `accHitTest`를 반복 하강**. 점-기반 `AccessibleObjectFromPoint`/UIA `ElementFromPoint`는 최상위 오버레이를 짚으므로 **창-스코프로 대체**. 크롬 최대화 북마크 개별 인식 = MSAA만 정확, Snipaste도 OLEACC. 옛 점-기반 `rect_at`은 남아 있으나 캡처 미사용) + `ui/capture_overlay.py`(**입력-소유(비클릭-통과) 오버레이** — 클릭-통과면 커서 밑 실제 창이 `WM_SETCURSOR`를 받아 HWP 등 커스텀 커서가 십자를 덮으므로, 오버레이가 입력을 소유해 `setCursor(CrossCursor)`로 어떤 앱 위에서든 십자 보장(Snipaste 모델). **옛 `WindowTransparentForInput`(클릭-통과)+`SetSystemCursor`(십자 전역변조)+`WH_MOUSE_LL`(마우스 훅)은 전부 폐기**). 캡처 시작 시 오버레이 show *전에* `GetTopWindow`+`GW_HWNDNEXT`로 **최상위 창 `(hwnd,사각형)`을 Z-order로 1회 얼림**(`_enum_top_windows` — 최소화·클로킹·자기 오버레이 제외). QTimer ~16ms로 `GetCursorPos`→얼린 목록에서 커서 밑 최상위 창→그 창에 한정해 `uia.rect_in_window_at`로 요소 하강(못 짚으면 창 전체 폴백)→물리→논리 변환(`MonitorFromPoint` 물리원점+QScreen DPR)→하이라이트(요소 hit-test는 `_UIA_MIN_INTERVAL`≈30ms 스로틀), ESC 폴링. **`_capture_overlay`로 main에 연결**(Alt+F2). 동작:
+  - **클릭 캡처**: 오버레이가 입력을 소유하므로 Qt `mousePressEvent`/`mouseReleaseEvent`로 받음(**옛 WH_MOUSE_LL 데몬 훅 폐기** — 전역 마우스 훅 제거로 시스템 마우스 끊김 위험도 소멸, suppress 춤도 불필요). 좌클릭=현재 하이라이트 요소/창 캡처, 우클릭=취소(둘 다 매니저 플래그만 세팅하고 실제 처리는 tick).
   - **자유드래그 폴백(3c)**: 좌버튼 누른 채 `_DRAG_THRESHOLD`(4px) 이상 이동하면 클릭 대신 자유 사각형(시작점~현재 커서, 요소 무시). 안 움직이고 떼면 요소 클릭. 빈 영역을 드래그 없이 클릭하면 무시(`_capture(None)`).
   - **크로스 모니터 합성(`_crop_global`)**: 선택 영역이 단일 모니터면 그 화면 스크린샷에서 바로 crop, 여러 모니터에 걸치면 가장 높은 DPR을 타깃으로 빈 캔버스에 각 화면 조각을 제 위치에 그려 합성(배율 다른 조각은 타깃 DPR로 스케일 — 기하학 정확, 저DPI 조각은 약간 소프트). 100/125/150% 트리플 모니터 실조건 검증 완료.
-  - 결과 QPixmap → `region_captured` → 기존 `_on_capture_region`(DIB+클립보드+히스토리+파일+토스트, 무수정).
-  - **UX 다듬기 (v1.10.1)**: ① **십자 커서** — 캡처 진입 시 시스템 커서를 십자(`IDC_CROSS`)로 전역 교체(`SetSystemCursor`로 호버 시 자주 뜨는 `OCR_*` 슬롯 전부 덮어 텍스트필드·링크 위에서도 십자 유지)·종료 시 `SystemParametersInfoW(SPI_SETCURSORS)`로 복원. 클릭-통과(`WindowTransparentForInput`) 오버레이는 `setCursor`가 안 먹혀(커서는 아래 창이 정함) 시스템 커서 교체로 우회하며, `atexit` 등록 + idempotent 가드로 캡처 중 크래시 시 십자 잔존을 방지. ② **드래그 부드러움** — 어두운 마스크를 입힌 딤 스크린샷(`_dimmed`)을 `prepare()`에서 1회 사전합성하고, 하이라이트 변경 시 `set_highlight_global`이 이전∪현재 영역(+테두리 여유 `_INVAL_MARGIN`)만 `update(dirty)`로 부분 repaint → 프레임당 전체화면 알파합성 제거. `_POLL_MS`=16(~60fps)과 결합해 Snipaste급 드래그.
-  - **미구현(선택)**: 휠/방향키로 부모 요소 확장(plan의 3c 선택 항목 — 가치 보고 후 결정). **엣지**: 배율 다른 두 모니터에 걸친 자유드래그는 합성으로 정상이나, 드래그 시작점의 논리 좌표 샘플은 첫 tick 기준(±16ms). 상세 설계는 plan 파일 `tidy-doodling-taco.md`.
+  - 결과 QPixmap + 캡처 사각형 → `region_captured(QPixmap, QRect)` → `_on_capture_region`(DIB+클립보드+히스토리+파일+토스트 + `_pin_place_rect` 기억).
+  - **십자 커서 (v1.23.0)** — 커서는 `setCursor(CrossCursor)` 하나로 처리(입력-소유라 위젯이 커서를 정함 → **HWP 포함 모든 앱에서 십자 유지**). 옛 `SetSystemCursor` 전역 커서 변조·`atexit` 복원은 폐기(전역 상태 변조 제거 = 크래시 시 십자 잔존 없음). **한계**: HWP는 MSAA 요소를 안 내줘 창 전체 스냅만 되고 요소 스냅은 안 됨(폴백).
+  - **깜빡임 제거 (v1.23.0)** — 진입 시 화면 한 번 깜빡이던 것을 `WA_OpaquePaintEvent`(전 픽셀 직접 칠함 → 배경 지우기·반투명 레이어드 첫-프레임 검은 프레임 제거)+`show_overlay`의 `repaint()`(매핑 직후 동기 첫 페인트)로 제거. **원인 분석**: `WA_ShowWithoutActivating`으로 비활성 표시라 첫 페인트가 비동기로 밀려 한 프레임 빈 화면이 보였고, 동기 `repaint()`가 그 갭을 닫는 게 실제 해법(OCR 오버레이는 활성화하며 표시돼 이 증상 없음 — 그래서 미수정).
+  - **드래그 부드러움** — 어두운 마스크를 입힌 딤 스크린샷(`_dimmed`)을 `prepare()`에서 1회 사전합성하고, 하이라이트 변경 시 `set_highlight_global`이 이전∪현재 영역(+테두리 여유 `_INVAL_MARGIN`)만 `update(dirty)`로 부분 repaint → 프레임당 전체화면 알파합성 제거. `_POLL_MS`=16(~60fps)과 결합해 Snipaste급 드래그.
+  - **미구현(선택)**: HWP처럼 MSAA 빈 창에 UIA 트리 하강 폴백(단 UIA는 크롬도 거칠어 효과 불확실), 휠/방향키로 부모 요소 확장. **엣지**: 배율 다른 두 모니터에 걸친 자유드래그는 합성으로 정상이나, 드래그 시작점의 논리 좌표 샘플은 첫 tick 기준(±16ms). 상세 이력은 plan 파일 `tidy-doodling-taco.md`.
 
 ### 순차 붙여넣기 핵심 동작 (가장 중요)
 

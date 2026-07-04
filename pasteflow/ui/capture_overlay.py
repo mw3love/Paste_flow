@@ -1,34 +1,36 @@
-"""마그네틱 영역 캡처 오버레이 (Snipaste식 요소 스냅).
+"""마그네틱 영역 캡처 오버레이 (Snipaste식 창 스냅).
 
-hover=커서 아래 UI 요소 하이라이트(3a), 좌클릭=요소 캡처(3b), 좌드래그=자유 사각형(3c),
-우클릭/ESC=취소. 클릭/드래그는 WH_MOUSE_LL 마우스 훅으로 감지·suppress한다.
+hover=커서 아래 최상위 창 하이라이트, 좌클릭=창 캡처, 좌드래그=자유 사각형,
+우클릭/ESC=취소.
 
 흐름
 ----
-1. CaptureOverlay.start() → 각 QScreen마다 _CaptureScreen(클릭-통과) 위젯 생성·표시
-2. 매니저의 QTimer(~30ms)가:
-   - GetCursorPos(물리 픽셀) → uia.rect_at → 커서 아래 요소 사각형(물리)
+1. CaptureOverlay.start() → 스크린샷 grab + 최상위 창 사각형을 1회 캡처(얼림) →
+   각 QScreen마다 _CaptureScreen(입력 소유) 위젯 생성·표시
+2. 매니저의 QTimer(~60fps)가:
+   - GetCursorPos(물리 픽셀) → 얼려둔 창 목록에서 커서를 품는 최상위 창 사각형 조회
    - 커서가 있는 모니터의 DPR·원점으로 물리→논리 변환
    - 각 오버레이에 하이라이트(논리 가상좌표) 주입 → 해당 모니터 오버레이만 표시
    - GetAsyncKeyState(ESC) 폴링 → 취소
+3. 클릭/우클릭은 오버레이 위젯의 Qt 마우스 이벤트로 매니저에 전달
 
-클릭-통과(WindowTransparentForInput)인 이유
-------------------------------------------
-오버레이가 화면을 덮으면 UIA ElementFromPoint가 오버레이 자신을 짚는다. 클릭-통과로
-만들면 ElementFromPoint가 아래 실제 창을 짚는다. 대신 오버레이는 마우스·키 입력을
-받지 못하므로 커서 추적·ESC를 매니저 QTimer가 폴링한다(3b에서 클릭은 마우스 훅으로).
+입력 소유(비클릭-통과)인 이유
+----------------------------
+오버레이가 입력을 통과시키면(WindowTransparentForInput) 커서 아래 실제 창이 WM_SETCURSOR를
+받아 자기 커서(HWP의 커스텀 I-beam 등)를 세우므로 십자가 벗겨진다. 오버레이가 입력을
+소유하면 오버레이 자신이 커서를 정하므로 어떤 앱 위에서든 십자가 100% 유지된다(Snipaste 모델).
+대신 커서 아래 요소를 라이브 hit-test할 수 없으므로, 캡처 시작 시점에 최상위 창 좌표를
+얼려두고(EnumWindows/Z-order) 그 캐시에 hit-test 한다. 창 단위 스냅(요소 단위 아님)이 트레이드오프.
 
 좌표계
 ------
-UIA·GetCursorPos = 물리 픽셀(DPI-aware 프로세스). Qt 위젯 geometry·페인트 = 논리 좌표.
+GetCursorPos·GetWindowRect = 물리 픽셀(DPI-aware 프로세스). Qt 위젯 geometry·페인트 = 논리 좌표.
 변환: 커서가 있는 모니터의 물리 원점(Win32 GetMonitorInfo)과 DPR(QScreen)로
 물리 가상좌표 → 논리 가상좌표를 계산한다.
 """
 from __future__ import annotations
 
-import atexit
 import ctypes
-import threading
 import time
 from ctypes import wintypes
 
@@ -42,88 +44,15 @@ from pasteflow import uia
 _MASK_ALPHA = 100  # 어두운 마스크 알파
 _BORDER_W = 2
 _POLL_MS = 16          # 커서 추적/드래그 repaint 주기 (~60fps)
-_UIA_MIN_INTERVAL = 0.030  # hover 요소 hit-test(UIA) 최소 호출 간격(초) — 과호출 방지
+_UIA_MIN_INTERVAL = 0.030  # hover 요소 hit-test(MSAA) 최소 호출 간격(초) — 과호출 방지
 _INVAL_MARGIN = _BORDER_W + 2  # 부분 repaint 무효화 영역 여유(테두리 잔상 방지)
-_DRAG_THRESHOLD = 4  # 클릭(요소) vs 드래그(자유 사각형) 구분 임계(논리 px)
+_DRAG_THRESHOLD = 4  # 클릭(창) vs 드래그(자유 사각형) 구분 임계(논리 px)
 
 _VK_ESCAPE = 0x1B
 _MONITOR_DEFAULTTONEAREST = 2
 
 _user32 = ctypes.windll.user32
-_kernel32 = ctypes.windll.kernel32
-
-# ── WH_MOUSE_LL 마우스 훅 (3b: 클릭 캡처 — paste_interceptor의 키보드 훅 패턴 복제) ──
-WH_MOUSE_LL = 14
-WM_QUIT = 0x0012
-WM_LBUTTONDOWN = 0x0201
-WM_LBUTTONUP = 0x0202
-WM_RBUTTONDOWN = 0x0204
-WM_RBUTTONUP = 0x0205
-
-LRESULT = ctypes.c_ssize_t
-HOOKPROC = ctypes.CFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
-
-_user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
-_user32.SetWindowsHookExW.restype = ctypes.c_void_p
-_user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
-_user32.CallNextHookEx.restype = LRESULT
-_user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
-_user32.UnhookWindowsHookEx.restype = wintypes.BOOL
-_user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-_user32.PostThreadMessageW.restype = wintypes.BOOL
-_kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
-_kernel32.GetModuleHandleW.restype = wintypes.HMODULE
-_kernel32.GetCurrentThreadId.argtypes = []
-_kernel32.GetCurrentThreadId.restype = wintypes.DWORD
-
-# ── 캡처 모드 십자 커서 (시스템 커서 전역 교체) ──────────────────────────────────
-_IDC_CROSS = 32515         # LoadCursorW 표준 십자선
-_IMAGE_CURSOR = 2          # CopyImage 타입
-_SPI_SETCURSORS = 0x0057   # 시스템 커서 일괄 재로드(복원)
-_SPIF_SENDCHANGE = 0x0002
-# 호버 시 자주 뜨는 OCR_* 시스템 커서 슬롯 — 전부 십자로 덮어 어떤 창 위에서든 십자 유지
-# (NORMAL/IBEAM/CROSS/UP/SIZE*/SIZEALL/NO/HAND/APPSTARTING)
-_OCR_SLOTS = (32512, 32513, 32515, 32516, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650)
-
-_user32.LoadCursorW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-_user32.LoadCursorW.restype = ctypes.c_void_p
-_user32.CopyImage.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
-_user32.CopyImage.restype = ctypes.c_void_p
-_user32.SetSystemCursor.argtypes = [ctypes.c_void_p, wintypes.DWORD]
-_user32.SetSystemCursor.restype = wintypes.BOOL
-_user32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
-_user32.SystemParametersInfoW.restype = wintypes.BOOL
-
-_cursors_swapped = False
-
-
-def _swap_system_cursor_to_cross():
-    """OS 시스템 커서를 십자(IDC_CROSS)로 전역 교체. idempotent."""
-    global _cursors_swapped
-    if _cursors_swapped:
-        return
-    base = _user32.LoadCursorW(None, _IDC_CROSS)  # 공유 핸들 — 직접 넘기면 안 됨
-    if not base:
-        return
-    for slot in _OCR_SLOTS:
-        # SetSystemCursor는 넘긴 핸들의 소유권을 가져가 파괴하므로 슬롯마다 복사본 전달
-        copy = _user32.CopyImage(base, _IMAGE_CURSOR, 0, 0, 0)
-        if copy:
-            _user32.SetSystemCursor(copy, slot)
-    _cursors_swapped = True
-
-
-def _restore_system_cursors():
-    """레지스트리에서 시스템 커서 일괄 재로드해 복원. idempotent."""
-    global _cursors_swapped
-    if not _cursors_swapped:
-        return
-    _user32.SystemParametersInfoW(_SPI_SETCURSORS, 0, None, _SPIF_SENDCHANGE)
-    _cursors_swapped = False
-
-
-# 캡처 도중 예외로 죽어도 커서가 십자로 남지 않도록 안전망
-atexit.register(_restore_system_cursors)
+_dwmapi = ctypes.windll.dwmapi
 
 
 class _POINT(ctypes.Structure):
@@ -138,6 +67,60 @@ class _RECT(ctypes.Structure):
 class _MONITORINFO(ctypes.Structure):
     _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", _RECT),
                 ("rcWork", _RECT), ("dwFlags", wintypes.DWORD)]
+
+
+# ── 최상위 창 열거(얼린 스냅용) ────────────────────────────────────────────────
+_GW_HWNDNEXT = 2
+_DWMWA_CLOAKED = 14  # DWM 클로킹(가상 데스크톱 밖·UWP 유령 창) 판별
+
+_user32.GetCursorPos.argtypes = [ctypes.POINTER(_POINT)]
+_user32.GetTopWindow.argtypes = [wintypes.HWND]
+_user32.GetTopWindow.restype = wintypes.HWND
+_user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+_user32.GetWindow.restype = wintypes.HWND
+_user32.IsWindowVisible.argtypes = [wintypes.HWND]
+_user32.IsWindowVisible.restype = wintypes.BOOL
+_user32.IsIconic.argtypes = [wintypes.HWND]
+_user32.IsIconic.restype = wintypes.BOOL
+_user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(_RECT)]
+_user32.GetWindowRect.restype = wintypes.BOOL
+_dwmapi.DwmGetWindowAttribute.argtypes = [
+    wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+_dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long  # HRESULT
+
+
+def _is_cloaked(hwnd) -> bool:
+    val = wintypes.DWORD(0)
+    res = _dwmapi.DwmGetWindowAttribute(
+        hwnd, _DWMWA_CLOAKED, ctypes.byref(val), ctypes.sizeof(val))
+    return res == 0 and val.value != 0
+
+
+def _enum_top_windows(exclude: set[int]) -> list[tuple[int, int, int, int, int]]:
+    """보이는 최상위 창을 (hwnd, l, t, r, b) 물리 사각형으로 Z-order(위→아래) 순 반환.
+
+    GetTopWindow+GW_HWNDNEXT로 Z-order를 명시적으로 보장한다(EnumWindows는 순서 미보장).
+    최소화·클로킹·크기 0·자기 오버레이(exclude) 창은 건너뛴다. 목록 앞쪽이 더 위 창이므로
+    커서를 품는 첫 항목이 커서 바로 아래 최상위 창. hwnd는 요소 스냅(창-스코프 hit-test)에 쓴다.
+    """
+    out: list[tuple[int, int, int, int, int]] = []
+    hwnd = _user32.GetTopWindow(None)
+    guard = 0
+    while hwnd and guard < 10000:
+        guard += 1
+        try:
+            if int(hwnd) not in exclude \
+                    and _user32.IsWindowVisible(hwnd) \
+                    and not _user32.IsIconic(hwnd) \
+                    and not _is_cloaked(hwnd):
+                r = _RECT()
+                if _user32.GetWindowRect(hwnd, ctypes.byref(r)) \
+                        and r.right > r.left and r.bottom > r.top:
+                    out.append((int(hwnd), r.left, r.top, r.right, r.bottom))
+        except Exception:
+            pass
+        hwnd = _user32.GetWindow(hwnd, _GW_HWNDNEXT)
+    return out
 
 
 def _cursor_phys() -> tuple[int, int]:
@@ -156,19 +139,28 @@ def _monitor_phys_origin(x: int, y: int) -> tuple[int, int]:
 
 
 class _CaptureScreen(QWidget):
-    """단일 QScreen을 덮는 클릭-통과 오버레이. 얼린 스크린샷+딤+하이라이트만 그린다."""
+    """단일 QScreen을 덮는 입력 소유 오버레이. 얼린 스크린샷+딤+하이라이트만 그린다.
 
-    def __init__(self, screen: QScreen):
+    입력을 소유(비클릭-통과)하므로 커서가 항상 이 위젯 위에 있어 십자 커서가 유지되고,
+    클릭/우클릭은 Qt 마우스 이벤트로 매니저(_CaptureOverlay)에 전달한다.
+    """
+
+    def __init__(self, screen: QScreen, manager: "CaptureOverlay"):
         super().__init__(None)
         self._screen = screen
+        self._mgr = manager
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
-            | Qt.WindowType.WindowTransparentForInput  # 클릭-통과 (ElementFromPoint가 아래 창을 짚도록)
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # 딤 스크린샷으로 전 픽셀을 직접 칠하므로 반투명 불필요. 반투명(레이어드) 창은
+        # 첫 표시 때 페인트 전 '검은 프레임'이 한 번 뜨는(=화면 깜빡) 증상이 있어 끈다.
+        # WA_OpaquePaintEvent: 배경 지우기 생략(전 픽셀 우리가 칠함) → 깜빡임 추가 억제.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self.setCursor(Qt.CursorShape.CrossCursor)  # 어떤 앱 위에서든 십자 유지(입력 소유의 핵심)
         self.setScreen(screen)
         self._screenshot: QPixmap | None = None
         self._dimmed: QPixmap | None = None  # 마스크 사전합성(물리 픽셀, dpr=1) — 프레임당 알파합성 제거
@@ -190,6 +182,18 @@ class _CaptureScreen(QWidget):
     def show_overlay(self):
         self.show()
         self.raise_()
+        self.repaint()  # 매핑 직후 동기 페인트 강제 → 첫 프레임 빈 화면(깜빡임) 방지
+
+    # ── Qt 마우스 이벤트 → 매니저 위임 ─────────────────────────────────────────
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._mgr._on_left_down()
+        elif e.button() == Qt.MouseButton.RightButton:
+            self._mgr._on_right_down()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._mgr._on_left_up()
 
     def set_highlight_global(self, gr: QRect | None):
         """논리 가상좌표 하이라이트를 이 화면 로컬로 변환해 저장(바뀌면 부분 repaint)."""
@@ -257,11 +261,11 @@ class _CaptureScreen(QWidget):
 
 class _Bridge(QObject):
     cancelled = pyqtSignal()
-    region_captured = pyqtSignal(QPixmap)
+    region_captured = pyqtSignal(QPixmap, QRect)  # (잘린 이미지, 캡처한 논리 전역 사각형)
 
 
 class CaptureOverlay:
-    """모니터별 _CaptureScreen을 관리하고 커서 아래 요소를 하이라이트하는 매니저."""
+    """모니터별 _CaptureScreen을 관리하고 커서 아래 최상위 창을 하이라이트하는 매니저."""
 
     def __init__(self):
         self._bridge = _Bridge()
@@ -271,20 +275,16 @@ class CaptureOverlay:
         self._timer = QTimer()
         self._timer.setInterval(_POLL_MS)
         self._timer.timeout.connect(self._tick)
-        # 마우스 훅 (3b) — 좌클릭=캡처, 우클릭=취소. 콜백은 flag만 세팅(trivial), 실제 캡처는 _tick.
-        self._mouse_hook = None
-        self._mouse_thread: threading.Thread | None = None
-        self._mouse_thread_id = 0
-        self._mouse_running = False
-        self._hook_proc = HOOKPROC(self._mouse_proc)  # GC 방지 참조 유지
         self._cancel_pending = False
-        # 클릭(요소 캡처) vs 드래그(자유 사각형, 3c) 구분 상태
+        # 클릭(창 캡처) vs 드래그(자유 사각형) 구분 상태 — Qt 마우스 이벤트에서 세팅
         self._pending: str | None = None  # None | "click" | "drag" — 마우스 up에서 세팅
         self._lbtn_down = False
         self._dragging = False
         self._need_drag_start = False
         self._drag_start: QPoint | None = None  # 드래그 시작 논리 좌표(첫 tick에서 샘플)
-        self._last_uia = 0.0  # hover UIA 호출 스로틀용 마지막 호출 시각(monotonic)
+        # 얼린 최상위 창 (hwnd, l, t, r, b) 물리 — hwnd로 요소 스냅(창-스코프 hit-test)
+        self._frozen_windows: list[tuple[int, int, int, int, int]] = []
+        self._last_uia = 0.0  # hover 요소 hit-test 스로틀용 마지막 호출 시각(monotonic)
 
     def start(self):
         self._close_all()
@@ -294,34 +294,52 @@ class CaptureOverlay:
         self._dragging = False
         self._need_drag_start = False
         self._drag_start = None
+        self._frozen_windows = []
         self._last_uia = 0.0
         for screen in QApplication.screens():
-            ov = _CaptureScreen(screen)
+            ov = _CaptureScreen(screen, self)
             ov.prepare()
             self._overlays.append(ov)
+        # 오버레이를 보이기 '전에' 최상위 창 좌표를 얼린다(우리 오버레이가 목록에 안 섞이게).
+        # winId()로 네이티브 핸들을 생성해 명시적으로 제외.
+        exclude = {int(ov.winId()) for ov in self._overlays}
+        self._frozen_windows = _enum_top_windows(exclude)
         for ov in self._overlays:
             ov.show_overlay()
-        _swap_system_cursor_to_cross()  # 캡처 모드 진입 시각 신호 — 십자 커서
-        self._install_mouse_hook()
         self._timer.start()
+
+    # ── Qt 마우스 이벤트 (오버레이 위젯에서 위임) ──────────────────────────────
+
+    def _on_left_down(self):
+        self._lbtn_down = True
+        self._dragging = False
+        self._need_drag_start = True
+        self._pending = None
+
+    def _on_left_up(self):
+        self._lbtn_down = False
+        self._pending = "drag" if self._dragging else "click"
+
+    def _on_right_down(self):
+        self._cancel_pending = True
 
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _tick(self):
-        # 우클릭(훅) 또는 ESC → 취소
+        # 우클릭 또는 ESC → 취소
         if self._cancel_pending or (_user32.GetAsyncKeyState(_VK_ESCAPE) & 0x8000):
             self._cancel()
             return
-        # 마우스 up에서 확정된 동작 처리 (드래그=자유 사각형 / 클릭=요소)
+        # 마우스 up에서 확정된 동작 처리 (드래그=자유 사각형 / 클릭=창)
         if self._pending == "drag":
             self._pending = None
             self._capture(self._drag_rect_current())
             return
         if self._pending == "click":
             self._pending = None
-            self._capture(self._element_rect_logical())
+            self._capture(self._target_rect_logical())
             return
-        # 좌버튼을 누른 채 임계 이상 이동 중이면 자유 사각형, 아니면 요소 하이라이트
+        # 좌버튼을 누른 채 임계 이상 이동 중이면 자유 사각형, 아니면 창 하이라이트
         if self._lbtn_down:
             cur = QCursor.pos()
             if self._need_drag_start:
@@ -336,13 +354,13 @@ class CaptureOverlay:
                 for ov in self._overlays:
                     ov.set_highlight_global(gr)
                 return
-        # hover 요소 hit-test: UIA ElementFromPoint는 무거우므로 최소 간격으로 스로틀
-        # (드래그 repaint는 매 tick=60fps로 돌고, UIA만 ~30fps로 떼어냄)
+        # hover 요소 hit-test: MSAA(창-스코프)는 COM이라 무거우므로 최소 간격으로 스로틀
+        # (드래그 repaint는 매 tick=60fps로 돌고, 요소 조회만 ~30fps로 떼어냄)
         now = time.monotonic()
         if now - self._last_uia < _UIA_MIN_INTERVAL:
             return
         self._last_uia = now
-        gr = self._element_rect_logical()
+        gr = self._target_rect_logical()
         for ov in self._overlays:
             ov.set_highlight_global(gr)
 
@@ -359,12 +377,32 @@ class CaptureOverlay:
             return None
         return QRect(left, top, w, h)
 
-    def _element_rect_logical(self) -> QRect | None:
-        """커서 아래 UIA 요소 사각형을 논리 가상좌표로 반환. 없으면 None."""
+    def _window_at_phys(self, px: int, py: int):
+        """얼려둔 목록에서 물리 점 (px,py)를 품는 최상위 (hwnd, l, t, r, b). 없으면 None."""
+        for rec in self._frozen_windows:
+            _hwnd, l, t, r, b = rec
+            if l <= px < r and t <= py < b:
+                return rec
+        return None
+
+    def _target_rect_logical(self) -> QRect | None:
+        """커서 아래 요소(가능하면) 또는 창 사각형을 논리 가상좌표로 반환. 없으면 None.
+
+        얼려둔 최상위 창(hwnd)을 찾고, 그 창에 한정해 MSAA 창-스코프 hit-test로 커서 아래
+        최말단 요소를 지연 하강해 짚는다(점 기반이 아니라 오버레이를 안 짚음). 요소를 못
+        짚으면 창 전체 사각형으로 폴백(B1 동작).
+        """
         px, py = _cursor_phys()
-        rect_phys = uia.rect_at(px, py)
-        if rect_phys is None:
+        hit = self._window_at_phys(px, py)
+        if hit is None:
             return None
+        _hwnd, wl, wt, wr, wb = hit
+        try:
+            rect_phys = uia.rect_in_window_at(_hwnd, px, py)
+        except Exception:
+            rect_phys = None
+        if rect_phys is None:
+            rect_phys = QRect(wl, wt, wr - wl, wb - wt)
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         if screen is None:
             return None
@@ -378,7 +416,7 @@ class CaptureOverlay:
         return QRect(round(lx), round(ly), round(lw), round(lh))
 
     def _capture(self, gr: QRect | None):
-        """하이라이트 영역(요소 또는 자유 사각형, gr)을 얼린 스크린샷에서 잘라 emit.
+        """하이라이트 영역(창 또는 자유 사각형, gr)을 얼린 스크린샷에서 잘라 emit.
 
         gr이 None(빈 영역을 드래그 없이 클릭)이면 무시한다.
         """
@@ -387,7 +425,8 @@ class CaptureOverlay:
         pm = self._crop_global(gr)
         self._close_all()
         if pm is not None and not pm.isNull():
-            self.region_captured.emit(pm)
+            # gr은 캡처한 위치(논리 전역) — 핀(Alt+F3)이 그 자리에 그대로 덮을 수 있게 함께 emit
+            self.region_captured.emit(pm, QRect(gr))
 
     def _crop_global(self, gr: QRect) -> QPixmap | None:
         """논리 가상좌표 사각형을 캡처. 여러 모니터에 걸치면 각 화면 조각을 합성한다.
@@ -432,72 +471,12 @@ class CaptureOverlay:
         canvas.setDevicePixelRatio(target_dpr)
         return canvas
 
-    # ── 마우스 훅 (3b) ──────────────────────────────────────────────────────────
-
-    def _install_mouse_hook(self):
-        self._mouse_running = True
-        self._mouse_thread = threading.Thread(target=self._mouse_hook_thread, daemon=True)
-        self._mouse_thread.start()
-
-    def _uninstall_mouse_hook(self):
-        self._mouse_running = False
-        if self._mouse_hook:
-            _user32.UnhookWindowsHookEx(self._mouse_hook)
-            self._mouse_hook = None
-        if self._mouse_thread_id:
-            _user32.PostThreadMessageW(self._mouse_thread_id, WM_QUIT, 0, 0)
-            self._mouse_thread_id = 0
-        self._mouse_thread = None
-
-    def _mouse_hook_thread(self):
-        self._mouse_thread_id = _kernel32.GetCurrentThreadId()
-        h_mod = _kernel32.GetModuleHandleW(None)
-        self._mouse_hook = _user32.SetWindowsHookExW(WH_MOUSE_LL, self._hook_proc, h_mod, 0)
-        if not self._mouse_hook:
-            self._mouse_running = False
-            return
-        msg = wintypes.MSG()
-        while self._mouse_running:
-            ret = _user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-            if ret <= 0:
-                break
-            _user32.TranslateMessage(ctypes.byref(msg))
-            _user32.DispatchMessageW(ctypes.byref(msg))
-
-    def _mouse_proc(self, nCode, wParam, lParam):
-        """trivial 콜백: 좌/우클릭 flag만 세팅 후 suppress. 실제 캡처·UIA는 _tick(메인 스레드).
-
-        ctypes 콜백에서 예외가 C로 전파되면 프로세스 크래시 → 모든 예외 포착.
-        """
-        try:
-            if nCode >= 0:
-                if wParam == WM_RBUTTONDOWN:
-                    return 1  # suppress down — 컨텍스트 메뉴 누수 방지
-                if wParam == WM_RBUTTONUP:
-                    self._cancel_pending = True
-                    return 1  # suppress up + 취소 트리거 (down·up 모두 소비 후 취소)
-                if wParam == WM_LBUTTONDOWN:
-                    self._lbtn_down = True
-                    self._dragging = False
-                    self._need_drag_start = True
-                    self._pending = None
-                    return 1  # suppress down — 아래 앱 클릭(탭 전환 등) 차단
-                if wParam == WM_LBUTTONUP:
-                    self._lbtn_down = False
-                    self._pending = "drag" if self._dragging else "click"
-                    return 1  # suppress up + 캡처/드래그 트리거
-        except Exception:
-            pass
-        return _user32.CallNextHookEx(self._mouse_hook, nCode, wParam, lParam)
-
     def _cancel(self):
         self._close_all()
         self.cancelled.emit()
 
     def _close_all(self):
         self._timer.stop()
-        self._uninstall_mouse_hook()
-        _restore_system_cursors()  # 십자 커서 → 기본 커서 복원
         for ov in self._overlays:
             try:
                 ov.close()
@@ -507,25 +486,22 @@ class CaptureOverlay:
         self._overlays = []
 
 
-# ── 3a 단독 검증 ───────────────────────────────────────────────────────────────
+# ── 단독 검증 ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
 
     app = QApplication(sys.argv)
-    if not uia.is_available():
-        print("UIA 사용 불가 — comtypes/UIAutomationCore 확인 필요", file=sys.stderr)
-        sys.exit(1)
 
     overlay = CaptureOverlay()
     overlay.cancelled.connect(lambda: (print("[capture] 취소(우클릭/ESC)"), app.quit()))
 
-    def _on_captured(pm):
+    def _on_captured(pm, rect):
         out = "_capture_test.png"
         pm.save(out, "PNG")
-        print(f"[capture] 캡처됨 {pm.width()}x{pm.height()} px (DPR={pm.devicePixelRatio()}) → {out}")
+        print(f"[capture] 캡처됨 {pm.width()}x{pm.height()} px (DPR={pm.devicePixelRatio()}) @ {rect} → {out}")
         app.quit()
 
     overlay.region_captured.connect(_on_captured)
     overlay.start()
-    print("마그네틱 캡처 테스트: 요소 좌클릭=요소 캡처, 좌드래그=자유 사각형, 우클릭/ESC=취소.")
+    print("마그네틱 캡처 테스트: 창 좌클릭=창 캡처, 좌드래그=자유 사각형, 우클릭/ESC=취소.")
     sys.exit(app.exec())

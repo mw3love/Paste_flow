@@ -724,6 +724,9 @@ class PasteFlowApp:
         self._capture_overlay = CaptureOverlay()
         self._capture_overlay.region_captured.connect(self._on_capture_region)
         # cancelled는 오버레이 내부 정리로 충분 — 별도 콜백 불필요
+        # 마지막 캡처 위치(논리 전역) — 그 직후 핀(Alt+F3)이 캡처 자리에 그대로 덮게 함.
+        # 외부 복사가 들어오면 무효화(_on_new_clipboard_item)해 "방금 캡처한 그 이미지"일 때만 적용.
+        self._pin_place_rect: QRect | None = None
 
         # OCR은 호출마다 새 스레드 — asyncio.run()을 재사용 스레드에서 반복 호출 시
         # WinRT 콜백 상태가 누적돼 두 번째 호출부터 빈 결과를 반환하는 문제 방지
@@ -820,6 +823,9 @@ class PasteFlowApp:
 
     def _on_new_clipboard_item(self, item: ClipboardItem):
         """클립보드 모니터 콜백 (실제 Ctrl+C) — 백그라운드 스레드. 저장 + 복사 토스트."""
+        # 외부 복사가 들어오면 클립보드가 더 이상 "방금 캡처한 이미지"가 아니므로, 핀을
+        # 캡처 자리에 덮는 좌표를 무효화한다(이 콜백은 self-triggered 캡처 경로엔 안 옴).
+        self._pin_place_rect = None
         saved = self._persist_clipboard_item(item)
         if self._notify_on_copy:
             _, total = self.queue.get_status()
@@ -877,14 +883,16 @@ class PasteFlowApp:
         """메인 스레드: 영역 캡처 오버레이 시작 (마그네틱 CaptureOverlay)"""
         self._capture_overlay.start()
 
-    def _on_capture_region(self, pixmap):
+    def _on_capture_region(self, pixmap, rect):
         """메인 스레드: 선택 영역 픽맵 → 클립보드(DIB) + 히스토리·큐 + 파일 저장 + 토스트.
 
         클립보드·히스토리 처리는 OCR 결과 경로와 동일(_set_clipboard로 모니터 재감지 방지 후
         _persist_clipboard_item). 이미지는 붙여넣기 호환성이 가장 넓은 CF_DIB로 넣는다.
+        rect(캡처한 논리 전역 사각형)를 기억해 직후 핀(Alt+F3)이 그 자리에 그대로 덮게 한다.
         """
         from pasteflow.ui.toast import ToastNotification
 
+        self._pin_place_rect = QRect(rect) if rect is not None else None
         dib = _qpixmap_to_dib(pixmap)
         item = ClipboardItem(
             content_type="image",
@@ -1226,6 +1234,8 @@ class PasteFlowApp:
         from pasteflow.ui.toast import ToastNotification
 
         image_bytes = _read_image_from_clipboard()
+        # 방금 캡처한 이미지면(외부 복사로 무효화 안 됨) 캡처 자리에 그대로 덮는다.
+        place_rect = self._pin_place_rect if image_bytes else None
         if not image_bytes:
             # 이미지가 없으면 클립보드 텍스트를 흰 배경 이미지로 렌더링해 핀(Snipaste 동작)
             text = self.app.clipboard().text() or ""
@@ -1244,8 +1254,8 @@ class PasteFlowApp:
         # 커서 위치에 1px 앵커를 만들어 그 우측에 핀 창을 띄운다(compute_preview_pos 재사용).
         cursor_pos = QCursor.pos()
         anchor = QRect(cursor_pos.x(), cursor_pos.y(), 1, 1)
-        # 캡처한 크기 그대로(1:1, 화면 초과 시만 축소) 띄운다.
-        popup = ImagePreviewPopup.open_new(item, anchor, native=True)
+        # place_rect가 있으면 캡처 자리에 1:1로 정확히 덮고, 없으면 커서 옆에 1:1로 띄운다.
+        popup = ImagePreviewPopup.open_new(item, anchor, native=True, place_rect=place_rect)
         # 핀 창에서도 복사·OCR·AI 질문·경로 복사·Space 주석 편집 후 복사/저장이 동작하도록 연결
         popup.copy_requested.connect(self._on_copy_item)
         popup.ocr_requested.connect(self._on_ocr_image_item)

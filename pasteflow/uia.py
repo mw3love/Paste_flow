@@ -27,13 +27,14 @@ class _POINT(ctypes.Structure):
 
 
 # ── MSAA (oleacc) — 우선 경로 ────────────────────────────────────────────────
+_OBJID_WINDOW = 0x00000000  # AccessibleObjectFromWindow 루트(창 전체) 오브젝트 ID
 _msaa_ready = False
 _Acc = None
 _oleacc = None
 
 
 def _ensure_msaa():
-    """oleacc(MSAA) 준비 — COM 초기화 + AccessibleObjectFromPoint 시그니처 1회 설정."""
+    """oleacc(MSAA) 준비 — COM 초기화 + AccessibleObjectFromPoint/FromWindow 시그니처 1회 설정."""
     global _msaa_ready, _Acc, _oleacc
     if _msaa_ready:
         return True
@@ -52,6 +53,10 @@ def _ensure_msaa():
     _oleacc = ctypes.oledll.oleacc
     _oleacc.AccessibleObjectFromPoint.argtypes = [
         _POINT, POINTER(POINTER(Acc.IAccessible)), POINTER(comtypes.automation.VARIANT)]
+    # 창-스코프 hit-test용: 점이 아니라 hwnd로 IAccessible 루트를 얻는다(오버레이를 안 짚음)
+    _oleacc.AccessibleObjectFromWindow.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint,
+        POINTER(comtypes.GUID), POINTER(POINTER(Acc.IAccessible))]
     _msaa_ready = True
     return True
 
@@ -65,6 +70,50 @@ def _rect_at_msaa(x: int, y: int) -> QRect | None:
     if not pacc:
         return None
     left, top, w, h = pacc.accLocation(var)  # 물리 픽셀
+    if w <= 0 or h <= 0:
+        return None
+    return QRect(left, top, w, h)
+
+
+def _rect_in_window_msaa(hwnd: int, x: int, y: int) -> QRect | None:
+    """특정 창(hwnd) 안에서 물리 점 (x,y) 아래 최말단 요소의 사각형(물리). 없으면 None.
+
+    점 기반 AccessibleObjectFromPoint가 최상위 오버레이(입력 소유)를 짚는 문제를 피하려고,
+    hwnd로 IAccessible 루트를 얻은 뒤 accHitTest를 반복 하강해 커서 아래 최말단 요소를 찾는다
+    (AccessibleObjectFromPoint가 내부적으로 하는 일을 대상 창에 한정해 재현).
+    """
+    import comtypes.automation
+
+    pacc = POINTER(_Acc.IAccessible)()
+    _oleacc.AccessibleObjectFromWindow(
+        ctypes.c_void_p(hwnd), _OBJID_WINDOW,
+        byref(_Acc.IAccessible._iid_), byref(pacc))
+    if not pacc:
+        return None
+    acc = pacc
+    childid = 0  # CHILDID_SELF
+    for _ in range(40):  # 하강 깊이 가드
+        try:
+            res = acc.accHitTest(x, y)
+        except Exception:
+            break
+        if res is None:
+            break
+        if isinstance(res, int):
+            childid = res  # 단순 자식(leaf) 또는 CHILDID_SELF(0) — 하강 종료
+            break
+        try:
+            sub = res.QueryInterface(_Acc.IAccessible)  # VT_DISPATCH 자식 → 더 하강
+        except Exception:
+            break
+        acc = sub
+        childid = 0
+    try:
+        cv = comtypes.automation.VARIANT()
+        cv.value = childid
+        left, top, w, h = acc.accLocation(cv)  # 물리 픽셀
+    except Exception:
+        return None
     if w <= 0 or h <= 0:
         return None
     return QRect(left, top, w, h)
@@ -136,3 +185,18 @@ def rect_at(x: int, y: int) -> QRect | None:
         return _rect_at_uia(x, y)
     except Exception:
         return None
+
+
+def rect_in_window_at(hwnd: int, x: int, y: int) -> QRect | None:
+    """창 hwnd 안에서 물리 (x, y) 아래 최말단 요소 사각형(물리 QRect). 없으면 None.
+
+    입력 소유(비클릭-통과) 오버레이 아래에서 요소 스냅을 하려면 점 기반 hit-test 대신
+    창-스코프 hit-test가 필요하다(점 기반은 최상위 오버레이를 짚음). MSAA만 사용 —
+    요소를 못 주면 None을 반환해 호출부가 창 전체 사각형으로 폴백하게 한다.
+    """
+    try:
+        if _ensure_msaa():
+            return _rect_in_window_msaa(hwnd, x, y)
+    except Exception:
+        return None
+    return None
