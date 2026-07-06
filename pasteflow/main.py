@@ -633,6 +633,7 @@ class _SignalBridge(QObject):
     ocr_error          = pyqtSignal(str)     # 워커 스레드 → 메인: 에러 메시지
     ocr_fallback       = pyqtSignal(str, str)  # 워커 스레드 → 메인: (실패 모델, 폴백 모델) 자동 폴백 알림
     image_to_path      = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 경로 텍스트로 교체 후 Ctrl+V
+    seq_image_to_path  = pyqtSignal()        # 훅 스레드 → 메인: 큐에서 다음 항목을 꺼내 이미지면 경로 텍스트로 순차 붙여넣기
     pin_image          = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 화면에 핀(떠 있는 창)으로 띄우기
     capture_requested  = pyqtSignal()        # 훅 스레드 → 메인: 영역 캡처 오버레이 띄우기
     ask_ai             = pyqtSignal()        # 훅 스레드 → 메인: AI 자유질문 입력창 띄우기
@@ -669,6 +670,7 @@ class PasteFlowApp:
         self._bridge.ocr_fallback.connect(self._on_ocr_fallback)
         self._bridge.plain_paste.connect(self._on_plain_paste)
         self._bridge.image_to_path.connect(self._on_image_to_path_hotkey)
+        self._bridge.seq_image_to_path.connect(self._on_seq_image_to_path_hotkey)
         self._bridge.pin_image.connect(self._on_pin_hotkey)
         self._bridge.capture_requested.connect(self._on_capture_requested)
         self._bridge.ask_ai.connect(self._on_ask_ai_hotkey)
@@ -697,6 +699,7 @@ class PasteFlowApp:
             on_ocr_trigger=self._bridge.ocr_requested.emit,
             on_plain_paste=self._bridge.plain_paste.emit,
             on_image_to_path=self._bridge.image_to_path.emit,
+            on_seq_image_to_path=self._bridge.seq_image_to_path.emit,
             on_pin_image=self._bridge.pin_image.emit,
             on_capture=self._bridge.capture_requested.emit,
             on_ask_ai=self._bridge.ask_ai.emit,
@@ -799,6 +802,9 @@ class PasteFlowApp:
 
         img2path_hotkey = self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p")
         self.interceptor.set_image_to_path_hotkey(img2path_hotkey)
+
+        seq_img2path_hotkey = self.db.get_setting("hotkey_seq_image_to_path", "ctrl+shift+[")
+        self.interceptor.set_seq_image_to_path_hotkey(seq_img2path_hotkey)
 
         pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
         self.interceptor.set_pin_hotkey(pin_hotkey)
@@ -1197,6 +1203,61 @@ class PasteFlowApp:
         ToastNotification(
             f"경로 붙여넣음: {os.path.basename(saved_path)}",
             icon="", image_path=saved_path)
+
+    def _on_seq_image_to_path_hotkey(self):
+        """순차 경로 붙여넣기 단축키(기본 Ctrl+Shift+[) — 큐에서 다음 항목을 꺼내되
+        이미지면 임시 PNG 경로 텍스트로 렌더해 붙여넣는다.
+
+        Ctrl+Shift+V(순차)와 **같은 큐·포인터를 공유하는 '경로 버전'**. 캡처(Alt+F2)가
+        이미 큐에 이미지로 쌓이므로(_on_capture_region → _persist_clipboard_item), 캡처
+        여러 장을 이 키로 순서대로 경로 텍스트로 붙일 수 있다(예: 캡처1·2 → 이 키 두 번 →
+        경로1·2). 이미지가 아닌 항목은 원본 그대로 붙여(Ctrl+Shift+V와 동일). 큐가 소진되면
+        토스트만 표시하고 아무것도 하지 않는다(현재 클립보드 폴백은 일반 Ctrl+Shift+P가 담당 —
+        '순차/일반'을 키로 구분하는 원칙 유지).
+
+        클립보드 교체는 _set_clipboard(모니터 재감지 방지)로, 주입은 _send_clean_key(VK_V)로
+        수정키(Ctrl+Shift+Alt) 해제·복원 + 입력기 전환 마스킹을 거친다(일반 경로 붙여넣기와 동일).
+        """
+        from pasteflow.ui.toast import ToastNotification
+        from pasteflow.paste_interceptor import VK_V
+
+        next_item = self.queue.get_next()
+        if next_item is None:
+            ToastNotification("순차 큐가 비었습니다", icon="🔤")
+            return
+
+        # summary 항목이면 전체 로드 (이미지 항목은 image_data가 인라인이라 대개 불필요)
+        if not next_item.image_data and not next_item.extra_formats and next_item.id:
+            full = self.db.get_item(next_item.id)
+            if full:
+                next_item = full
+
+        if next_item.content_type == "image" and next_item.image_data:
+            try:
+                saved_path = _save_image_to_drop_temp(next_item.image_data)
+            except Exception as e:
+                ToastNotification(f"임시 파일 저장 실패 — {e}", icon="🔤")
+                return
+            path_item = ClipboardItem(
+                content_type="text",
+                text_content=saved_path,
+                preview_text=saved_path[:200],
+            )
+            self.interceptor._set_clipboard(path_item)
+            QTimer.singleShot(50, lambda: self.interceptor._send_clean_key(VK_V))
+            ToastNotification(
+                f"경로 붙여넣음: {os.path.basename(saved_path)}",
+                icon="", image_path=saved_path)
+        else:
+            # 이미지가 아니면 원본 그대로 붙여넣기(Ctrl+Shift+V와 동일 처리)
+            self.interceptor._set_clipboard(next_item)
+            QTimer.singleShot(50, lambda: self.interceptor._send_clean_key(VK_V))
+
+        # 진행 HUD 갱신 + 큐 소진 시 정리 (Ctrl+Shift+V 경로와 동일 표시)
+        self._update_paste_ui()
+        pointer, total = self.queue.get_status()
+        if pointer >= total and total > 0:
+            self.paste_hud.finish()
 
     def _on_ask_ai_hotkey(self):
         """AI 자유질문 단축키(기본 Alt+`) — 컨텍스트 없이 즉석에서 AI에게 질문한다.
@@ -1902,6 +1963,7 @@ class PasteFlowApp:
             "auto_start": self.db.get_setting("auto_start", "0"),
             "hotkey_ocr_trigger": self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s"),
             "hotkey_image_to_path": self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p"),
+            "hotkey_seq_image_to_path": self.db.get_setting("hotkey_seq_image_to_path", "ctrl+shift+["),
             "hotkey_pin_image": self.db.get_setting("hotkey_pin_image", "alt+f3"),
             "hotkey_capture": self.db.get_setting("hotkey_capture", "alt+f2"),
             "hotkey_ask_ai": self.db.get_setting("hotkey_ask_ai", "alt+`"),
@@ -1931,6 +1993,7 @@ class PasteFlowApp:
         old_hotkey = self.db.get_setting("hotkey_panel_toggle", "ctrl+space")
         old_ocr_hotkey = self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s")
         old_img2path_hotkey = self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p")
+        old_seq_img2path_hotkey = self.db.get_setting("hotkey_seq_image_to_path", "ctrl+shift+[")
         old_pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         old_ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+`")
@@ -1955,6 +2018,11 @@ class PasteFlowApp:
         new_img2path_hotkey = new_settings.get("hotkey_image_to_path", "ctrl+shift+p")
         if old_img2path_hotkey != new_img2path_hotkey:
             self.interceptor.set_image_to_path_hotkey(new_img2path_hotkey)
+
+        # 순차 경로 붙여넣기 단축키 재설정
+        new_seq_img2path_hotkey = new_settings.get("hotkey_seq_image_to_path", "ctrl+shift+[")
+        if old_seq_img2path_hotkey != new_seq_img2path_hotkey:
+            self.interceptor.set_seq_image_to_path_hotkey(new_seq_img2path_hotkey)
 
         # 화면에 핀 단축키 재설정
         new_pin_hotkey = new_settings.get("hotkey_pin_image", "alt+f3")

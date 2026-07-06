@@ -234,6 +234,7 @@ class PasteInterceptor:
         on_ocr_trigger: Optional[Callable[[], None]] = None,
         on_plain_paste: Optional[Callable[[], None]] = None,
         on_image_to_path: Optional[Callable[[], None]] = None,
+        on_seq_image_to_path: Optional[Callable[[], None]] = None,
         on_pin_image: Optional[Callable[[], None]] = None,
         on_capture: Optional[Callable[[], None]] = None,
         on_ask_ai: Optional[Callable[[], None]] = None,
@@ -246,6 +247,7 @@ class PasteInterceptor:
         self.on_ocr_trigger = on_ocr_trigger
         self.on_plain_paste = on_plain_paste
         self.on_image_to_path = on_image_to_path
+        self.on_seq_image_to_path = on_seq_image_to_path
         self.on_pin_image = on_pin_image
         self.on_capture = on_capture
         self.on_ask_ai = on_ask_ai
@@ -270,6 +272,11 @@ class PasteInterceptor:
         self._img2path_need_ctrl: bool = False
         self._img2path_need_shift: bool = False
         self._img2path_need_alt: bool = False
+        # 순차 경로 붙여넣기 단축키 (이미지→경로의 큐 버전, 동일 구조)
+        self._seqimg2path_vk: int = 0
+        self._seqimg2path_need_ctrl: bool = False
+        self._seqimg2path_need_shift: bool = False
+        self._seqimg2path_need_alt: bool = False
         # 화면에 핀(이미지 띄우기) 단축키 (패널 토글과 동일 구조)
         self._pin_vk: int = 0
         self._pin_need_ctrl: bool = False
@@ -327,6 +334,19 @@ class PasteInterceptor:
             self._img2path_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._img2path_vk = 0
+
+    def set_seq_image_to_path_hotkey(self, hotkey_str: str):
+        """순차 경로 붙여넣기 단축키 설정 — 큐에서 다음 항목을 꺼내 이미지면 경로 텍스트로 붙여넣기."""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._seqimg2path_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._seqimg2path_need_shift = "shift" in parts
+        self._seqimg2path_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._seqimg2path_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._seqimg2path_vk = 0
 
     def set_pin_hotkey(self, hotkey_str: str):
         """화면에 핀 단축키 설정 — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다."""
@@ -489,6 +509,18 @@ class PasteInterceptor:
                     if self.on_image_to_path:
                         try:
                             self.on_image_to_path()
+                        except Exception:
+                            pass
+                    return 1  # suppress
+
+                # 순차 경로 붙여넣기 단축키 감지 (기본 Ctrl+Shift+[) — 이미지→경로의 큐 버전
+                if (self._seqimg2path_vk and vk_code == self._seqimg2path_vk
+                        and ctrl_pressed  == self._seqimg2path_need_ctrl
+                        and shift_pressed == self._seqimg2path_need_shift
+                        and alt_pressed   == self._seqimg2path_need_alt):
+                    if self.on_seq_image_to_path:
+                        try:
+                            self.on_seq_image_to_path()
                         except Exception:
                             pass
                     return 1  # suppress

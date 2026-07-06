@@ -238,6 +238,8 @@ class HotkeyEdit(QPushButton):
             Qt.Key.Key_F7: "f7", Qt.Key.Key_F8: "f8", Qt.Key.Key_F9: "f9",
             Qt.Key.Key_F10: "f10", Qt.Key.Key_F11: "f11", Qt.Key.Key_F12: "f12",
             Qt.Key.Key_QuoteLeft: "`", Qt.Key.Key_AsciiTilde: "`",
+            # `[` 는 Shift가 눌리면 Qt가 `{`(BraceLeft)로 주므로 둘 다 "["로 취급
+            Qt.Key.Key_BracketLeft: "[", Qt.Key.Key_BraceLeft: "[",
         }
         if key in _MAP:
             return _MAP[key]
@@ -260,6 +262,7 @@ class SettingsDialog(QDialog):
     KEY_NOTIFY_ON_COPY = "notify_on_copy"
     KEY_OCR_HOTKEY = "hotkey_ocr_trigger"
     KEY_IMAGE_TO_PATH_HOTKEY = "hotkey_image_to_path"
+    KEY_SEQ_IMAGE_TO_PATH_HOTKEY = "hotkey_seq_image_to_path"
     KEY_PIN_IMAGE_HOTKEY = "hotkey_pin_image"
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
     KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
@@ -348,6 +351,15 @@ class SettingsDialog(QDialog):
             "Claude Code CLI 등 '파일 경로 텍스트'를 첨부로 받는 앱에 한 키로 붙여넣기 위한 단축키."
         )
         hotkey_form.addRow("이미지→경로:", self._image_to_path_hotkey)
+
+        self._seq_image_to_path_hotkey = HotkeyEdit()
+        self._seq_image_to_path_hotkey.setToolTip(
+            "순차 붙여넣기(Ctrl+Shift+V)의 '경로 버전'. 순차 큐에서 다음 항목을 꺼내되\n"
+            "이미지면 임시 PNG로 저장한 절대경로 텍스트로 붙여넣습니다.\n"
+            "예: 영역 캡처(Alt+F2)를 여러 장 찍은 뒤 이 키를 차례로 눌러 경로1·경로2… 순서대로 붙여넣기.\n"
+            "이미지가 아닌 항목은 원본 그대로 붙여넣습니다."
+        )
+        hotkey_form.addRow("순차 경로 붙여넣기:", self._seq_image_to_path_hotkey)
 
         self._pin_image_hotkey = HotkeyEdit()
         self._pin_image_hotkey.setToolTip(
@@ -636,6 +648,9 @@ class SettingsDialog(QDialog):
         self._image_to_path_hotkey.set_value(
             self._settings.get(self.KEY_IMAGE_TO_PATH_HOTKEY, "ctrl+shift+p")
         )
+        self._seq_image_to_path_hotkey.set_value(
+            self._settings.get(self.KEY_SEQ_IMAGE_TO_PATH_HOTKEY, "ctrl+shift+[")
+        )
         self._pin_image_hotkey.set_value(
             self._settings.get(self.KEY_PIN_IMAGE_HOTKEY, "alt+f3")
         )
@@ -844,6 +859,7 @@ class SettingsDialog(QDialog):
             self.KEY_PANEL_TOGGLE: self._panel_toggle_hotkey.value() or "ctrl+space",
             self.KEY_OCR_HOTKEY: self._ocr_hotkey.value() or "ctrl+shift+s",
             self.KEY_IMAGE_TO_PATH_HOTKEY: self._image_to_path_hotkey.value() or "ctrl+shift+p",
+            self.KEY_SEQ_IMAGE_TO_PATH_HOTKEY: self._seq_image_to_path_hotkey.value() or "ctrl+shift+[",
             self.KEY_PIN_IMAGE_HOTKEY: self._pin_image_hotkey.value() or "alt+f3",
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
             self.KEY_ASK_AI_HOTKEY: self._ask_ai_hotkey.value() or "alt+`",
