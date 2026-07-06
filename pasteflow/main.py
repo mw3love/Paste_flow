@@ -715,6 +715,7 @@ class PasteFlowApp:
         # 순차 붙여넣기 진행 HUD (단일 인스턴스 재사용)
         self.paste_hud = PasteHud()
         self.paste_hud.winId()
+        self.paste_hud.cancel_requested.connect(self._on_cancel_paste_queue)
 
         # OCR 오버레이
         from pasteflow.ui.ocr_overlay import OcrOverlay
@@ -863,6 +864,13 @@ class PasteFlowApp:
     def _on_paste_queue_done(self):
         """큐 소진 — 진행 HUD를 잠시 뒤 숨김"""
         self.paste_hud.finish()
+
+    def _on_cancel_paste_queue(self):
+        """HUD ✕ 클릭 — 남은 붙여넣기 취소: 큐 비우기 + 표시 초기화 + HUD 즉시 닫기"""
+        self.queue.clear()
+        self.tray.update_queue_status(0, 0)
+        self.panel.update_queue_highlight(0, 0, [])
+        self.paste_hud.dismiss()
 
     def _on_auto_close_changed(self, value: bool):
         self.db.set_setting("panel_auto_close", "1" if value else "0")

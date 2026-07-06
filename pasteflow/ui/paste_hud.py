@@ -3,8 +3,8 @@
 포커스를 빼앗지 않는 비활성 창(토스트와 동일 플래그)이라 붙여넣기에 간섭하지 않는다.
 첫 Ctrl+Shift+V에 표시되고 매 붙여넣기마다 갱신, 큐 소진/중단 후 잠시 뒤 fade-out.
 """
-from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout
-from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
+from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton
+from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, pyqtSignal
 from PyQt6.QtGui import QGuiApplication, QPainter, QColor, QPen
 
 from pasteflow.ui.theme import COLORS
@@ -29,6 +29,9 @@ def _elide(text: str, limit: int = 36) -> str:
 class PasteHud(QWidget):
     """순차 붙여넣기 진행 상황 HUD (단일 인스턴스 재사용)."""
 
+    # ✕ 버튼 클릭 — 남은 붙여넣기 취소(큐 비우기 + HUD 닫기)를 main이 처리
+    cancel_requested = pyqtSignal()
+
     def __init__(self):
         super().__init__(None, Qt.WindowType.FramelessWindowHint |
                          Qt.WindowType.WindowStaysOnTopHint |
@@ -42,11 +45,29 @@ class PasteHud(QWidget):
         layout.setSpacing(4)
         self._layout = layout
 
+        # 헤더 행: 제목 + (여백) + ✕ 취소 버튼
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
         self._header = QLabel()
         self._header.setStyleSheet(
             f"color: {COLORS['peach']}; font-size: 15px; font-weight: 700;"
             f" background: transparent;")
-        layout.addWidget(self._header)
+        header_row.addWidget(self._header)
+        header_row.addStretch(1)
+
+        self._cancel_btn = QPushButton("✕")
+        self._cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cancel_btn.setToolTip("남은 붙여넣기 취소")
+        self._cancel_btn.setFixedSize(20, 20)
+        self._cancel_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._cancel_btn.setStyleSheet(
+            f"QPushButton {{ color: {COLORS['subtext0']}; background: transparent;"
+            f" border: none; font-size: 14px; font-weight: 700; padding: 0; }}"
+            f" QPushButton:hover {{ color: {COLORS['peach']}; }}")
+        self._cancel_btn.clicked.connect(self.cancel_requested.emit)
+        header_row.addWidget(self._cancel_btn)
+        layout.addLayout(header_row)
 
         self._rows: list[QLabel] = []
 
@@ -76,6 +97,13 @@ class PasteHud(QWidget):
         if not self.isVisible() or self._fading:
             return
         self._finish_timer.start(_FINISH_LINGER_MS)
+
+    def dismiss(self):
+        """사용자 명시 취소(✕) — linger 없이 즉시 fade-out. 표시 중이 아니면 무시."""
+        if not self.isVisible() or self._fading:
+            return
+        self._finish_timer.stop()
+        self._start_fade_out()
 
     def _render(self, items: list, pointer: int):
         total = len(items)
