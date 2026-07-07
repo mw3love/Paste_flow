@@ -747,29 +747,8 @@ class PasteFlowApp:
         # DB에서 설정 로드 및 적용
         self._apply_settings_from_db()
 
-        # AI 답변창 F 스냅 프리셋 주입 (방향별 사용자 크기 — 그립 리사이즈 시 자동 저장).
-        from pasteflow.ui.text_preview import configure_snap_presets
-        configure_snap_presets(self._load_snap_presets(), self._save_snap_preset)
-
         # 시그널 연결
         self._connect_signals()
-
-    def _load_snap_presets(self) -> dict:
-        """DB에서 방향별 F 스냅 프리셋(`WxH`)을 읽어 {orient: (w,h)} 로 반환."""
-        presets = {}
-        for orient in ("landscape", "portrait"):
-            raw = self.db.get_setting(f"snap_preset_{orient}", "") or ""
-            if "x" in raw:
-                try:
-                    w, h = raw.lower().split("x", 1)
-                    presets[orient] = (int(w), int(h))
-                except ValueError:
-                    pass
-        return presets
-
-    def _save_snap_preset(self, orientation: str, w: int, h: int):
-        """그립 리사이즈 시 호출(메인 스레드) — 방향별 F 프리셋을 DB에 영속화."""
-        self.db.set_setting(f"snap_preset_{orientation}", f"{w}x{h}")
 
     def _connect_signals(self):
         """모든 시그널 연결"""
@@ -1417,24 +1396,7 @@ class PasteFlowApp:
             QTimer.singleShot(300, self._open_settings)
             return
 
-        # WinRT 언어팩 미설치 오류 — "언어팩"은 _recognize_winrt에서만 발생
-        if "언어팩" in msg:
-            from PyQt6.QtWidgets import QMessageBox
-            import os
-            dlg = QMessageBox(self.panel)
-            dlg.setStyleSheet(_MSGBOX_DARK_STYLE)
-            dlg.setWindowTitle("OCR 언어팩 미설치")
-            dlg.setIcon(QMessageBox.Icon.Warning)
-            dlg.setText("선택한 언어의 OCR 언어팩이 설치되지 않았습니다.")
-            dlg.setDetailedText(msg)
-            open_btn = dlg.addButton(
-                "Windows 언어 설정 열기", QMessageBox.ButtonRole.ActionRole
-            )
-            dlg.addButton(QMessageBox.StandardButton.Close)
-            dlg.exec()
-            if dlg.clickedButton() == open_btn:
-                os.startfile("ms-settings:regionlanguage")
-        elif "미설치" in msg:
+        if "미설치" in msg:
             # AI OCR 패키지 미설치 (google-generativeai, openai 등)
             from PyQt6.QtWidgets import QMessageBox
             import re

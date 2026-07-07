@@ -98,23 +98,8 @@ def _fix_markdown_emphasis(text: str) -> str:
     return _QUOTED_BOLD_RE.sub(lambda m: f"{m.group(1)}**{m.group(2)}**{m.group(1)}", text)
 
 
-# F 스냅 프리셋(방향별 크기). AI 답변창은 답변마다 새 인스턴스로 생겼다 닫히는 짧은 수명이라
-# 인스턴스에 기억시키면 다음 답변창에 안 넘어간다 → 모듈 레벨에 보관하고, DB 영속화(재시작 후
-# 유지)는 main이 주입한 콜백으로 처리한다(UI 위젯이 DB를 직접 만지지 않게 분리).
-_SNAP_PRESETS: dict[str, tuple[int, int]] = {}      # {"landscape": (w,h), "portrait": (w,h)}
-_SNAP_PERSIST = None                                  # callable(orientation:str, w:int, h:int)
-
 # 펜딩 탭 답변 자리 sentinel — 후속 질문 엔터 직후 답이 아직 없는 턴을 표시(is 비교로 식별).
 _PENDING = object()
-
-
-def configure_snap_presets(presets: dict, persist_cb) -> None:
-    """main이 시작 시 1회 호출 — DB에서 읽은 방향별 F 프리셋과 저장 콜백을 주입한다."""
-    global _SNAP_PERSIST
-    _SNAP_PRESETS.clear()
-    if presets:
-        _SNAP_PRESETS.update(presets)
-    _SNAP_PERSIST = persist_cb
 
 
 class _ResizeGrip(QWidget):
@@ -148,9 +133,6 @@ class _ResizeGrip(QWidget):
             event.accept()
 
     def mouseReleaseEvent(self, event):
-        # 실제 드래그로 크기를 바꿨을 때만 그 크기를 방향별 F 프리셋으로 기억(메모리+DB).
-        if self._press is not None and self._moved:
-            self._popup._commit_snap_preset()
         self._press = None
         event.accept()
 
@@ -314,7 +296,6 @@ class TextPreviewPopup(QWidget):
         # 답변이 처음 열릴 땐 선택→복사 모드 — 부분 발췌가 흔하고, 형광펜은 필요할 때만 켠다.
         self._highlight_mode = False
         self._manual_size = False  # 코너 그립으로 수동 리사이즈하면 자동 크기 산정 중단
-        self._snapped = False      # F 키로 모니터 방향 영역에 스냅된 상태인지(토글용)
         self._pressed_anchor = ""  # 좌클릭 누른 위치의 링크 URL(드래그 없이 떼면 브라우저로 염)
         # 마크다운 요소(제목/볼드/코드/기울임) 스팬 — setMarkdown 직후 1회만 수집(아래).
         self._syntax_spans: list[tuple[int, int, str, bool]] = []
@@ -483,17 +464,8 @@ class TextPreviewPopup(QWidget):
             self._hl_btn.setFixedSize(26, 26)
             self._hl_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self._hl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            self._hl_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: {_SURFACE0};
-                    border: 1px solid {_SURFACE2};
-                    border-radius: 6px;
-                    font-size: 14px;
-                }}
-                QPushButton:hover {{ background: {_SURFACE2}; }}
-            """)
             self._hl_btn.clicked.connect(self._toggle_highlight_mode)
-            self._update_hl_btn()
+            self._update_hl_btn()  # 텍스트·스타일·툴팁을 상태(ON/OFF)에 맞게 설정
             # 우상단 닫기(✕) 버튼 — ESC와 동일(self.close). hover 시 코랄로 '닫힘'을 강조.
             # 형광펜 토글 오른쪽(창 모서리)에 두어 통상적인 닫기 버튼 위치를 따른다.
             self._close_btn = QPushButton("✕", self)
@@ -919,9 +891,7 @@ class TextPreviewPopup(QWidget):
                 if txt.strip():
                     self.copy_text_requested.emit(txt)
             return
-        # (F 중앙 존 스냅 제거 — 후속 질문 입력칸에 'f'가 타이핑되는 충돌 + ⛶ 최대화 버튼·Alt휠
-        #  창 크기 조절이 그 역할을 대체. _toggle_snap_zone/_SNAP_PRESETS 등 스냅 기반 코드는
-        #  이제 F 트리거가 없어 도달 불가 — 관련 dead code는 후속 정리 대상으로 보고만 함.)
+        # (옛 F 중앙 존 스냅은 제거됨 — ⛶ 최대화 버튼·Alt휠 창 크기 조절이 대체.)
         super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
@@ -973,42 +943,6 @@ class TextPreviewPopup(QWidget):
             grip.move(self.width() - grip.width(), self.height() - grip.height())
             grip.raise_()
 
-    def _toggle_snap_zone(self):
-        """F 키 — 현재 창이 올라가 있는 모니터의 방향(가로/세로)에 맞춘 중앙 영역으로
-        스냅한다. 다시 누르면 내용맞춤(자동) 크기로 복귀(FancyZones식 토글).
-
-        크기: 사용자가 그립으로 맞춰 저장한 방향별 프리셋(_SNAP_PRESETS)이 있으면 그 크기,
-        없으면 기본 비율(가로 = 폭 80%×높이 90% / 세로 = 폭 90%×높이 40%).
-        스냅 시 wrap을 강제 on해 새 폭에 맞춰 내용이 재배치되고, 길면 세로 스크롤로 본다.
-        """
-        self._clear_maximized_state()  # F 스냅은 최대화와 별개 → 최대화 버튼 상태 정리
-        if self._snapped:
-            # 복귀: 자동 크기 산정 재개 → 내용맞춤 크기로
-            self._snapped = False
-            self._manual_size = False
-            self._resize_to_content()
-            self._clamp_to_screen(self._current_avail())
-            return
-        avail = self._current_avail()
-        orient = self._orientation_of(avail)
-        preset = _SNAP_PRESETS.get(orient)
-        if preset:  # 그립으로 저장해 둔 사용자 크기(현재 모니터를 못 넘게 clamp)
-            w = min(preset[0], avail.width())
-            h = min(preset[1], avail.height())
-        elif orient == "landscape":
-            w = round(avail.width() * 0.80)
-            h = round(avail.height() * 0.90)
-        else:
-            w = round(avail.width() * 0.90)
-            h = round(avail.height() * 0.40)
-        x = avail.left() + (avail.width() - w) // 2
-        y = avail.top() + (avail.height() - h) // 2
-        self._manual_size = True   # 스냅 크기를 줌·재표시가 덮어쓰지 않게
-        self._snapped = True
-        self._set_line_wrap(True)  # 새 폭에 맞춰 내용 재배치(가로 잘림 방지)
-        self.resize(w, h)
-        self.move(x, y)
-
     def _current_avail(self):
         """현재 창이 속한 모니터의 작업 영역(availableGeometry)."""
         screen = (self.screen()
@@ -1016,30 +950,10 @@ class TextPreviewPopup(QWidget):
                   or QApplication.primaryScreen())
         return screen.availableGeometry()
 
-    @staticmethod
-    def _orientation_of(avail) -> str:
-        return "landscape" if avail.width() >= avail.height() else "portrait"
-
-    def _commit_snap_preset(self):
-        """그립 리사이즈 완료 시 — 현재 크기를 현재 모니터 방향의 F 프리셋으로 저장(메모리+DB).
-
-        이후 그 방향 모니터에서 F를 누르면 기본 비율 대신 이 크기로 스냅된다.
-        영속화 콜백은 main이 configure_snap_presets로 주입(없으면 메모리에만 — 세션 한정)."""
-        avail = self._current_avail()
-        orient = self._orientation_of(avail)
-        w, h = self.width(), self.height()
-        _SNAP_PRESETS[orient] = (w, h)
-        if _SNAP_PERSIST is not None:
-            try:
-                _SNAP_PERSIST(orient, w, h)
-            except Exception:
-                pass
-
     def _apply_manual_resize(self, w: int, h: int):
         """코너 그립 드래그 → 자유 리사이즈. 이후 자동 크기 산정은 중단하고, 폭에 맞춰
         내용이 재배치되도록 wrap을 강제 on(좁히면 가로 잘림 방지)."""
         self._manual_size = True
-        self._snapped = False  # 수동 조절하면 스냅 토글 상태 해제(다음 F는 스냅으로)
         self._clear_maximized_state()  # 그립 리사이즈하면 최대화 상태 해제(버튼도 ⛶로)
         self._set_line_wrap(True)
         screen = (self.screen()

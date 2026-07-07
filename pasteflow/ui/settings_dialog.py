@@ -277,7 +277,6 @@ class SettingsDialog(QDialog):
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
     KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
     KEY_CAPTURE_FOLDER = "capture_save_folder"
-    KEY_OCR_LANG = "ocr_language"
     KEY_OCR_ENGINE = "ocr_engine"
     # Gemini는 backend별로 키/모델/캐시 분리 — Mindlogic Gateway와 개인 AI Studio 키를 동시에 보관
     KEY_OCR_GEMINI_BACKEND = "ocr_gemini_backend"  # "official" | "gateway"
