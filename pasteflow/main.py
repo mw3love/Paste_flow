@@ -740,6 +740,10 @@ class PasteFlowApp:
         self._fg_hook = None
         self._fg_proc = None
 
+        # 이미지→경로(Ctrl+Shift+P) 임시 PNG 캐시: (item_id, saved_path) 또는 None.
+        # 같은 최신 이미지에 반복 실행 시 디스크 재저장을 피하기 위함.
+        self._img_to_path_cache = None
+
         # DB에서 설정 로드 및 적용
         self._apply_settings_from_db()
 
@@ -861,15 +865,28 @@ class PasteFlowApp:
         if pointer >= total and total > 0:
             self._bridge.paste_queue_done.emit()
 
+    def _clear_queue_ui(self):
+        """큐를 비우고 tray·패널 하이라이트를 초기화 (큐 포기/클리어 공통 경로).
+
+        '큐를 언제 비울지' 정책의 '포기/클리어' 범주가 공유: 일반 Ctrl+V, 큐 소진 완료,
+        HUD ✕ 취소, 우클릭 큐 해제, Ctrl+Shift+P 단발 경로 붙여넣기.
+        """
+        self.queue.clear()
+        self.tray.update_queue_status(0, 0)
+        self.panel.update_queue_highlight(0, 0, [])
+
     def _on_paste_queue_done(self):
-        """큐 소진 — 진행 HUD를 잠시 뒤 숨김"""
+        """큐 소진 완료 — 큐/포인터를 클리어하고 진행 HUD를 잠시 뒤 페이드.
+
+        소진 후에도 큐가 남아 있으면 패널이 항목을 '큐에 들어있음'으로 계속 표시해
+        우클릭 메뉴가 '큐 해제'로 뜨는 찌꺼기가 생긴다 → 소진 시 클리어로 정리.
+        """
+        self._clear_queue_ui()
         self.paste_hud.finish()
 
     def _on_cancel_paste_queue(self):
         """HUD ✕ 클릭 — 남은 붙여넣기 취소: 큐 비우기 + 표시 초기화 + HUD 즉시 닫기"""
-        self.queue.clear()
-        self.tray.update_queue_status(0, 0)
-        self.panel.update_queue_highlight(0, 0, [])
+        self._clear_queue_ui()
         self.paste_hud.dismiss()
 
     def _on_auto_close_changed(self, value: bool):
@@ -1173,10 +1190,17 @@ class PasteFlowApp:
             icon="", image_path=saved_path)
 
     def _on_image_to_path_hotkey(self):
-        """이미지→경로 단축키(기본 Ctrl+Shift+P) — 현재 클립보드 이미지를 임시 PNG로 저장 후
+        """이미지→경로 단축키(기본 Ctrl+Shift+P) — 최신 히스토리 이미지를 임시 PNG로 저장 후
         절대경로 텍스트로 클립보드 교체 → 단축키를 누른 포그라운드 창에 자동 Ctrl+V.
 
         Claude Code CLI 등 "이미지 파일 경로를 첨부로 받는" 앱에 한 키로 바로 붙여넣기 위한 경로.
+
+        **소스 = 라이브 클립보드가 아니라 최신 히스토리 항목**(Ctrl+V의 "마지막 복사물"에 대응).
+        경로 텍스트는 히스토리에 안 남으므로(_set_clipboard의 self_triggered) 원본 이미지가
+        최신 자리에 유지돼 이 키를 여러 번 눌러도 같은 이미지를 무한히 경로로 붙일 수 있다
+        (Ctrl+V의 무한 반복과 대칭). 같은 이미지에 반복 실행 시 _img_to_path_cache로 임시 PNG를
+        재사용해 디스크 재저장을 피한다. 최신 항목이 이미지가 아니면 토스트만 표시(경로 붙여넣기는
+        이미지에만 의미) — 큐 기반 순차 경로 붙여넣기는 Ctrl+Shift+[가 담당.
 
         주의: 발화 시점에 사용자가 Ctrl+Shift를 여전히 누르고 있으므로 `_send_ctrl_v_plain`
         (수정키 처리 없는 단순 Ctrl+V)을 그대로 쓰면 OS가 Ctrl+Shift+V로 인식해 실패한다.
@@ -1186,16 +1210,25 @@ class PasteFlowApp:
         from pasteflow.ui.toast import ToastNotification
         from pasteflow.paste_interceptor import VK_V
 
-        image_bytes = _read_image_from_clipboard()
-        if not image_bytes:
-            ToastNotification("클립보드에 이미지가 없습니다", icon="🔤")
+        recent = self.db.get_recent_items(limit=1)
+        item = recent[0] if recent else None
+        if item is None or item.content_type != "image" or not item.image_data:
+            ToastNotification("최근 복사 항목이 이미지가 아닙니다", icon="🔤")
             return
 
-        try:
-            saved_path = _save_image_to_drop_temp(image_bytes)
-        except Exception as e:
-            ToastNotification(f"임시 파일 저장 실패 — {e}", icon="🔤")
-            return
+        # 캐시된 경로가 같은 항목의 것이고 파일이 아직 있으면 재사용(반복 실행 디스크 절약)
+        saved_path = None
+        if self._img_to_path_cache is not None:
+            cached_id, cached_path = self._img_to_path_cache
+            if cached_id == item.id and item.id is not None and os.path.exists(cached_path):
+                saved_path = cached_path
+        if saved_path is None:
+            try:
+                saved_path = _save_image_to_drop_temp(item.image_data)
+            except Exception as e:
+                ToastNotification(f"임시 파일 저장 실패 — {e}", icon="🔤")
+                return
+            self._img_to_path_cache = (item.id, saved_path)
 
         path_item = ClipboardItem(
             content_type="text",
@@ -1207,6 +1240,9 @@ class PasteFlowApp:
 
         # 50ms 후 Ctrl+V 주입 — _send_clean_key가 사용자 Ctrl/Shift 해제 → Ctrl+V → 복원
         QTimer.singleShot(50, lambda: self.interceptor._send_clean_key(VK_V))
+        # 단발 경로 붙여넣기는 큐가 아닌 현재 클립보드를 붙이는 '이탈' — 일반 Ctrl+V처럼
+        # 큐를 클리어해 일관성 유지(큐 기반 경로 붙여넣기는 Ctrl+Shift+[가 담당)
+        self._clear_queue_ui()
         # 썸네일을 함께 띄워 "의도한 이미지가 맞는지" 그 자리에서 시각 확인
         ToastNotification(
             f"경로 붙여넣음: {os.path.basename(saved_path)}",
@@ -1265,7 +1301,8 @@ class PasteFlowApp:
         self._update_paste_ui()
         pointer, total = self.queue.get_status()
         if pointer >= total and total > 0:
-            self.paste_hud.finish()
+            # Ctrl+Shift+V 소진과 동일하게 큐 클리어 + HUD 페이드 (찌꺼기 방지)
+            self._on_paste_queue_done()
 
     def _on_ask_ai_hotkey(self):
         """AI 자유질문 단축키(기본 Alt+`) — 컨텍스트 없이 즉석에서 AI에게 질문한다.
@@ -1525,15 +1562,11 @@ class PasteFlowApp:
         self.panel.update_queue_highlight(pointer, total, queue_item_ids)
 
     def _on_queue_deselect(self, item_id: int):
-        self.queue.clear()
-        self.tray.update_queue_status(0, 0)
-        self.panel.update_queue_highlight(0, 0, [])
+        self._clear_queue_ui()
 
     def _on_plain_paste(self):
         """일반 Ctrl+V 감지 → 큐 즉시 비우기 + UI 갱신 (훅 스레드 시그널 → 메인)"""
-        self.queue.mark_plain_paste()
-        self.tray.update_queue_status(0, 0)
-        self.panel.update_queue_highlight(0, 0, [])
+        self._clear_queue_ui()
 
     def _on_combine_copy(self, item: ClipboardItem):
         """F6: 다중 선택 결합 복사 → DB 저장 + 클립보드 + 큐"""
