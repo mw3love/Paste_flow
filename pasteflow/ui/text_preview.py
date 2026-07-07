@@ -13,12 +13,12 @@ import webbrowser
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QApplication, QMenu, QPlainTextEdit, QTextEdit,
-    QFrame, QPushButton, QLineEdit,
+    QFrame, QPushButton, QLineEdit, QLabel,
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, QEvent, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QTextOption, QFont, QFontMetrics, QTextDocument, QTextCursor, QTextCharFormat, QColor,
-    QTextListFormat, QTextBlockFormat,
+    QTextFormat, QTextListFormat, QTextBlockFormat,
     QImage, QPainter, QPixmap, QPalette, QAbstractTextDocumentLayout,
 )
 
@@ -35,7 +35,7 @@ from pasteflow.models import ClipboardItem
 PREVIEW_INITIAL_MAX_W = 360
 PREVIEW_INITIAL_MAX_H = 300
 _BASE_FONT_SIZE = 12
-_SCALE_STEP = 1.3
+_SCALE_STEP = 1.1  # Ctrl+휠 한 칸당 ~10% (1.3=30%는 너무 급격해 촘촘하게 낮춤)
 _SCREEN_MARGIN = 40  # 화면 한계 cap 시 가장자리 여유
 
 # AI 답변(마크다운) 전용 — 줌 없이 바로 읽기 편한 고정값. 휠은 줌이 아니라 스크롤로
@@ -165,6 +165,95 @@ class _ResizeGrip(QWidget):
         p.end()
 
 
+class _MiniHandle(QWidget):
+    """최소화(접기) 시 화면에 남는 작은 막대. 제자리 클릭=복원, 드래그=이동.
+
+    프레임리스 Tool 창은 작업표시줄에 안 잡히므로(앱의 '화면에 떠 있는 핀' 성격), 작업표시줄
+    대신 이 미니 막대로 '닫지 않고 치워두기'를 구현한다. 별도 top-level 위젯이라 본체가
+    숨어도 독립적으로 떠 있는다.
+
+    클릭 vs 드래그는 4px 임계로 구분한다(AI_Dictionary 확장의 📖 최소화 아이콘 기법 포팅):
+    누른 뒤 이동량 |dx|+|dy| < 4px면 미세 떨림=클릭(복원), 넘으면 드래그(이동)로 본다."""
+
+    _DRAG_THRESHOLD = 4
+
+    _MAX_LABEL = 12  # 알약에 보여줄 질문 앞글자 수(넘으면 …)
+
+    def __init__(self, on_click, on_drag_end=None):
+        super().__init__(None)
+        self._on_click = on_click
+        self._on_drag_end = on_drag_end
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+                            | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        # 프레임리스 top-level은 translucent를 줘야 라운드 밖 모서리가 투명해져 진짜 알약이 된다
+        # (안 주면 라운드 밖에 불투명 기본 배경이 남아 각져 보임). 코랄 배경은 내부 pill 위젯에.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)  # 잡아서 옮길 수 있음을 커서로 암시
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self._pill = QWidget(self)
+        self._pill.setObjectName("pill")
+        # 코랄 알약(다크 데스크톱 위에서 잘 보이는 밝은 액센트) + 완전 둥근 모서리.
+        self._pill.setStyleSheet(f"#pill {{ background:{_PEACH}; border-radius:16px; }}")
+        # 자식(pill·라벨)을 마우스 투명으로 → 클릭/드래그가 최상위 _MiniHandle로 확실히 전파되고
+        # (드래그 이동·클릭 복원), hover 툴팁도 최상위에 걸어둔 게 그대로 뜬다.
+        self._pill.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        outer.addWidget(self._pill)
+        lay = QHBoxLayout(self._pill)
+        lay.setContentsMargins(12, 5, 14, 5)
+        lay.setSpacing(7)
+        icon = QLabel("🤖")
+        icon.setStyleSheet("background:transparent; border:none; font-size:17px;")  # 살짝 키움
+        icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._qlabel = QLabel("")  # 질문 앞부분 — 여러 개 최소화 시 무엇인지 바로 구분
+        self._qlabel.setStyleSheet(
+            f"color:{_BG}; background:transparent; border:none; font-size:12px; font-weight:bold;")
+        self._qlabel.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        lay.addWidget(icon)
+        lay.addWidget(self._qlabel)
+        self._press = None   # (드래그 시작 글로벌 좌표, 막대 시작 pos)
+        self._moved = False
+
+    def set_question(self, q: str):
+        """알약에 질문 앞 _MAX_LABEL자를 보여주고(넘으면 …), 툴팁엔 전문을 단다."""
+        q = (q or "").replace("\n", " ").strip()
+        short = (q[:self._MAX_LABEL] + "…") if len(q) > self._MAX_LABEL else q
+        self._qlabel.setText(short)
+        self.setToolTip(f"클릭: 펼치기 · 드래그: 이동\n— {q}" if q else "클릭: 펼치기 · 드래그: 이동")
+        self.adjustSize()  # 라벨 길이에 맞춰 알약 폭 재조정
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press = (event.globalPosition().toPoint(), self.pos())
+            self._moved = False
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._press is None:
+            return
+        start, origin = self._press
+        d = event.globalPosition().toPoint() - start
+        if not self._moved and abs(d.x()) + abs(d.y()) < self._DRAG_THRESHOLD:
+            return  # 미세 떨림 = 아직 클릭 후보
+        self._moved = True
+        self.move(origin + d)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self._press is None:
+            return
+        self._press = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        if self._moved:
+            if self._on_drag_end is not None:
+                self._on_drag_end(self.pos())  # 옮긴 위치 기억(다음 최소화 때 유지)
+        else:
+            self._on_click()  # 제자리 클릭 = 복원
+        event.accept()
+
+
 class TextPreviewPopup(QWidget):
     """텍스트 전체 미리보기 — 다중 창 동시 표시 지원"""
 
@@ -241,6 +330,15 @@ class TextPreviewPopup(QWidget):
 
         self._scale_factor: float = 1.0
         self._drag_pos: QPoint | None = None
+        # 최대화(진짜 풀화면 토글) 상태 — ⛶ 버튼. F 스냅(중앙 존)과 별개로 모니터 작업영역을 꽉 채운다.
+        self._maximized: bool = False
+        self._pre_max_geom: QRect | None = None   # 최대화 직전 지오메트리(복원용)
+        self._pre_max_manual: bool = False        # 최대화 직전 _manual_size(복원 시 자동 산정 여부)
+        # 최소화(미니 핸들) 상태 — ▁ 버튼. 접으면 작은 막대만 남기고 본체 숨김.
+        self._minimized: bool = False
+        self._mini_handle: _MiniHandle | None = None   # 접힘 막대 위젯(지연 생성)
+        self._pre_min_pos: QPoint | None = None        # 접기 직전 위치(좌상단 근처 복원용)
+        self._mini_last_pos: QPoint | None = None       # 사용자가 옮긴 미니 막대 위치(있으면 유지)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
 
         # 최상위 창은 배경만 담당 — 테두리는 내부 컨테이너가 담당한다.
@@ -272,9 +370,9 @@ class TextPreviewPopup(QWidget):
             self._tabbar = QWidget()
             self._tabbar.setFixedHeight(34)
             self._tab_layout = QHBoxLayout(self._tabbar)
-            # 우측 여백 68px = 우상단 형광펜 토글(_hl_btn) + 닫기(_close_btn) 두 버튼 자리 확보
-            # (탭이 그 밑으로 안 감). 6+26+6+26+4 ≈ 68.
-            self._tab_layout.setContentsMargins(4, 4, 68, 2)
+            # 우측 여백 = 우상단 버튼 행(형광펜·최소화·최대화·닫기) 자리 확보(탭이 그 밑으로 안 감).
+            # 4버튼×26 + 3×6(gap) + 6(m) ≈ 128.
+            self._tab_layout.setContentsMargins(4, 4, 128, 2)
             self._tab_layout.setSpacing(4)
             self._tabbar.setVisible(False)
             container_layout.addWidget(self._tabbar)
@@ -414,6 +512,10 @@ class TextPreviewPopup(QWidget):
                 QPushButton:hover {{ background: {_PEACH}; border-color: {_PEACH}; color: #1a1a1a; }}
             """)
             self._close_btn.clicked.connect(self.close)
+            # 최대화(⛶)·최소화(▁) — 형광펜과 같은 neutral 톤(코랄 hover는 닫기 전용). 배치·우측
+            # 예약폭은 _position_overlays가 [닫기·최대화·최소화·형광펜] 행으로 일괄 처리한다.
+            self._max_btn = self._make_corner_btn("⛶", "최대화 (모니터 꽉 채우기)", self._toggle_maximize)
+            self._min_btn = self._make_corner_btn("▁", "최소화 (미니 핸들로 접기)", self._toggle_minimize)
             self._grip = _ResizeGrip(self)
 
         self._apply_active_style(False)
@@ -428,12 +530,30 @@ class TextPreviewPopup(QWidget):
         if obj is self._editor.viewport():
             et = event.type()
             if et == QEvent.Type.Wheel:
-                ctrl = event.modifiers() & Qt.KeyboardModifier.ControlModifier
-                # 마크다운(AI 답변)은 휠=스크롤(글자 크기 고정), Ctrl+휠=줌.
-                # 일반 미리보기는 기존대로 휠=줌.
-                if self._markdown and not ctrl:
-                    return False  # QTextEdit가 스크롤 처리
+                mod = event.modifiers()
+                ctrl = mod & Qt.KeyboardModifier.ControlModifier
+                alt = mod & Qt.KeyboardModifier.AltModifier
                 delta = event.angleDelta().y()
+                if self._markdown:
+                    # AI 답변: 휠=페이지 스크롤(기본) / Ctrl휠=글자 크기(웹 관례) / Alt휠=창 크기.
+                    if alt:
+                        # Windows는 Alt+휠을 가로 스크롤로 바꿔 y=0, x에 델타가 실린다 → x 폴백.
+                        ad = delta or event.angleDelta().x()
+                        if ad != 0:
+                            f = 1.1 if ad > 0 else (1 / 1.1)
+                            self._apply_manual_resize(round(self.width() * f),
+                                                      round(self.height() * f))
+                        return True
+                    if not ctrl:
+                        return False  # QTextEdit가 스크롤 처리(긴 답변 페이지 스크롤)
+                    if delta != 0:
+                        factor = _SCALE_STEP if delta > 0 else (1 / _SCALE_STEP)
+                        self._scale_factor *= factor
+                        self._apply_scale()
+                        self._apply_marks()  # 코드 스팬 크기 재반영(FontPixelSize)
+                        # _resize_to_content 호출 안 함 — Ctrl휠은 글자만, 창 크기는 Alt휠/그립.
+                    return True
+                # 일반 미리보기: 기존대로 휠=줌 + 창 맞춤.
                 if delta != 0:
                     factor = _SCALE_STEP if delta > 0 else (1 / _SCALE_STEP)
                     self._scale_factor *= factor
@@ -799,12 +919,9 @@ class TextPreviewPopup(QWidget):
                 if txt.strip():
                     self.copy_text_requested.emit(txt)
             return
-        # F → 현재 모니터 방향에 맞춘 중앙 영역으로 스냅 ↔ 내용맞춤 크기 복귀 토글(AI 답변 전용).
-        if (self._markdown
-                and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-                and event.key() == Qt.Key.Key_F):
-            self._toggle_snap_zone()
-            return
+        # (F 중앙 존 스냅 제거 — 후속 질문 입력칸에 'f'가 타이핑되는 충돌 + ⛶ 최대화 버튼·Alt휠
+        #  창 크기 조절이 그 역할을 대체. _toggle_snap_zone/_SNAP_PRESETS 등 스냅 기반 코드는
+        #  이제 F 트리거가 없어 도달 불가 — 관련 dead code는 후속 정리 대상으로 보고만 함.)
         super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
@@ -832,24 +949,28 @@ class TextPreviewPopup(QWidget):
         self._position_overlays()
 
     def _position_overlays(self):
-        """우상단 토글 버튼·우하단 리사이즈 그립을 현재 창 크기에 맞춰 재배치(마크다운 전용)."""
-        m = 6  # 컨테이너 테두리(2px) 바깥쪽 여백
-        gap = 6  # 두 버튼 사이 간격
-        btn = getattr(self, "_hl_btn", None)  # __init__ 중 이른 resize 대비 가드
-        close = getattr(self, "_close_btn", None)
+        """우상단 버튼 행(닫기·최대화·최소화·형광펜)을 우측 모서리부터 왼쪽으로,
+        우하단 리사이즈 그립을 꼭짓점에 재배치(마크다운 전용)."""
+        m = 6    # 컨테이너 테두리(2px) 바깥쪽 여백
+        gap = 6  # 버튼 사이 간격
+        # 우측 모서리부터 왼쪽 순서: 닫기 → 최대화 → 최소화 → 형광펜 토글.
+        # (__init__ 중 이른 resize 대비 getattr 가드)
+        x = self.width() - m
+        for name in ("_close_btn", "_max_btn", "_min_btn", "_hl_btn"):
+            b = getattr(self, name, None)
+            if b is None:
+                continue
+            x -= b.width()
+            b.move(x, m)
+            b.raise_()
+            x -= gap
         grip = getattr(self, "_grip", None)
-        # 닫기(✕)는 창 모서리(맨 오른쪽), 형광펜 토글은 그 왼쪽에 배치.
-        if close is not None:
-            close.move(self.width() - close.width() - m, m)
-            close.raise_()
-        if btn is not None:
-            close_w = close.width() + gap if close is not None else 0
-            btn.move(self.width() - btn.width() - m - close_w, m)
-            btn.raise_()
         if grip is not None:
-            # 하단 "이어서 질문" 입력칸이 있으면 그 위에, 없으면 우하단 꼭짓점에 flush.
-            grip_y = self.height() - grip.height() - self._bottom_reserve()
-            grip.move(self.width() - grip.width(), grip_y)
+            # 진짜 우하단 꼭짓점에 flush — "코너=크기조절" 관용을 지킨다. 하단 "이어서 질문"
+            # 입력칸이 생기면서 예전엔 그립을 입력칸 위로 올렸는데(_bottom_reserve만큼), 그 탓에
+            # 코너에 크기조절 커서가 안 떠 사용자가 이동 커서로 오인했다(버그). 입력칸 오른쪽
+            # 끝 24px를 살짝 덮지만 입력은 왼쪽부터 차므로 실사용 지장 없음.
+            grip.move(self.width() - grip.width(), self.height() - grip.height())
             grip.raise_()
 
     def _toggle_snap_zone(self):
@@ -860,6 +981,7 @@ class TextPreviewPopup(QWidget):
         없으면 기본 비율(가로 = 폭 80%×높이 90% / 세로 = 폭 90%×높이 40%).
         스냅 시 wrap을 강제 on해 새 폭에 맞춰 내용이 재배치되고, 길면 세로 스크롤로 본다.
         """
+        self._clear_maximized_state()  # F 스냅은 최대화와 별개 → 최대화 버튼 상태 정리
         if self._snapped:
             # 복귀: 자동 크기 산정 재개 → 내용맞춤 크기로
             self._snapped = False
@@ -918,6 +1040,7 @@ class TextPreviewPopup(QWidget):
         내용이 재배치되도록 wrap을 강제 on(좁히면 가로 잘림 방지)."""
         self._manual_size = True
         self._snapped = False  # 수동 조절하면 스냅 토글 상태 해제(다음 F는 스냅으로)
+        self._clear_maximized_state()  # 그립 리사이즈하면 최대화 상태 해제(버튼도 ⛶로)
         self._set_line_wrap(True)
         screen = (self.screen()
                   or QApplication.screenAt(self.geometry().center())
@@ -933,6 +1056,9 @@ class TextPreviewPopup(QWidget):
 
     def closeEvent(self, event):
         self._stop_think_timer()  # 펜딩 애니메이션 타이머 정리(누수 방지)
+        if self._mini_handle is not None:  # 별도 top-level 막대라 본체와 함께 안 죽음 → 명시 정리
+            self._mini_handle.close()
+            self._mini_handle = None
         type(self)._instances = [p for p in type(self)._instances if p is not self]
         super().closeEvent(event)
 
@@ -1058,12 +1184,125 @@ class TextPreviewPopup(QWidget):
     def _update_hl_btn(self):
         if self._hl_btn is None:
             return
+        # 아이콘은 항상 형광펜(🖍) — ON/OFF는 아이콘 교체가 아니라 배경(코랄=ON / 중립=OFF)으로 표시.
+        self._hl_btn.setText("🖍")
         if self._highlight_mode:
-            self._hl_btn.setText("🖍")
-            self._hl_btn.setToolTip("형광펜 모드 — 드래그로 강조 (클릭/Shift+` 로 선택·복사 모드 전환)")
+            self._hl_btn.setStyleSheet(
+                f"QPushButton {{ background:{_PEACH}; border:1px solid {_PEACH};"
+                f" border-radius:6px; font-size:14px; }}")
+            self._hl_btn.setToolTip("형광펜 ON — 드래그로 강조 (클릭/Shift+` 로 끄기)")
         else:
-            self._hl_btn.setText("✂")
-            self._hl_btn.setToolTip("선택→복사 모드 — 드래그로 선택하면 바로 복사 (클릭/Shift+` 로 형광펜 모드 전환)")
+            self._hl_btn.setStyleSheet(
+                f"QPushButton {{ background:{_SURFACE0}; border:1px solid {_SURFACE2};"
+                f" border-radius:6px; font-size:14px; }}"
+                f"QPushButton:hover {{ background:{_SURFACE2}; }}")
+            self._hl_btn.setToolTip("형광펜 OFF — 드래그는 선택→복사 (클릭/Shift+` 로 켜기)")
+
+    # ------------------------------------------------------------------
+    # 최대화(⛶)·최소화(▁) — 우상단 버튼 행
+    # ------------------------------------------------------------------
+
+    def _make_corner_btn(self, text: str, tooltip: str, on_click) -> QPushButton:
+        """우상단 버튼 행용 26px 정사각 버튼(형광펜과 같은 neutral 톤·hover).
+
+        최대화·최소화가 형광펜(_hl_btn)과 스타일을 공유하므로 헬퍼로 묶는다. 닫기(✕)만
+        코랄 hover라 별도 생성한다."""
+        b = QPushButton(text, self)
+        b.setFixedSize(26, 26)
+        b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setToolTip(tooltip)
+        b.setStyleSheet(f"""
+            QPushButton {{
+                background: {_SURFACE0};
+                border: 1px solid {_SURFACE2};
+                border-radius: 6px;
+                font-size: 13px;
+                color: {_TEXT};
+            }}
+            QPushButton:hover {{ background: {_SURFACE2}; }}
+        """)
+        b.clicked.connect(on_click)
+        return b
+
+    def _toggle_maximize(self):
+        """⛶ 버튼 — 현재 모니터 작업영역을 꽉 채운다(진짜 풀화면). 다시 누르면 이전 크기·위치로
+        복원. F 스냅(중앙 존)과 별개 동작이라 상태(_maximized)·저장 지오메트리를 따로 둔다."""
+        if self._maximized:
+            self._maximized = False
+            if self._pre_max_geom is not None:
+                self._manual_size = self._pre_max_manual
+                self.setGeometry(self._pre_max_geom)
+                if not self._manual_size:  # 최대화 전이 자동 크기였으면 내용맞춤으로 되돌림
+                    self._resize_to_content()
+                    self._clamp_to_screen(self._current_avail())
+            self._update_max_btn()
+            return
+        avail = self._current_avail()
+        self._pre_max_geom = QRect(self.geometry())
+        self._pre_max_manual = self._manual_size
+        self._maximized = True
+        self._manual_size = True    # 자동 크기 산정이 최대화를 덮지 않게
+        self._set_line_wrap(True)   # 넓어진 폭에 맞춰 내용 재배치(가로 잘림 방지)
+        self.setGeometry(avail)
+        self._update_max_btn()
+
+    def _update_max_btn(self):
+        btn = getattr(self, "_max_btn", None)
+        if btn is None:
+            return
+        if self._maximized:
+            btn.setText("❐")
+            btn.setToolTip("이전 크기로 복원")
+        else:
+            btn.setText("⛶")
+            btn.setToolTip("최대화 (모니터 꽉 채우기)")
+
+    def _clear_maximized_state(self):
+        """다른 크기 변경(F 스냅·그립 리사이즈)이 일어나면 최대화 상태·버튼을 실제와 맞춘다
+        (최대화 중 창이 줄었는데 버튼만 '복원'(❐)으로 남는 불일치 방지)."""
+        if self._maximized:
+            self._maximized = False
+            self._update_max_btn()
+
+    def _toggle_minimize(self):
+        """▁ 버튼 — 본체를 숨기고 작은 미니 핸들 막대만 화면에 남긴다(닫지 않고 치워두기).
+        미니 막대 클릭 시 대화·크기 그대로 복원. 작업표시줄에 안 잡히는 Tool 창이라
+        미니 막대 방식을 쓴다(앱의 '화면에 떠 있는 핀' 성격에 부합)."""
+        if self._minimized:
+            self._restore_from_mini()
+            return
+        self._minimized = True
+        self._pre_min_pos = self.pos()          # 접기 직전 위치(복원 위치)
+        handle = self._ensure_mini_handle()
+        # 툴팁을 현재 탭의 질문으로 갱신(여러 개 최소화 시 hover로 어떤 답변인지 확인).
+        q = self._turns[self._current_tab][0] if self._turns else ""
+        handle.set_question(q)
+        # 사용자가 막대를 옮겨 둔 적 있으면 그 자리, 아니면 접기 직전 창 좌상단.
+        handle.move(self._mini_last_pos or self._pre_min_pos)
+        handle.show()
+        handle.raise_()
+        self.hide()
+
+    def _restore_from_mini(self):
+        """미니 핸들 클릭/▁ 재클릭 — 본체를 접기 직전 위치에 복원."""
+        self._minimized = False
+        if self._mini_handle is not None:
+            self._mini_handle.hide()
+        if self._pre_min_pos is not None:
+            self.move(self._pre_min_pos)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _ensure_mini_handle(self) -> "_MiniHandle":
+        if self._mini_handle is None:
+            self._mini_handle = _MiniHandle(self._restore_from_mini, self._on_mini_moved)
+        return self._mini_handle
+
+    def _on_mini_moved(self, pos: QPoint):
+        """미니 막대를 드래그로 옮기면 그 위치를 기억(다음 최소화 때 같은 자리)."""
+        self._mini_last_pos = pos
 
     @staticmethod
     def _merge_marks(marks):
@@ -1097,6 +1336,8 @@ class TextPreviewPopup(QWidget):
         초기화 후 colorize+marks를 다시 입히면 깔끔하다(블록 서식=줄간격/여백은
         문자 서식이라 건드리지 않으므로 유지된다)."""
         doc = self._editor.document()
+        # 코드 스팬에 박을 현재 배율 픽셀 크기(줌 추종용 — 아래 _MD_CODE 분기 참조).
+        code_size = max(1, round(_MD_FONT_SIZE * self._scale_factor))
         whole = QTextCursor(doc)
         whole.select(QTextCursor.SelectionType.Document)
         base = QTextCharFormat()
@@ -1119,6 +1360,10 @@ class TextPreviewPopup(QWidget):
                     fmt.setFontFixedPitch(False)
                     fmt.setFontFamily(_MD_FONT_FAMILY)
                     fmt.setFontWeight(QFont.Weight.Bold)
+                    # 패밀리를 명시하면 Qt가 이 조각 폰트를 char-format 기준으로 새로 잡아 에디터
+                    # 기본폰트의 (줌된) 픽셀크기를 안 물려받는다 → Ctrl+휠 줌에서 코드/<>만 안 커지던
+                    # 버그. 현재 배율 픽셀크기를 직접 박아 함께 스케일되게 한다(줌마다 _apply_marks 재호출).
+                    fmt.setProperty(QTextFormat.Property.FontPixelSize, code_size)
             cur.mergeCharFormat(fmt)
 
         for s, e in self._marks:

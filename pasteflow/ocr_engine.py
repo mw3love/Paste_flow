@@ -289,7 +289,7 @@ class OcrEngine:
         """API에서 사용 가능한 Gemini 모델 ID 목록을 조회한다.
 
         - base_url 있음: OpenAI 호환 게이트웨이의 `/v1/models` 엔드포인트 사용
-          (학교/사내 프록시 등). 응답 중 'gemini'가 포함된 모델 ID만 추출.
+          (Mindlogic/사내 프록시 등). 응답 중 'gemini'가 포함된 모델 ID만 추출.
         - base_url 없음: `google.generativeai.list_models()` 사용. generateContent를
           지원하는 gemini-* 모델만 추출.
 
@@ -454,7 +454,7 @@ class OcrEngine:
     def _recognize_openai_compat(self, pil_image: Image.Image, api_key: str, base_url: str, model: str) -> str:
         """OpenAI 호환 게이트웨이/프록시를 통한 OCR (폴백 포함).
 
-        학교 게이트웨이처럼 base_url + Bearer 토큰 방식의 프록시에 사용.
+        Mindlogic Gateway처럼 base_url + Bearer 토큰 방식의 프록시에 사용.
         base_url은 '/chat/completions' 앞까지만 입력 (예: https://host/v1/gateway).
 
         직접 호출되는 일은 거의 없고 _recognize_gemini에서 사용되지만, 외부에서

@@ -44,9 +44,11 @@ DIALOG_STYLE = f"""
         subcontrol-origin: padding;
         subcontrol-position: top left;
         left: 14px;
-        top: 9px;
+        top: 8px;
         padding: 0;
-        color: {_TITLE};
+        color: {COLORS['peach']};
+        font-size: 13px;
+        font-weight: 700;
         background: transparent;
     }}
     QLabel {{
@@ -156,12 +158,20 @@ class HotkeyEdit(QPushButton):
         self._update_display()
         self.grabKeyboard()
 
+    @staticmethod
+    def format_hotkey(value: str) -> str:
+        """저장 형식(ctrl+shift+p)을 표시 형식(Ctrl + Shift + P)으로 — 기본 단축키 표기와 통일.
+        _value 자체는 파서가 쓰는 소문자 canonical을 유지하고 표시만 바꾼다."""
+        if not value:
+            return ""
+        return " + ".join(tok.capitalize() for tok in value.split("+"))
+
     def _update_display(self):
         if self._listening:
             self.setText("키를 누르세요...")
             self._apply_style(True)
         else:
-            self.setText(self._value or "클릭하여 설정")
+            self.setText(self.format_hotkey(self._value) or "클릭하여 설정")
             self._apply_style(False)
 
     def _apply_style(self, listening: bool):
@@ -269,7 +279,7 @@ class SettingsDialog(QDialog):
     KEY_CAPTURE_FOLDER = "capture_save_folder"
     KEY_OCR_LANG = "ocr_language"
     KEY_OCR_ENGINE = "ocr_engine"
-    # Gemini는 backend별로 키/모델/캐시 분리 — 학교 게이트웨이와 개인 AI Studio 키를 동시에 보관
+    # Gemini는 backend별로 키/모델/캐시 분리 — Mindlogic Gateway와 개인 AI Studio 키를 동시에 보관
     KEY_OCR_GEMINI_BACKEND = "ocr_gemini_backend"  # "official" | "gateway"
     KEY_OCR_GEMINI_BASE_URL = "ocr_gemini_base_url"  # gateway 전용
     KEY_OCR_GEMINI_API_KEY_OFFICIAL = "ocr_gemini_api_key_official"
@@ -282,6 +292,7 @@ class SettingsDialog(QDialog):
 
     # 워커 스레드 → UI 안전 통신용 내부 시그널 (models, error_msg)
     _models_fetched = pyqtSignal(list, str)
+    _test_done = pyqtSignal(bool, str)  # API 연결 테스트 결과 (ok, message)
 
     def __init__(self, current_settings: dict, parent=None):
         super().__init__(parent)
@@ -291,6 +302,7 @@ class SettingsDialog(QDialog):
         self._load_values()
         self._finalize_size()
         self._models_fetched.connect(self._on_models_fetched)
+        self._test_done.connect(self._on_test_done)
 
     def _setup_window(self):
         self.setWindowTitle("PasteFlow 설정")
@@ -338,19 +350,32 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
 
         # ── 기능 단축키 그룹 (변경 가능) — 아래 기본 단축키 다음에 배치 ──
+        # 인식 편의를 위해 4개 하위 묶음을 얇은 구분선으로 분리(쭉 나열 대신 시각 그룹화):
+        #  ① 패널  ② 경로 붙여넣기류  ③ 영역 캡처·핀류  ④ AI(호출·OCR)
         hotkey_group = QGroupBox("기능 단축키 (변경 가능)")
         hotkey_form = QFormLayout(hotkey_group)
 
-        self._panel_toggle_hotkey = HotkeyEdit()
-        hotkey_form.addRow("패널 토글:", self._panel_toggle_hotkey)
+        def _hk_sep():
+            line = QFrame()
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setFrameShadow(QFrame.Shadow.Plain)
+            line.setStyleSheet(f"color:{_LINE}; background-color:{_LINE};")
+            line.setFixedHeight(1)
+            return line
 
+        # ① 패널
+        self._panel_toggle_hotkey = HotkeyEdit()
+        hotkey_form.addRow("•  패널 불러오기:", self._panel_toggle_hotkey)
+        hotkey_form.addRow(_hk_sep())
+
+        # ② 경로 붙여넣기 / 순차 경로 붙여넣기
         self._image_to_path_hotkey = HotkeyEdit()
         self._image_to_path_hotkey.setToolTip(
             "현재 클립보드 이미지를 임시 PNG로 저장하고 절대경로를 클립보드 텍스트로 교체합니다.\n"
             "이어서 포그라운드 창에 Ctrl+V를 자동 전송합니다.\n"
             "Claude Code CLI 등 '파일 경로 텍스트'를 첨부로 받는 앱에 한 키로 붙여넣기 위한 단축키."
         )
-        hotkey_form.addRow("이미지→경로:", self._image_to_path_hotkey)
+        hotkey_form.addRow("•  경로 붙여넣기:", self._image_to_path_hotkey)
 
         self._seq_image_to_path_hotkey = HotkeyEdit()
         self._seq_image_to_path_hotkey.setToolTip(
@@ -359,7 +384,17 @@ class SettingsDialog(QDialog):
             "예: 영역 캡처(Alt+F2)를 여러 장 찍은 뒤 이 키를 차례로 눌러 경로1·경로2… 순서대로 붙여넣기.\n"
             "이미지가 아닌 항목은 원본 그대로 붙여넣습니다."
         )
-        hotkey_form.addRow("순차 경로 붙여넣기:", self._seq_image_to_path_hotkey)
+        hotkey_form.addRow("•  순차 경로 붙여넣기:", self._seq_image_to_path_hotkey)
+        hotkey_form.addRow(_hk_sep())
+
+        # ③ 영역 캡처(Alt+F2) / 영역 캡처 핀(Alt+F3) — 이름을 '영역 캡처' 계열로 통일
+        self._capture_hotkey = HotkeyEdit()
+        self._capture_hotkey.setToolTip(
+            "화면 영역을 드래그로 선택해 캡처합니다(Snipaste의 영역 캡처).\n"
+            "캡처 즉시 클립보드에 복사되고 지정 폴더에 PNG로 저장됩니다.\n"
+            "ESC 또는 우클릭으로 취소합니다."
+        )
+        hotkey_form.addRow("•  영역 캡처:", self._capture_hotkey)
 
         self._pin_image_hotkey = HotkeyEdit()
         self._pin_image_hotkey.setToolTip(
@@ -367,23 +402,25 @@ class SettingsDialog(QDialog):
             "여러 개를 동시에 띄울 수 있고, ESC로 닫습니다.\n"
             "띄운 창에서 Space를 누르면 주석 편집 모드로 들어갑니다."
         )
-        hotkey_form.addRow("화면에 핀:", self._pin_image_hotkey)
+        hotkey_form.addRow("•  영역 캡처 핀:", self._pin_image_hotkey)
+        hotkey_form.addRow(_hk_sep())
 
-        self._capture_hotkey = HotkeyEdit()
-        self._capture_hotkey.setToolTip(
-            "화면 영역을 드래그로 선택해 캡처합니다(Snipaste의 영역 캡처).\n"
-            "캡처 즉시 클립보드에 복사되고 지정 폴더에 PNG로 저장됩니다.\n"
-            "ESC 또는 우클릭으로 취소합니다."
-        )
-        hotkey_form.addRow("영역 캡처:", self._capture_hotkey)
-
+        # ④ AI 호출(alt+`) / AI OCR
         self._ask_ai_hotkey = HotkeyEdit()
         self._ask_ai_hotkey.setToolTip(
             "컨텍스트 없이 즉석에서 AI에게 질문하는 입력창을 띄웁니다.\n"
             "클립보드 항목과 무관하게 아무 때나 한 키로 AI를 호출해 자유 질문하고 답변을 받습니다.\n"
             "(우클릭 'AI에게 질문'은 선택한 항목을 컨텍스트로 묻는 방식 — 이건 컨텍스트 없는 자유 질문)"
         )
-        hotkey_form.addRow("AI 자유질문:", self._ask_ai_hotkey)
+        hotkey_form.addRow("•  AI 호출:", self._ask_ai_hotkey)
+
+        # AI OCR — 화면 영역을 AI(설정된 API)로 텍스트 인식. 별도 엔진 없음.
+        self._ocr_hotkey = HotkeyEdit()
+        self._ocr_hotkey.setToolTip(
+            "화면 영역을 드래그로 선택해 그 안의 텍스트를 AI(설정된 API)로 인식합니다.\n"
+            "결과 텍스트가 클립보드·히스토리에 들어갑니다."
+        )
+        hotkey_form.addRow("•  AI OCR:", self._ocr_hotkey)
 
         # ── 기본 단축키 그룹 (고정) — 복사/붙여넣기 등 변경 불가한 핵심 기능. 맨 위 배치 ──
         info_group = QGroupBox("기본 단축키 (고정)")
@@ -398,7 +435,7 @@ class SettingsDialog(QDialog):
             ("순서대로 붙여넣기", "Ctrl + Shift + V"),
         ]
         for row, (action, keys) in enumerate(_SHORTCUTS):
-            action_lbl = QLabel(action)
+            action_lbl = QLabel("•  " + action)
             action_lbl.setStyleSheet(
                 f"color: {COLORS['text']}; font-size: 12px;"
             )
@@ -421,47 +458,14 @@ class SettingsDialog(QDialog):
             f"QComboBox:focus {{ border-color: {COLORS['peach']}; }}"
         )
 
-        # ── OCR 설정 그룹 (화면 텍스트 인식) ──
-        ocr_group = QGroupBox("OCR (화면 텍스트 인식)")
-        self._ocr_form = QFormLayout(ocr_group)
-        ocr_form = self._ocr_form
-
-        self._ocr_hotkey = HotkeyEdit()
-        ocr_form.addRow("OCR 단축키:", self._ocr_hotkey)
-
-        self._ocr_engine_combo = QComboBox()
-        self._ocr_engine_combo.setStyleSheet(_combo_style)
-        self._ocr_engine_combo.addItem("Windows WinRT (무료)", "winrt")
-        self._ocr_engine_combo.addItem("Google Gemini (API 키 필요)", "gemini")
-        ocr_form.addRow("OCR 엔진:", self._ocr_engine_combo)
-
-        self._ocr_lang_combo = QComboBox()
-        self._ocr_lang_combo.setStyleSheet(_combo_style)
-        # 설치된 언어팩 동적 탐색 — winocr 미설치 시 기본 목록 폴백
-        try:
-            from pasteflow.ocr_engine import OcrEngine
-            supported = OcrEngine.winrt_supported_languages()
-        except Exception:
-            supported = []
-        if supported:
-            self._ocr_lang_combo.addItems(supported)
-        else:
-            self._ocr_lang_combo.addItems(["ko", "en-US", "ja", "zh-Hans"])
-            lang_hint = QLabel("winocr 미설치 또는 언어팩 미확인 — 기본 목록 표시")
-            lang_hint.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
-            ocr_form.addRow("", lang_hint)
-        ocr_form.addRow("인식 언어:", self._ocr_lang_combo)
-
-        layout.addWidget(ocr_group)
-
-        # ── AI 연동 그룹 (Gemini API) ──
-        # OCR(Gemini 엔진)과 AI 답변(우클릭 'AI에게 질문')이 동일 API를 공유하므로
-        # OCR 엔진 선택과 무관하게 항상 표시한다(WinRT OCR이어도 AI 답변엔 키가 필요).
-        ai_group = QGroupBox("AI 연동 (Gemini API)")
+        # ── AI 연동 그룹 (Gemini / Mindlogic API) ──
+        # OCR(텍스트 인식)과 AI 답변(우클릭 'AI에게 질문')이 동일 API를 공유한다.
+        # OCR은 별도 엔진 선택 없이 이 API로 처리하므로(WinRT 제거) 항상 키가 필요하다.
+        ai_group = QGroupBox("AI 연동 (Gemini / Mindlogic API)")
         self._ai_form = QFormLayout(ai_group)
         ai_form = self._ai_form
 
-        ai_desc = QLabel("OCR(Gemini 엔진)과 AI 답변(우클릭 'AI에게 질문')이 함께 사용합니다.")
+        ai_desc = QLabel("AI 호출 및 AI OCR 사용 시 필수 입력.")
         ai_desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
         ai_desc.setWordWrap(True)
         ai_form.addRow(ai_desc)
@@ -470,8 +474,8 @@ class SettingsDialog(QDialog):
         self._backend_label = QLabel("API 백엔드:")
         self._backend_combo = QComboBox()
         self._backend_combo.setStyleSheet(_combo_style)
-        self._backend_combo.addItem("공식 Google AI Studio", "official")
-        self._backend_combo.addItem("학교 게이트웨이", "gateway")
+        self._backend_combo.addItem("Google AI Studio", "official")
+        self._backend_combo.addItem("Mindlogic Gateway", "gateway")
         ai_form.addRow(self._backend_label, self._backend_combo)
 
         self._api_key_label = QLabel("API 키:")
@@ -514,7 +518,21 @@ class SettingsDialog(QDialog):
         ai_form.addRow("", self._model_hint)
         self._update_model_hint()
 
-        self._ocr_engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+        # API 연결 테스트 — 현재 backend/키/URL로 모델 목록을 받아 키·연결 유효성 확인
+        self._test_btn = QPushButton("연결 테스트")
+        self._test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._test_btn.setToolTip("입력한 API 키·URL로 실제 연결해 키가 유효한지 확인합니다.")
+        self._test_btn.clicked.connect(self._on_test_api)
+        self._test_status = QLabel("")
+        self._test_status.setWordWrap(True)
+        self._test_status.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
+        test_row = QHBoxLayout()
+        test_row.setContentsMargins(0, 0, 0, 0)
+        test_row.setSpacing(8)
+        test_row.addWidget(self._test_btn)
+        test_row.addWidget(self._test_status, 1)
+        ai_form.addRow("", test_row)
+
         self._backend_combo.currentIndexChanged.connect(self._on_backend_changed)
 
         layout.addWidget(ai_group)
@@ -579,13 +597,41 @@ class SettingsDialog(QDialog):
 
         outer.addWidget(self._btn_bar)
 
-    def _on_engine_changed(self, _idx: int):
-        # AI(Gemini) API 설정은 OCR 엔진과 무관하게 항상 표시(AI 답변이 늘 사용).
-        # OCR 엔진 선택은 '인식 언어'(WinRT 전용) 노출 여부에만 영향을 준다.
-        engine = self._ocr_engine_combo.currentData()
-        is_winrt = engine == "winrt"
-        if hasattr(self, '_ocr_form'):
-            self._ocr_form.setRowVisible(self._ocr_lang_combo, is_winrt)
+    def _on_test_api(self):
+        """연결 테스트 — 현재 backend/키/URL로 모델 목록을 받아 키·연결 유효성을 확인(워커 스레드).
+
+        모델 조회(list_gemini_models)는 인증·엔드포인트가 맞아야 성공하므로 가벼운 연결 테스트로
+        재사용한다. 결과는 _test_done 시그널로 UI 스레드에 전달."""
+        api_key = self._api_key_edit.text().strip()
+        if not api_key:
+            self._test_status.setText("먼저 API 키를 입력하세요.")
+            self._test_status.setStyleSheet(f"color: {COLORS['peach']}; font-size: 11px;")
+            return
+        backend = self._current_backend()
+        base_url = self._base_url_edit.text().strip() if backend == "gateway" else ""
+        self._test_btn.setEnabled(False)
+        self._test_status.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
+        self._test_status.setText("연결 확인 중…")
+        import threading
+        def _worker():
+            try:
+                from pasteflow.ocr_engine import OcrEngine
+                models = OcrEngine.list_gemini_models(api_key, base_url)
+                if models:
+                    # 개수는 API가 보고한 전체 gemini 모델 수라 드롭다운(화이트리스트) 목록과 다름 →
+                    # 혼란 방지 위해 개수 대신 '키 유효' 신호만 표시.
+                    self._test_done.emit(True, "연결 성공 — API 키가 유효합니다.")
+                else:
+                    self._test_done.emit(False, "응답은 왔으나 사용 가능한 모델이 없습니다. 설정을 확인하세요.")
+            except Exception as e:
+                self._test_done.emit(False, f"실패: {e}")
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_test_done(self, ok: bool, msg: str):
+        self._test_btn.setEnabled(True)
+        color = COLORS['green'] if ok else COLORS['red']
+        self._test_status.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self._test_status.setText(("✓ " if ok else "✗ ") + msg)
 
     def _on_backend_changed(self, _idx: int):
         """API 백엔드 콤보 전환 — 해당 백엔드의 키/URL/모델/캐시로 입력란 스왑.
@@ -607,7 +653,7 @@ class SettingsDialog(QDialog):
 
         # 2) 새 backend 값으로 입력란 채우기
         if backend == "gateway":
-            self._api_key_edit.setPlaceholderText("학교 게이트웨이 토큰")
+            self._api_key_edit.setPlaceholderText("Mindlogic Gateway 토큰")
             self._api_key_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_API_KEY_GATEWAY, ""))
             self._base_url_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, ""))
             self._base_url_label.setVisible(True)
@@ -668,22 +714,15 @@ class SettingsDialog(QDialog):
         if backend not in ("official", "gateway"):
             backend = "gateway" if (self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, "") or "").strip() else "official"
         b_idx = self._backend_combo.findData(backend)
-        # 시그널 차단 후 인덱스 설정 → _on_engine_changed가 1회 호출하도록 정렬
+        # 시그널 차단 후 인덱스 설정 → 아래 _on_backend_changed를 1회만 명시 호출하도록 정렬
         self._backend_combo.blockSignals(True)
         self._backend_combo.setCurrentIndex(b_idx if b_idx >= 0 else 0)
         self._backend_combo.blockSignals(False)
         self._active_backend = None  # _on_backend_changed가 prev_backend 처리 안 하도록
 
-        engine = self._settings.get(self.KEY_OCR_ENGINE, "winrt")
-        idx = self._ocr_engine_combo.findData(engine)
-        self._ocr_engine_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self._on_engine_changed(self._ocr_engine_combo.currentIndex())  # 인식 언어 노출
-        # AI(Gemini) API 입력란은 엔진과 무관하게 항상 backend 값으로 채운다.
+        # AI(Gemini/Mindlogic) API 입력란을 backend 값으로 채운다(OCR·AI 답변 공용).
         self._on_backend_changed(self._backend_combo.currentIndex())
 
-        lang = self._settings.get(self.KEY_OCR_LANG, "ko")
-        idx = self._ocr_lang_combo.findText(lang)
-        self._ocr_lang_combo.setCurrentIndex(idx if idx >= 0 else 0)
         try:
             history_max = int(self._settings.get(self.KEY_HISTORY_MAX, "50"))
         except (ValueError, TypeError):
@@ -852,7 +891,6 @@ class SettingsDialog(QDialog):
         - 활성 backend의 입력값은 화면에서 읽어 갱신
         - 비활성 backend의 값은 self._settings에 stash된 것을 그대로 전달
         """
-        engine = self._ocr_engine_combo.currentData()
         auto_start = self._auto_start_check.isChecked()
 
         new_settings = {
@@ -864,8 +902,8 @@ class SettingsDialog(QDialog):
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
             self.KEY_ASK_AI_HOTKEY: self._ask_ai_hotkey.value() or "alt+`",
             self.KEY_CAPTURE_FOLDER: self._capture_folder_edit.text(),
-            self.KEY_OCR_LANG: self._ocr_lang_combo.currentText(),
-            self.KEY_OCR_ENGINE: engine,
+            # OCR은 별도 엔진 선택 없이 항상 AI(Gemini/Mindlogic) API로 처리 → kind 고정.
+            self.KEY_OCR_ENGINE: "gemini",
             self.KEY_HISTORY_MAX: str(self._history_max_spin.value()),
             self.KEY_QUEUE_IDLE_RESET: str(self._queue_idle_spin.value()),
             self.KEY_AUTO_START: "1" if auto_start else "0",

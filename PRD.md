@@ -26,7 +26,7 @@ Windows에서 복사한 항목들을 **복사한 순서대로 자동으로 순�
 | 노션 복사 내용 서식 보존 | 노션 API 연동 |
 | 로컬 SQLite 영구 저장 | 클라우드 동기화 |
 | 단일 .exe 배포 | Mac / Linux |
-| OCR (화면 텍스트 인식, Windows WinRT) | Claude Vision AI OCR (세션 4 예정) |
+| OCR (화면 텍스트 인식, AI Gemini/Mindlogic API — v1.28.0에 WinRT 폐기) | — |
 
 ### 1.4 이전 버전 교훈
 > ⚠️ 이전 2회 시도(ClipStack, ClipFlow)에서 **순차 붙여넣기가 한 번도 정상 동작하지 않았음**.

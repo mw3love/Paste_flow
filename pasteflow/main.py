@@ -1101,15 +1101,10 @@ class PasteFlowApp:
                 pil_img = Image.open(io.BytesIO(png_bytes))
 
                 from pasteflow.ocr_engine import OcrEngine
-                lang = self.db.get_setting("ocr_language", "ko")
-                engine_kind = self.db.get_setting("ocr_engine", "winrt")
-                if engine_kind == "gemini":
-                    api_key, base_url, model = self._resolve_gemini_cfg()
-                else:
-                    api_key = ""
-                    base_url = ""
-                    model = ""
-                engine = OcrEngine(kind=engine_kind, api_key=api_key, base_url=base_url, language=lang, model=model)
+                # OCR은 별도 엔진 선택 없이 항상 AI(Gemini 공식 / Mindlogic 게이트웨이) API로 처리.
+                # (WinRT 엔진 제거 — 설정에서 엔진/언어 선택 UI도 삭제됨. AI 답변과 동일 배관 재사용.)
+                api_key, base_url, model = self._resolve_gemini_cfg()
+                engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url, model=model)
                 text = engine.recognize(pil_img)
                 if engine.last_fallback_from and engine.last_used_model:
                     self._bridge.ocr_fallback.emit(engine.last_fallback_from, engine.last_used_model)
@@ -2009,7 +2004,7 @@ class PasteFlowApp:
             "hotkey_ask_ai": self.db.get_setting("hotkey_ask_ai", "alt+`"),
             "capture_save_folder": self.db.get_setting("capture_save_folder", "") or _default_capture_folder(),
             "ocr_language": self.db.get_setting("ocr_language", "ko"),
-            "ocr_engine": self.db.get_setting("ocr_engine", "winrt"),
+            "ocr_engine": self.db.get_setting("ocr_engine", "gemini"),  # OCR은 항상 AI API(엔진 선택 제거)
             "ocr_gemini_backend": self.db.get_setting("ocr_gemini_backend", ""),
             "ocr_gemini_base_url": self.db.get_setting("ocr_gemini_base_url", ""),
             "ocr_gemini_api_key_official": self._get_secret("ocr_gemini_api_key_official"),
