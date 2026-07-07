@@ -1022,7 +1022,7 @@ class PasteFlowApp:
         threading.Thread(target=_run, daemon=True, name="ai-worker").start()
 
     def _start_cursor_progress(self, prefix: str, icon: str, anchor):
-        """진행 칩 — 지속형 토스트(클릭 통과) + 0.5초 간격 경과시간/점 애니메이션.
+        """진행 칩 — 지속형 토스트(클릭 통과) + 0.5초 간격 경과시간 갱신.
 
         OCR·AI 질의가 공유. anchor(QPoint)로 **커서가 있는 모니터**를 고른 뒤 그 모니터
         정중앙에 표시한다(예측 가능·가장자리 잘림 없음). 예전엔 주 모니터 우하단 고정이라
@@ -1034,9 +1034,8 @@ class PasteFlowApp:
         self._stop_cursor_progress()  # 중복 대비 이전 진행 칩 정리
         self._progress_prefix = prefix
         self._progress_toast = ToastNotification(
-            f"{prefix} 0:00 ●··", icon=icon, duration_ms=0, anchor=anchor, center=True)
+            f"{prefix} 0:00", icon=icon, duration_ms=0, anchor=anchor, center=True)
         self._progress_start = time.monotonic()
-        self._progress_dots = 1
         self._progress_timer = QTimer()
         self._progress_timer.setInterval(500)
         self._progress_timer.timeout.connect(self._tick_cursor_progress)
@@ -1050,9 +1049,9 @@ class PasteFlowApp:
             return
         elapsed = int(time.monotonic() - self._progress_start)
         m, s = divmod(elapsed, 60)
-        self._progress_dots = (self._progress_dots % 3) + 1
-        dots = "●" * self._progress_dots + "·" * (3 - self._progress_dots)
-        toast.set_message(f"{self._progress_prefix} {m}:{s:02d} {dots}")
+        # 점(●··) 애니메이션은 제거 — ●(넓음)··(좁음) 폭 차이로 매 틱 칩 폭이 바뀌어
+        # 앵커 재중심(_place_anchored)이 좌우로 흔들렸다. 경과시간만으로 "작업 중"이 충분히 보인다.
+        toast.set_message(f"{self._progress_prefix} {m}:{s:02d}")
 
     def _stop_cursor_progress(self):
         """진행 칩·타이머 즉시 정리 (idempotent — 결과/에러 도착 시 호출)."""

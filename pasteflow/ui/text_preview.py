@@ -67,7 +67,12 @@ _MD_LINK    = "#60a5fa"   # 하이퍼링크 — 밝은 파랑 + 밑줄(클릭 �
 
 # 본문 폰트 패밀리. 코드(백틱) 구간은 Qt가 모노스페이스로 그려 본문과 폰트가 튀므로,
 # 색·밑줄만 강조로 남기고 폰트는 이 본문 폰트로 되돌려 다른 텍스트와 통일한다.
+# 일반 텍스트 미리보기(12px)는 맑은 고딕 — 작은 크기에서 힌팅이 강해 또렷하다.
 _FONT_FAMILY = "맑은 고딕"
+# AI 답변(마크다운, 16px) 전용 본문 폰트 — Noto Sans KR(구글 본문 가독성용). 획 굵기가
+# 균일하고 자간에 여유가 있어 긴 답변에서 눈이 덜 피로하다(맑은 고딕은 획이 가늘어 촘촘).
+# 읽기 크기(16px)라 맑은 고딕 대비 이득이 크다. 미설치 PC면 sans-serif로 폴백.
+_MD_FONT_FAMILY = "Noto Sans KR"
 # 세로 스크롤바 폭 — 마크다운 답변이 넘칠 때 텍스트를 가리지 않게 폭 보정.
 _SCROLLBAR_W = 12
 
@@ -259,8 +264,7 @@ class TextPreviewPopup(QWidget):
         # 요청). 모델은 여전히 전체 대화를 인지하며, 탭은 표시만 나눈다.
         self._turns: list[tuple[str, str]] = []   # [(질문 원문, 답변 or _PENDING), ...]
         self._current_tab: int = 0
-        self._think_timer: QTimer | None = None   # 펜딩 탭 "생각 중" 애니메이션 타이머
-        self._pending_dots: int = 1
+        self._think_timer: QTimer | None = None   # 펜딩 탭 "생각 중" 경과시간 갱신 타이머
         self._tab_btns: list[QPushButton] = []
         self._tabbar: QWidget | None = None
         self._tab_layout: QHBoxLayout | None = None
@@ -268,8 +272,9 @@ class TextPreviewPopup(QWidget):
             self._tabbar = QWidget()
             self._tabbar.setFixedHeight(34)
             self._tab_layout = QHBoxLayout(self._tabbar)
-            # 우측 여백 38px = 우상단 형광펜 토글 버튼(_hl_btn) 자리 확보(탭이 그 밑으로 안 감).
-            self._tab_layout.setContentsMargins(4, 4, 38, 2)
+            # 우측 여백 68px = 우상단 형광펜 토글(_hl_btn) + 닫기(_close_btn) 두 버튼 자리 확보
+            # (탭이 그 밑으로 안 감). 6+26+6+26+4 ≈ 68.
+            self._tab_layout.setContentsMargins(4, 4, 68, 2)
             self._tab_layout.setSpacing(4)
             self._tabbar.setVisible(False)
             container_layout.addWidget(self._tabbar)
@@ -350,7 +355,7 @@ class TextPreviewPopup(QWidget):
             # 고정돼 한글 디센더(ㅁ/ㅇ/질 아랫부분)가 잘렸다. +14는 상하 패딩·디센더 여유.
             _ifont = self._input.font()
             _ifont.setPixelSize(13)
-            _ifont.setFamily(_FONT_FAMILY)
+            _ifont.setFamily(_MD_FONT_FAMILY)
             self._input.setFont(_ifont)
             self._input.setFixedHeight(max(32, QFontMetrics(_ifont).height() + 14))
             self._input.setStyleSheet(f"""
@@ -373,6 +378,7 @@ class TextPreviewPopup(QWidget):
 
         # AI 답변(마크다운) 전용 오버레이: 우상단 형광펜/선택 토글 버튼 + 우하단 리사이즈 그립.
         self._hl_btn: QPushButton | None = None
+        self._close_btn: QPushButton | None = None
         self._grip: _ResizeGrip | None = None
         if markdown:
             self._hl_btn = QPushButton(self)
@@ -390,6 +396,24 @@ class TextPreviewPopup(QWidget):
             """)
             self._hl_btn.clicked.connect(self._toggle_highlight_mode)
             self._update_hl_btn()
+            # 우상단 닫기(✕) 버튼 — ESC와 동일(self.close). hover 시 코랄로 '닫힘'을 강조.
+            # 형광펜 토글 오른쪽(창 모서리)에 두어 통상적인 닫기 버튼 위치를 따른다.
+            self._close_btn = QPushButton("✕", self)
+            self._close_btn.setFixedSize(26, 26)
+            self._close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._close_btn.setToolTip("닫기 (Esc)")
+            self._close_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {_SURFACE0};
+                    border: 1px solid {_SURFACE2};
+                    border-radius: 6px;
+                    font-size: 13px;
+                    color: {_TEXT};
+                }}
+                QPushButton:hover {{ background: {_PEACH}; border-color: {_PEACH}; color: #1a1a1a; }}
+            """)
+            self._close_btn.clicked.connect(self.close)
             self._grip = _ResizeGrip(self)
 
         self._apply_active_style(False)
@@ -567,7 +591,6 @@ class TextPreviewPopup(QWidget):
         self._append_turn_data(question, _PENDING)
         self.set_thinking(True)
         self._pending_start = time.monotonic()
-        self._pending_dots = 1
         self._render_current_turn()  # 크기 재산정 없이 본문만 "생각 중"으로
         self._editor.verticalScrollBar().setValue(0)
         if self._think_timer is None:
@@ -580,8 +603,7 @@ class TextPreviewPopup(QWidget):
         """펜딩 탭 본문의 경과시간·점 애니메이션을 0.5초마다 갱신(가벼운 setMarkdown)."""
         if not (self._turns and self._turns[self._current_tab][1] is _PENDING):
             return
-        self._pending_dots = (self._pending_dots % 3) + 1
-        self._render_current_turn()
+        self._render_current_turn()  # 경과시간(초) 갱신만 — 점 애니메이션은 제거됨
 
     def _stop_think_timer(self):
         if self._think_timer is not None:
@@ -649,9 +671,9 @@ class TextPreviewPopup(QWidget):
         if a is _PENDING:
             elapsed = int(time.monotonic() - getattr(self, "_pending_start", time.monotonic()))
             m, s = divmod(elapsed, 60)
-            dots = "●" * self._pending_dots + "·" * (3 - self._pending_dots)
+            # 점(●··) 애니메이션 제거 — 폭 변화 노이즈 없이 경과시간만으로 "생각 중"을 표시.
             text = (f"**Q.** {q}\n\n---\n\n"
-                    f"🤔 AI가 생각하고 있어요…  ({m}:{s:02d}) {dots}")
+                    f"🤔 AI가 생각하고 있어요…  ({m}:{s:02d})")
             self._render_markdown(text)
             return
         text = f"**Q.** {q}\n\n---\n\n{a}"
@@ -812,10 +834,17 @@ class TextPreviewPopup(QWidget):
     def _position_overlays(self):
         """우상단 토글 버튼·우하단 리사이즈 그립을 현재 창 크기에 맞춰 재배치(마크다운 전용)."""
         m = 6  # 컨테이너 테두리(2px) 바깥쪽 여백
+        gap = 6  # 두 버튼 사이 간격
         btn = getattr(self, "_hl_btn", None)  # __init__ 중 이른 resize 대비 가드
+        close = getattr(self, "_close_btn", None)
         grip = getattr(self, "_grip", None)
+        # 닫기(✕)는 창 모서리(맨 오른쪽), 형광펜 토글은 그 왼쪽에 배치.
+        if close is not None:
+            close.move(self.width() - close.width() - m, m)
+            close.raise_()
         if btn is not None:
-            btn.move(self.width() - btn.width() - m, m)
+            close_w = close.width() + gap if close is not None else 0
+            btn.move(self.width() - btn.width() - m - close_w, m)
             btn.raise_()
         if grip is not None:
             # 하단 "이어서 질문" 입력칸이 있으면 그 위에, 없으면 우하단 꼭짓점에 flush.
@@ -917,11 +946,21 @@ class TextPreviewPopup(QWidget):
         size = max(1, round(base * self._scale_factor))
         font = QFont(self._editor.font())
         font.setPixelSize(size)
-        # 폰트 패밀리·힌팅을 명시해 한글 글자 번짐(뿌옇게 보임)을 줄인다. Qt 기본
-        # CJK 폴백 글꼴은 힌팅이 약해 작은 크기에서 흐려지므로 맑은 고딕으로 고정하고,
-        # PreferFullHinting으로 글자를 픽셀 그리드에 스냅시켜 가장자리를 또렷하게 한다.
-        font.setFamily(_FONT_FAMILY)
-        font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+        # 폰트 패밀리·굵기·힌팅을 경로별로 나눈다.
+        # · 일반 미리보기(맑은 고딕, 12px): PreferFullHinting으로 픽셀 그리드에 스냅 →
+        #   작은 크기에서 획을 또렷하게(Qt 기본 CJK 힌팅은 약해 흐려짐).
+        # · AI 답변(Noto Sans KR, 16px): 본문을 Medium(500)으로 살짝 도톰하게 하고(레귤러
+        #   400은 Gemini 대비 얇게 보임), 하드 힌팅을 해제(PreferNoHinting)해 획이 픽셀에
+        #   스냅되며 얇아지는 것을 막는다 → 브라우저처럼 획이 제 굵기를 유지해 부드럽고 도톰.
+        #   볼드(제목·**굵게**)는 setMarkdown이 700을 주므로 500 본문과 대비가 유지된다.
+        if self._markdown:
+            font.setFamily(_MD_FONT_FAMILY)
+            font.setWeight(QFont.Weight.Medium)
+            font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+        else:
+            font.setFamily(_FONT_FAMILY)
+            font.setWeight(QFont.Weight.Normal)
+            font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
         self._editor.setFont(font)
         # 폰트 변경 시 document margin도 재설정 (Qt가 setFont에서 reset 하는 경우 대비)
         self._editor.document().setDocumentMargin(0)
@@ -1078,7 +1117,7 @@ class TextPreviewPopup(QWidget):
                 fmt.setUnderlineColor(QColor(color))
                 if color == _MD_CODE:  # 코드만 볼드 + 본문폰트(모노스페이스 튐 방지). 링크는 비볼드.
                     fmt.setFontFixedPitch(False)
-                    fmt.setFontFamily(_FONT_FAMILY)
+                    fmt.setFontFamily(_MD_FONT_FAMILY)
                     fmt.setFontWeight(QFont.Weight.Bold)
             cur.mergeCharFormat(fmt)
 
