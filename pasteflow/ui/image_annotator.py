@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsPathItem,
     QGraphicsTextItem, QGraphicsItem, QHBoxLayout,
     QPushButton, QToolButton, QButtonGroup, QLabel,
+    QStyle, QStyleOptionGraphicsItem,
 )
 
 from pasteflow.ui.theme import (
@@ -350,10 +351,12 @@ class _HandleResizeMixin:
         return QRectF(c.x() - h, c.y() - h, h, h)
 
     def _rot_handle_center(self) -> QPointF:
+        # 우상단 코너 바깥쪽으로 대각선(45°) 오프셋 — 크기조절(우하단)과 오른쪽 변에 위아래로 정렬.
         # 원이 가리는 부분(반지름)을 간격에 더해, 보이는 줄기(gap)가 핸들 크기와 무관하게 일정.
         cr = self._content_rect()
         r = self._handle_px() * 0.5  # 원 반지름(= 사각 변의 절반 → 사각과 같은 지름)
-        return QPointF(cr.center().x(), cr.top() - self._ROT_GAP / self._scale_or_1() - r)
+        off = (self._ROT_GAP / self._scale_or_1() + r) * 0.70710678  # 대각선 성분
+        return QPointF(cr.right() + off, cr.top() - off)
 
     def _rot_handle_rect(self) -> QRectF:
         d = self._handle_px()  # 원 지름 = 크기조절 사각 변
@@ -385,14 +388,14 @@ class _HandleResizeMixin:
         if not self._handle_active():
             return
         s = self._scale_or_1()
-        # 회전 핸들 — content 상단 중앙 위에 줄기 + 코랄 원
+        # 회전 핸들 — content 우상단 코너 바깥에 줄기 + 코랄 원
         cr = self._content_rect()
-        top_mid = QPointF(cr.center().x(), cr.top())
+        corner = QPointF(cr.right(), cr.top())
         rc = self._rot_handle_center()
         rh = self._handle_px() * 0.5  # 반지름 — 지름이 크기조절 사각 변과 같게
         painter.setPen(QPen(QColor(_PEACH), 1.0 / s))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawLine(top_mid, rc)
+        painter.drawLine(corner, rc)
         painter.setBrush(QBrush(QColor(_PEACH)))
         painter.drawEllipse(rc, rh, rh)
         # 크기조절 핸들 — 우하단 파란 사각
@@ -400,6 +403,16 @@ class _HandleResizeMixin:
         painter.setPen(QPen(QColor("white"), 1.0 / s))
         painter.setBrush(QBrush(QColor(_BLUE)))
         painter.drawRect(r)
+
+    def _paint_base_no_select(self, painter, option, widget):
+        # Qt 기본 paint는 선택 시 (회전 핸들까지 확장된) boundingRect 둘레에 점선을 자동으로
+        # 그려 위쪽으로 점선이 딸려 올라간다. State_Selected를 꺼서 그 자동 점선을 막고,
+        # 선택박스는 _content_rect에만 직접 그린다(arrow/badge와 동일하게 타이트하게).
+        opt = QStyleOptionGraphicsItem(option)
+        opt.state &= ~QStyle.StateFlag.State_Selected
+        super().paint(painter, opt, widget)
+        if self.isSelected():
+            _draw_selection_box(painter, self._content_rect(), self._scale_or_1())
 
     def shape(self):
         # 선택 시 핸들 영역을 클릭 영역에 포함 — 속 빈 도형도 핸들을 잡을 수 있게.
@@ -485,7 +498,7 @@ class _RectItem(_HandleResizeMixin, QGraphicsRectItem):
         return self._copy_common_to(c)
 
     def paint(self, painter, option, widget=None):
-        super().paint(painter, option, widget)
+        self._paint_base_no_select(painter, option, widget)
         self._paint_handle(painter)
 
 
@@ -507,7 +520,7 @@ class _EllipseItem(_HandleResizeMixin, QGraphicsEllipseItem):
         return self.rect().adjusted(-extra, -extra, extra, extra)
 
     def paint(self, painter, option, widget=None):
-        super().paint(painter, option, widget)
+        self._paint_base_no_select(painter, option, widget)
         self._paint_handle(painter)
 
 
@@ -530,7 +543,7 @@ class _LineItem(_HandleResizeMixin, QGraphicsLineItem):
         return QRectF(line.p1(), line.p2()).normalized().adjusted(-extra, -extra, extra, extra)
 
     def paint(self, painter, option, widget=None):
-        super().paint(painter, option, widget)
+        self._paint_base_no_select(painter, option, widget)
         self._paint_handle(painter)
 
 
@@ -551,7 +564,7 @@ class _PathItem(_HandleResizeMixin, QGraphicsPathItem):
         return self.path().boundingRect().adjusted(-extra, -extra, extra, extra)
 
     def paint(self, painter, option, widget=None):
-        super().paint(painter, option, widget)
+        self._paint_base_no_select(painter, option, widget)
         self._paint_handle(painter)
 
 
@@ -760,7 +773,7 @@ class _TextItem(_HandleResizeMixin, QGraphicsTextItem):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(self._bg))
             painter.drawRoundedRect(self._content_rect().adjusted(1, 1, -1, -1), 4, 4)
-        super().paint(painter, option, widget)
+        self._paint_base_no_select(painter, option, widget)
         self._paint_handle(painter)
 
 
