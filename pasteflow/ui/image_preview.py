@@ -175,6 +175,10 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         self._view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
 
         self._build_layout()
+        # 화살표 방향 토글 버튼을 '선택된 화살표 근처'에 두므로, 선택·이동 시 재배치한다.
+        # (selectionChanged=선택 변화, changed=아이템 이동/편집. 줌은 _apply_zoom에서 호출.)
+        self._scene.selectionChanged.connect(self._update_arrow_dir_btn)
+        self._scene.changed.connect(lambda *a: self._update_arrow_dir_btn())
         self.set_tool("select")
         self._view.setDragMode(QGraphicsView.DragMode.NoDrag)  # 뷰어 시작
         self._set_color(self.current_color)
@@ -316,6 +320,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         if getattr(self, "_chrome", None) is not None and self._chrome.isVisible():
             self._layout_chrome()
             self._layout_edit_close()
+            self._update_arrow_dir_btn()  # 줌으로 화살표 위치가 바뀌면 방향 버튼도 따라가게
 
     def _layout_chrome(self):
         """편집 모드에서 chrome(툴바)을 하단 예약 strip에 배치한다(이미지 아래, Snipaste식).
@@ -325,7 +330,17 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         win_w = max(self._view.width(), self._chrome.sizeHint().width())
         if self.width() != win_w:
             self.resize(win_w, self.height())  # 폭만, top-left 고정
-        self._chrome.setGeometry(0, self.height() - self._chrome_h, win_w, self._chrome_h)
+        # 기본은 이미지 아래 예약 strip. 단 전체화면 캡처를 핀하면 창이 화면보다 커
+        # 그 strip이 화면 밖(아래)으로 밀려 툴바가 안 보인다 → 화면 가시영역 안으로
+        # 끌어올려 이미지 하단에 겹쳐 배치(Snipaste식). 평소엔 위치 변화 없음.
+        y = self.height() - self._chrome_h
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            # 창 로컬 좌표로 환산한 화면 하단(작업표시줄 제외, 여유 8px) 위로 클램프.
+            max_y_local = screen.availableGeometry().bottom() - self.y() - self._chrome_h - 8
+            if y > max_y_local:
+                y = max(0, max_y_local)
+        self._chrome.setGeometry(0, y, win_w, self._chrome_h)
         self._chrome.raise_()
 
     def _layout_edit_close(self):

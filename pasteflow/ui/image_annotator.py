@@ -303,18 +303,32 @@ def _bg_swatch_icon(bg) -> QIcon:
 # ---------------------------------------------------------------------------
 
 class _HandleResizeMixin:
-    # 핸들 크기는 주석의 표시 크기에 비례(작은 변 기준)하되 씬 단위로 클램프한다 —
-    # 작은 주석에서 핸들이 상대적으로 거대해 보이던 문제 해결. 너무 작아 못 잡는 일은
-    # 하한으로, 우스꽝스럽게 커지는 일은 상한으로 막는다.
-    _HANDLE_FRAC = 0.22  # 작은 변 대비 핸들 비율
+    # 핸들(스케일 사각·회전 원·끝점 사각) 크기는 도형의 '획 두께'에 비례한다 — 얇은 선은
+    # 작은 핸들, 굵은 선은 큰 핸들. 씬 단위로 [MIN,MAX] 클램프(못 잡을 만큼 작지도, 거슬릴
+    # 만큼 크지도 않게). 획이 없는 도형(번호·텍스트)만 표시 크기 비례로 폴백한다.
+    _HANDLE_FRAC = 0.22        # (폴백) 작은 변 대비 핸들 비율 — 번호·텍스트용
+    _HANDLE_STROKE_FRAC = 1.4  # 획 두께 대비 핸들 비율 — 도형·선·화살표용
     _HANDLE_MIN = 5.0    # 씬 단위 하한(항상 잡히게)
     _HANDLE_MAX = 12.0   # 씬 단위 상한
     _ROT_GAP = 14.0  # 도형 윗변 ~ 회전 원 사이 빈 줄기(씬 단위, 원 크기와 무관하게 일정)
     _EDGE_HIT_MIN = 8.0  # 속 빈 도형 테두리 클릭 최소 히트폭(씬 단위) — 얇은 선도 잡히게
 
+    def _stroke_width(self) -> float:
+        """핸들 크기 기준이 되는 획 두께(로컬 단위). 없으면 0(→ 크기 비례 폴백)."""
+        if hasattr(self, "_width"):   # _ArrowItem
+            return float(self._width)
+        if hasattr(self, "pen"):      # rect/ellipse/line/path
+            return float(self.pen().widthF())
+        return 0.0
+
     def _handle_px(self) -> float:
-        """핸들 한 변(로컬 단위). 주석 표시 크기에 비례 + [MIN,MAX] 클램프."""
+        """핸들 한 변(로컬 단위). 획 두께에 비례 + [MIN,MAX] 클램프(획 없으면 크기 비례)."""
         s = self._scale_or_1()
+        w = self._stroke_width()
+        if w > 0:
+            h_scene = max(self._HANDLE_MIN,
+                          min(w * s * self._HANDLE_STROKE_FRAC, self._HANDLE_MAX))
+            return h_scene / s
         cr = self._content_rect()
         scene_dim = min(cr.width(), cr.height()) * s  # 주석 작은 변(씬 단위)
         h_scene = max(self._HANDLE_MIN, min(scene_dim * self._HANDLE_FRAC, self._HANDLE_MAX))
@@ -604,6 +618,14 @@ def _draw_selection_box(painter: QPainter, rect: QRectF, scale: float = 1.0):
     painter.drawRect(rect)
 
 
+def _draw_selection_ellipse(painter: QPainter, rect: QRectF, scale: float = 1.0):
+    # 원의 선택 표시는 네모 박스가 아니라 곡선을 따라가는 점선 타원(펜·획 밖을 살짝 감쌈).
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor(_BLUE), 1.0 / (scale or 1.0), Qt.PenStyle.DashLine))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(rect)
+
+
 class _RectItem(_HandleResizeMixin, QGraphicsRectItem):
     def __init__(self, *args):
         super().__init__(*args)
@@ -660,7 +682,11 @@ class _EllipseItem(_HandleResizeMixin, QGraphicsEllipseItem):
         return stroker.createStroke(path)
 
     def paint(self, painter, option, widget=None):
-        self._paint_base_no_select(painter, option, widget)
+        # 네모와 달리 선택 표시를 곡선 따라가는 점선 타원으로 그린다(_paint_base_no_select의
+        # 사각 박스 대신 _paint_base + 점선 타원).
+        self._paint_base(painter, option, widget)
+        if self.isSelected():
+            _draw_selection_ellipse(painter, self._content_rect(), self._scale_or_1())
         self._paint_handle(painter)
 
 
@@ -727,6 +753,15 @@ class _PathItem(_HandleResizeMixin, QGraphicsPathItem):
     def __init__(self, *args):
         super().__init__(*args)
         self._init_resize()
+        self._sel_outline = None  # 선택 점선 외곽선 캐시(획·펜 불변 → 이동 중 재계산 회피)
+
+    def setPath(self, path):
+        self._sel_outline = None
+        super().setPath(path)
+
+    def setPen(self, pen):
+        self._sel_outline = None
+        super().setPen(pen)
 
     def clone(self):
         c = _PathItem(QPainterPath(self.path()))
@@ -751,14 +786,17 @@ class _PathItem(_HandleResizeMixin, QGraphicsPathItem):
 
     def _paint_selection_outline(self, painter, scale):
         # 펜 획을 따라가는 점선(네모 박스 아님) — 획을 살짝 넓게 감싼다.
-        stroker = QPainterPathStroker()
-        stroker.setWidth(self.pen().widthF() + 8)
-        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
-        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        outline = stroker.createStroke(self.path())
+        # 스트로크 생성·단순화는 무겁고 획·펜이 안 바뀌면 결과가 동일하므로 캐시해
+        # 이동(평행이동) 중 매 프레임 재계산을 피한다(버벅임 제거).
+        if self._sel_outline is None:
+            stroker = QPainterPathStroker()
+            stroker.setWidth(self.pen().widthF() + 8)
+            stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+            stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            self._sel_outline = stroker.createStroke(self.path()).simplified()
         painter.setPen(QPen(QColor(_BLUE), 1.0 / (scale or 1.0), Qt.PenStyle.DashLine))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(outline.simplified())
+        painter.drawPath(self._sel_outline)
 
     def paint(self, painter, option, widget=None):
         self._paint_base(painter, option, widget)
@@ -1241,10 +1279,13 @@ class _TextItem(_HandleResizeMixin, QGraphicsTextItem):
         super().mouseDoubleClickEvent(event)
 
     def keyPressEvent(self, event):
-        # Ctrl+Enter로 편집 종료(평범한 Enter는 줄바꿈 유지). clearFocus → focusOut에서 정리.
-        if (event.modifiers() & Qt.KeyboardModifier.ControlModifier) and \
-                event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.clearFocus()
+        # Enter = 편집 종료(ESC와 동일), Shift+Enter = 줄바꿈. clearFocus → focusOut에서 정리.
+        # (Ctrl+Enter도 종료로 유지 — 하위 호환.)
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                super().keyPressEvent(event)  # 줄바꿈 삽입
+                return
+            self.clearFocus()  # Enter / Ctrl+Enter = 완료
             return
         super().keyPressEvent(event)
 
@@ -1419,6 +1460,13 @@ class _AnnotatorView(QGraphicsView):
         self._conn_hover_idx = -1    # 커서가 올라간 연결점(하이라이트·press 대상), -1=없음
         self._conn_drawing = False   # 연결점에서 화살표 드래그 중
         self._conn_exit = QPointF()  # 시작 접선(소스 변의 바깥 법선, 씬 단위)
+        self._move_snap = None       # 드래그 이동 전 위치 스냅샷([(item, QPointF), ...]) — undo용
+        # 연결점 dwell — 커서가 링에 잠깐 머물러야 표시(빠르게 지나가면 안 뜸 → 반짝임 제거)
+        self._conn_dwell_item = None
+        self._conn_dwell_pos = None
+        self._conn_dwell_timer = QTimer(self)
+        self._conn_dwell_timer.setSingleShot(True)
+        self._conn_dwell_timer.timeout.connect(self._on_conn_dwell)
 
     def _is_empty_area(self, view_pos) -> bool:
         """클릭 위치에 선택 가능한 주석 아이템이 없으면(배경뿐) True."""
@@ -1439,9 +1487,40 @@ class _AnnotatorView(QGraphicsView):
                 return it
         return None
 
+    def _over_selected_endpoint(self, view_pos) -> bool:
+        """커서가 '선택된' 선·화살표의 끝점 핸들 안이면 True(끝점 이동 우선 판정용)."""
+        scene_pt = self.mapToScene(view_pos)
+        for it in self.scene().selectedItems():
+            uses = getattr(it, "_uses_endpoints", None)
+            if uses and it._uses_endpoints() and it._endpoint_active():
+                local = it.mapFromScene(scene_pt)
+                for i in range(len(it._endpoints())):
+                    if it._endpoint_rect(i).contains(local):
+                        return True
+        return False
+
+    def _snapshot_movable(self):
+        """드래그 이동 전 이동 가능 아이템들의 위치를 기록(release에서 변경분만 undo에 커밋)."""
+        self._move_snap = [
+            (it, QPointF(it.pos())) for it in self.scene().items()
+            if it.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+        ]
+
+    def _commit_move(self):
+        """release 시 실제로 위치가 바뀐 아이템만 이동 undo로 기록."""
+        snap = self._move_snap
+        self._move_snap = None
+        if not snap:
+            return
+        moved = [(it, old) for it, old in snap
+                 if it.scene() is not None and it.pos() != old]
+        if moved:
+            self._owner.push_undo_move(moved)
+
     # ---- 테두리 연결점 (네모/원 → 자동 S자 화살표) --------------------------
-    _CONN_SHOW_PX = 22.0   # 이 거리 안에 연결점이 있으면 도형 밖이어도 노출(뷰 픽셀)
+    _CONN_SHOW_PX = 18.0   # 테두리 링 두께(안·밖 각 방향, 뷰 픽셀) — 이 안에서만 연결점 노출
     _CONN_HIT_PX = 12.0    # 연결점 하이라이트·press·스냅 대상 판정(뷰 픽셀)
+    _CONN_DWELL_MS = 130   # 링 안에 이만큼 머물러야 표시(빠른 통과는 안 뜸)
 
     def _view_scale(self) -> float:
         m = self.transform().m11()
@@ -1456,29 +1535,72 @@ class _AnnotatorView(QGraphicsView):
         return [it for it in self.scene().items()
                 if isinstance(it, (_RectItem, _EllipseItem))]
 
-    def _update_conn_hover(self, view_pos):
-        """커서 근처 네모/원의 연결점 상태 갱신(표시 도형·하이라이트 인덱스). 변경 시 리페인트."""
-        prev_item, prev_idx = self._conn_item, self._conn_hover_idx
-        item, pts, hover = None, [], -1
-        if self._owner.is_edit_mode() and not self._conn_drawing:
-            scene_pt = self.mapToScene(view_pos)
-            for it in self._conn_shapes():
+    def _conn_candidate_at(self, view_pos):
+        """커서가 어떤 네모/원의 '테두리 링' 안이면 (도형, 점목록, hover_idx), 아니면 (None,[],-1).
+
+        표시 영역은 도형 '테두리를 감싸는 얇은 링'(안쪽 margin ~ 바깥쪽 margin)뿐이다 —
+        채운 halo(내부까지)는 ① 테두리에 안 닿은 내부에서도 뜨고 ② 바깥으로 나가는 길에 반드시
+        통과해 반짝였다. 링이라 둘레를 따라 움직여도 연속(개별 점 디스크 사이 빈틈 없음)이고
+        속 빈 도형의 내부=빈 공간 설계와도 일치. 회전·스케일은 커서를 로컬로 변환해 반영."""
+        if not self._owner.is_edit_mode() or self._conn_drawing:
+            return None, [], -1
+        scene_pt = self.mapToScene(view_pos)
+        for it in self._conn_shapes():
+            eff = self._view_scale() * (it.scale() or 1.0)
+            margin = self._CONN_SHOW_PX / (eff if eff > 1e-6 else 1.0)
+            cr = it._content_rect()
+            lp = it.mapFromScene(scene_pt)
+            outer = cr.adjusted(-margin, -margin, margin, margin)
+            inner = cr.adjusted(margin, margin, -margin, -margin)  # 얇으면 음수→contains 항상 False
+            if outer.contains(lp) and not inner.contains(lp):
                 cand = _shape_conn_points(it)
-                inside = it.mapToScene(it.boundingRect()).containsPoint(
-                    scene_pt, Qt.FillRule.OddEvenFill)
-                near_i, near_d = -1, self._CONN_SHOW_PX
+                # HIT 판정: 개별 점 12px 이내면 그 점을 하이라이트·press 대상으로.
+                near_i, near_d = -1, self._CONN_HIT_PX
                 for i, (sp, _n) in enumerate(cand):
                     d = self._view_dist(sp, view_pos)
                     if d < near_d:
                         near_d, near_i = d, i
-                if inside or near_i >= 0:
-                    item, pts = it, cand
-                    if near_i >= 0 and near_d <= self._CONN_HIT_PX:
-                        hover = near_i  # HIT 범위 안일 때만 하이라이트·press 대상
-                    break
+                return it, cand, near_i
+        return None, [], -1
+
+    def _set_conn_shown(self, item, pts, hover):
+        changed = (item is not self._conn_item) or (hover != self._conn_hover_idx)
         self._conn_item, self._conn_pts, self._conn_hover_idx = item, pts, hover
-        if item is not prev_item or hover != prev_idx:
+        if changed:
             self.viewport().update()
+
+    def _cancel_conn_dwell(self):
+        self._conn_dwell_item = None
+        self._conn_dwell_timer.stop()
+
+    def _on_conn_dwell(self):
+        # dwell 만료 — 커서가 후보 링에 계속 있으면(마우스 무브가 dwell 상태를 동기화하므로
+        # 여기 도달했다면 아직 그 링 안) 그때 표시.
+        item = self._conn_dwell_item
+        self._conn_dwell_item = None
+        if item is None or self._conn_dwell_pos is None:
+            return
+        cand, pts, hover = self._conn_candidate_at(self._conn_dwell_pos)
+        if cand is item:
+            self._set_conn_shown(item, pts, hover)
+
+    def _update_conn_hover(self, view_pos):
+        """커서 위치에 따라 연결점 표시를 갱신. 새 도형은 dwell(머무름) 후에만 표시."""
+        cand, pts, hover = self._conn_candidate_at(view_pos)
+        if cand is None:
+            self._cancel_conn_dwell()
+            self._set_conn_shown(None, [], -1)
+            return
+        if cand is self._conn_item:
+            self._set_conn_shown(cand, pts, hover)  # 이미 표시 중 → 따라가기(hover 갱신)
+            return
+        # 미표시 새 후보 → dwell 대기(빠른 통과는 안 뜨고, 잠깐 머물러야 표시)
+        self._conn_dwell_pos = view_pos
+        if cand is not self._conn_dwell_item:
+            self._conn_dwell_item = cand
+            self._conn_dwell_timer.start(self._CONN_DWELL_MS)
+            if self._conn_item is not None:      # 다른 도형이 떠 있었으면 즉시 숨김
+                self._set_conn_shown(None, [], -1)
 
     def _begin_conn_arrow(self, scene_pt, exit_dir):
         owner = self._owner
@@ -1487,6 +1609,7 @@ class _AnnotatorView(QGraphicsView):
         self._start = scene_pt
         self._conn_exit = QPointF(exit_dir)
         self._conn_drawing = True
+        self._cancel_conn_dwell()
         self._conn_item, self._conn_pts, self._conn_hover_idx = None, [], -1
         self.viewport().update()
         self._begin_draw(it)
@@ -1519,7 +1642,8 @@ class _AnnotatorView(QGraphicsView):
         it.update()
 
     def leaveEvent(self, event):
-        # 커서가 뷰를 벗어나면 연결점 표시 정리(잔상 방지).
+        # 커서가 뷰를 벗어나면 연결점 표시·dwell 정리(잔상 방지).
+        self._cancel_conn_dwell()
         if self._conn_item is not None:
             self._conn_item, self._conn_pts, self._conn_hover_idx = None, [], -1
             self.viewport().update()
@@ -1596,6 +1720,11 @@ class _AnnotatorView(QGraphicsView):
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
+        # 이미 선택된 화살표/선의 끝점 핸들 위 press면 새 연결 화살표를 만들지 말고 그 끝점을
+        # 이동(도형 테두리에 붙은 화살표 끝을 떼어내기). 연결점보다 끝점 이동을 우선 —
+        # 안 그러면 끝점이 도형 연결점과 겹칠 때 매번 새 화살표가 생긴다.
+        if self._over_selected_endpoint(event.position().toPoint()):
+            return super().mousePressEvent(event)
         # 테두리 연결점 위에서 press → 현재 도구와 무관하게 자동 S자 화살표 그리기 시작.
         if self._conn_hover_idx >= 0 and self._conn_pts:
             sp, ndir = self._conn_pts[self._conn_hover_idx]
@@ -1605,11 +1734,13 @@ class _AnnotatorView(QGraphicsView):
         if tool == "select":
             # Qt 기본: 빈 영역 드래그 = 러버밴드 다중선택, 아이템 위 = 이동/선택.
             # 창 이동은 상단 코랄 드래그바로. (편집 모드 본문 pan은 제거)
+            self._snapshot_movable()   # 아이템 드래그 이동을 undo로 되돌리기 위해
             return super().mousePressEvent(event)
 
         # 도형 도구는 기존 주석 위를 클릭하면 그리기 대신 선택/이동.
         # 단, 펜은 빽빽이 겹쳐 그리므로 항상 그린다(펜 선의 선택/이동은 V 도구로).
         if tool != "pen" and not self._is_empty_area(event.position().toPoint()):
+            self._snapshot_movable()
             return super().mousePressEvent(event)
 
         sp = self.mapToScene(event.position().toPoint())
@@ -1671,6 +1802,7 @@ class _AnnotatorView(QGraphicsView):
         self.scene().addItem(item)
         self._temp = item
         self._drawing = True
+        self._cancel_conn_dwell()
         if self._conn_item is not None:  # 그리기 시작하면 연결점 표시 정리
             self._conn_item, self._conn_pts, self._conn_hover_idx = None, [], -1
             self.viewport().update()
@@ -1724,6 +1856,11 @@ class _AnnotatorView(QGraphicsView):
                 self._temp.setPath(self._path)
             return
         super().mouseMoveEvent(event)
+        # 아이템 이동(좌드래그) 중엔 hover 재계산을 건너뛰므로(위 1707행) 캐시된 연결점이
+        # 옛 위치에 남아 도형을 못 따라온다. 움직인 도형에서 실시간 재계산해 함께 따라오게 한다.
+        if (event.buttons() & Qt.MouseButton.LeftButton) and self._conn_item is not None:
+            self._conn_pts = _shape_conn_points(self._conn_item)
+            self.viewport().update()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:
@@ -1762,6 +1899,7 @@ class _AnnotatorView(QGraphicsView):
                 if conn or tool != "pen":
                     item.setSelected(True)
             return
+        self._commit_move()   # 드래그 이동이 있었으면 undo에 기록
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -1806,6 +1944,11 @@ class _AnnotatorView(QGraphicsView):
             if arrow is not None:
                 sel = self.scene().selectedItems()
                 if sel:
+                    # 이동 전 위치 기록(Ctrl+Z 원복). 같은 선택의 연속 nudge는 하나로 합쳐
+                    # undo 폭주를 막는다(coalesce_key=선택 집합).
+                    self._owner.push_undo_move(
+                        [(it, QPointF(it.pos())) for it in sel],
+                        coalesce_key=frozenset(sel))
                     fine = mods & (Qt.KeyboardModifier.ShiftModifier
                                    | Qt.KeyboardModifier.ControlModifier)
                     step = 1 if fine else 10
@@ -1919,6 +2062,7 @@ class _EditorMixin:
         self.arrow_head_at_end = True
         self.current_text_bg = None  # 새 텍스트의 기본 배경(None=투명)
         self._undo: list[tuple[str, list]] = []
+        self._last_move_key = None   # 직전 move undo의 합침 키(연속 화살표키 nudge 병합용)
         self._clip: list = []        # Ctrl+C로 담아둔 주석 복제 템플릿
         self._paste_seq = 0          # 연속 붙여넣기 오프셋 카운터
         # 스포이드 상태
@@ -2255,22 +2399,41 @@ class _EditorMixin:
             btn.setChecked(same)
 
     def _update_arrow_dir_btn(self):
-        """화살표 도구가 활성이고 편집 모드일 때만 화살표 버튼 아래에 방향 토글 floating."""
+        """방향 토글 버튼 배치: 선택된 화살표가 있으면 그 화살표 근처에(대상에서 멀지 않게),
+        없고 화살표 도구가 활성이면 툴바 화살표 버튼 아래(새 화살표 기본 방향 토글)."""
         btn = getattr(self, "_arrow_dir_btn", None)
         if btn is None:
             return
         edit = self.is_edit_mode() if hasattr(self, "is_edit_mode") else True
-        if self.current_tool == "arrow" and edit:
+        if not edit:
+            btn.setVisible(False)
+            return
+        sel_arrows = [it for it in self._scene.selectedItems() if isinstance(it, _ArrowItem)]
+        if sel_arrows:
+            arrow = sel_arrows[0]
+            # 화살표 중간점을 호스트(창) 좌표로 변환해 그 위쪽에 버튼 배치(대상 근처).
+            scene_mid = arrow.mapToScene(arrow._point_at(0.5))
+            vp_pt = self._view.mapFromScene(scene_mid)
+            host = self.mapFromGlobal(self._view.viewport().mapToGlobal(vp_pt))
+            btn.setIcon(_arrow_dir_icon(arrow._head_at_end))  # 그 화살표의 실제 방향 표시
+            btn.resize(32, 24)
+            x = max(2, min(host.x() + 12, self.width() - btn.width() - 2))
+            y = max(2, min(host.y() - btn.height() - 12, self.height() - btn.height() - 2))
+            btn.move(x, y)
+            btn.setVisible(True)
+            btn.raise_()
+            return
+        if self.current_tool == "arrow":
             arrow_btn = self._tool_buttons.get("arrow")
             if arrow_btn is not None:
-                # 화살표 버튼의 좌상단을 호스트 창 좌표로 변환해 그 아래에 배치
                 top_left = arrow_btn.mapTo(self, QPoint(0, arrow_btn.height() + 2))
                 btn.move(top_left)
                 btn.resize(arrow_btn.width(), 22)
+            btn.setIcon(_arrow_dir_icon(self.arrow_head_at_end))
             btn.setVisible(True)
             btn.raise_()
-        else:
-            btn.setVisible(False)
+            return
+        btn.setVisible(False)
 
     def make_pen(self) -> QPen:
         return QPen(self.current_color, self.current_width, Qt.PenStyle.SolidLine,
@@ -2351,12 +2514,16 @@ class _EditorMixin:
             self.current_width = new
 
     def _toggle_arrow_dir(self):
-        self.arrow_head_at_end = not self.arrow_head_at_end
+        # 선택된 화살표가 있으면 각자 자기 방향을 뒤집고 기본값·아이콘을 첫 화살표에 맞춘다.
+        # 없으면 새 화살표 기본 방향만 토글.
+        sel = [it for it in self._scene.selectedItems() if isinstance(it, _ArrowItem)]
+        if sel:
+            for it in sel:
+                it.flip_head()
+            self.arrow_head_at_end = sel[0]._head_at_end
+        else:
+            self.arrow_head_at_end = not self.arrow_head_at_end
         self._arrow_dir_btn.setIcon(_arrow_dir_icon(self.arrow_head_at_end))
-        # 선택된 화살표도 즉시 뒤집기
-        for it in self._scene.selectedItems():
-            if isinstance(it, _ArrowItem):
-                it.set_head_at_end(self.arrow_head_at_end)
 
     # ---- 스포이드 (화면 픽셀 색 따오기) ------------------------------------
     def _start_eyedropper(self):
@@ -2435,8 +2602,21 @@ class _EditorMixin:
     def push_undo_delete(self, items: list):
         self._undo.append(("delete", list(items)))
 
+    def push_undo_move(self, pairs: list, coalesce_key=None):
+        """이동(pos 변경) 되돌리기 기록. pairs=[(item, 이동 전 QPointF), ...].
+        coalesce_key가 직전 move와 같으면(연속 화살표키 nudge) 새 항목을 쌓지 않아
+        undo 폭주를 막는다 — 기존 항목이 더 오래된(원래) 위치를 이미 보유하므로."""
+        if not pairs:
+            return
+        if coalesce_key is not None and self._undo \
+                and self._undo[-1][0] == "move" and self._last_move_key == coalesce_key:
+            return
+        self._undo.append(("move", pairs))
+        self._last_move_key = coalesce_key
+
     def undo(self):
         # 이미 사라진 빈 텍스트의 "add"처럼 무의미한 항목은 건너뛰고 실제 동작 1건을 되돌린다.
+        self._last_move_key = None  # undo 후엔 다음 nudge를 새 그룹으로(합침 끊기)
         while self._undo:
             action, items = self._undo.pop()
             if action == "add":
@@ -2450,6 +2630,16 @@ class _EditorMixin:
                 for it in items:
                     self._scene.addItem(it)
                 return
+            if action == "move":
+                # items = [(item, 이동 전 pos)]. 씬에 남은 항목만 원위치로.
+                restored = False
+                for it, old_pos in items:
+                    if it.scene() is not None:
+                        it.setPos(old_pos)
+                        restored = True
+                if restored:
+                    return
+                continue
 
     # ---- 복사 / 붙여넣기 (주석 내부 복제, OS 클립보드 아님) ------------------
     def copy_selection(self):
