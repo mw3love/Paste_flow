@@ -66,9 +66,9 @@ _TEXT_BG_OPTIONS = [
 
 # 도구 정의: (key, 한글명, 단축키 라벨)
 _TOOLS = [
-    ("select", "선택", "V"), ("rect", "네모", "R"), ("ellipse", "원", "E"),
-    ("line", "선", "L"), ("arrow", "화살표", "A"), ("pen", "펜", "P"),
-    ("text", "텍스트", "T"), ("badge", "번호", "C"),
+    ("select", "선택", "Alt+1"), ("rect", "네모", "Alt+2"), ("text", "텍스트", "Alt+3"),
+    ("arrow", "화살표", "Alt+4"), ("ellipse", "원", "Alt+5"), ("line", "선", "Alt+6"),
+    ("pen", "펜", "Alt+7"), ("badge", "번호", "Alt+8"),
 ]
 
 
@@ -1416,31 +1416,77 @@ class _SizeStepper(QWidget):
 # 그래픽스 뷰 — 그리기 인터랙션 + 도구 단축키 (Shift 제약)
 # ---------------------------------------------------------------------------
 
-def _shape_conn_points(item):
-    """네모/원의 변 중앙 4점 → [(scene_point, scene_outward_unit_dir), ...]. 회전·스케일 반영.
-    바깥 법선은 아이템 변환을 거쳐 씬 방향으로 환산(회전 화살표 진입/이탈 접선 계산에 씀)."""
-    r = item.rect()
+def _rect_nearest(r, p):
+    """로컬 사각형 r 둘레에서 점 p 최근접점 + 바깥 단위 법선(로컬)."""
+    left, right, top, bottom = r.left(), r.right(), r.top(), r.bottom()
+    if left <= p.x() <= right and top <= p.y() <= bottom:
+        # 내부 → 가장 가까운 변으로 투영
+        dl, dr, dt, db = p.x() - left, right - p.x(), p.y() - top, bottom - p.y()
+        m = min(dl, dr, dt, db)
+        if m == dl:
+            return QPointF(left, p.y()), QPointF(-1.0, 0.0)
+        if m == dr:
+            return QPointF(right, p.y()), QPointF(1.0, 0.0)
+        if m == dt:
+            return QPointF(p.x(), top), QPointF(0.0, -1.0)
+        return QPointF(p.x(), bottom), QPointF(0.0, 1.0)
+    # 외부 → 채운 사각형으로 클램프한 점이 최근접(모서리 밖이면 대각 법선)
+    qx = min(max(p.x(), left), right)
+    qy = min(max(p.y(), top), bottom)
+    nx = -1.0 if (qx == left and p.x() < left) else (1.0 if (qx == right and p.x() > right) else 0.0)
+    ny = -1.0 if (qy == top and p.y() < top) else (1.0 if (qy == bottom and p.y() > bottom) else 0.0)
+    if nx == 0.0 and ny == 0.0:
+        ny = -1.0  # 안전망(도달 안 함)
+    L = math.hypot(nx, ny) or 1.0
+    return QPointF(qx, qy), QPointF(nx / L, ny / L)
+
+
+def _ellipse_nearest(r, p):
+    """로컬 타원(사각형 r에 내접) 둘레에서 점 p 최근접점 + 바깥 단위 법선(로컬).
+    파라미터 각 t에 대한 뉴턴 반복(초기값=방사각)으로 근사 — 테두리 근처에서 빠르게 수렴."""
     cx, cy = r.center().x(), r.center().y()
-    edges = (
-        (QPointF(cx, r.top()),    QPointF(0.0, -1.0)),
-        (QPointF(cx, r.bottom()), QPointF(0.0, 1.0)),
-        (QPointF(r.left(), cy),   QPointF(-1.0, 0.0)),
-        (QPointF(r.right(), cy),  QPointF(1.0, 0.0)),
-    )
-    out = []
-    for pt, n in edges:
-        sp = item.mapToScene(pt)
-        nd = item.mapToScene(QPointF(pt.x() + n.x(), pt.y() + n.y())) - sp
-        L = math.hypot(nd.x(), nd.y()) or 1.0
-        out.append((sp, QPointF(nd.x() / L, nd.y() / L)))
-    return out
+    a, b = r.width() / 2.0, r.height() / 2.0
+    ux, uy = p.x() - cx, p.y() - cy
+    if a < 1e-6 or b < 1e-6:
+        return QPointF(cx, cy), QPointF(0.0, -1.0)
+    t = math.atan2(a * uy, b * ux)
+    for _ in range(4):
+        ct, st = math.cos(t), math.sin(t)
+        x, y = a * ct, b * st
+        # f(t) = d/dt (½|(x,y)-u|²) = (x-ux)(-a·st) + (y-uy)(b·ct)
+        f = (x - ux) * (-a * st) + (y - uy) * (b * ct)
+        fp = (a * a) * st * st - a * ct * (x - ux) \
+            + (b * b) * ct * ct - b * st * (y - uy)
+        if abs(fp) < 1e-9:
+            break
+        t -= f / fp
+    ct, st = math.cos(t), math.sin(t)
+    q = QPointF(cx + a * ct, cy + b * st)
+    nx, ny = ct / a, st / b   # 바깥 법선 ∝ (x/a², y/b²)
+    L = math.hypot(nx, ny) or 1.0
+    return q, QPointF(nx / L, ny / L)
+
+
+def _nearest_border(item, scene_pt):
+    """네모/원 테두리에서 scene_pt 최근접점 → (snap_scene, outward_unit_scene).
+    회전·스케일은 아이템 변환으로 왕복 환산(바깥 법선도 씬 방향으로 변환)."""
+    p = item.mapFromScene(scene_pt)
+    r = item.rect()
+    if isinstance(item, _EllipseItem):
+        q, n = _ellipse_nearest(r, p)
+    else:
+        q, n = _rect_nearest(r, p)
+    sp = item.mapToScene(q)
+    nd = item.mapToScene(QPointF(q.x() + n.x(), q.y() + n.y())) - sp
+    L = math.hypot(nd.x(), nd.y()) or 1.0
+    return sp, QPointF(nd.x() / L, nd.y() / L)
 
 
 class _AnnotatorView(QGraphicsView):
     _SHORTCUTS = {
-        Qt.Key.Key_V: "select", Qt.Key.Key_R: "rect", Qt.Key.Key_E: "ellipse",
-        Qt.Key.Key_L: "line", Qt.Key.Key_A: "arrow", Qt.Key.Key_P: "pen",
-        Qt.Key.Key_T: "text", Qt.Key.Key_C: "badge",
+        Qt.Key.Key_1: "select", Qt.Key.Key_2: "rect", Qt.Key.Key_3: "text",
+        Qt.Key.Key_4: "arrow", Qt.Key.Key_5: "ellipse", Qt.Key.Key_6: "line",
+        Qt.Key.Key_7: "pen", Qt.Key.Key_8: "badge",
     }
 
     def __init__(self, scene: QGraphicsScene, owner):
@@ -1454,19 +1500,11 @@ class _AnnotatorView(QGraphicsView):
         self._temp: QGraphicsItem | None = None
         self._start = QPointF()
         self._path: QPainterPath | None = None
-        # 네모/원 테두리 연결점(호버 시 표시 → 드래그로 화살표 생성)
-        self._conn_item = None       # 연결점을 표시 중인 도형(_RectItem/_EllipseItem)
-        self._conn_pts: list = []    # [(scene_point, scene_outward_unit), ...]
-        self._conn_hover_idx = -1    # 커서가 올라간 연결점(하이라이트·press 대상), -1=없음
-        self._conn_drawing = False   # 연결점에서 화살표 드래그 중
-        self._conn_exit = QPointF()  # 시작 접선(소스 변의 바깥 법선, 씬 단위)
         self._move_snap = None       # 드래그 이동 전 위치 스냅샷([(item, QPointF), ...]) — undo용
-        # 연결점 dwell — 커서가 링에 잠깐 머물러야 표시(빠르게 지나가면 안 뜸 → 반짝임 제거)
-        self._conn_dwell_item = None
-        self._conn_dwell_pos = None
-        self._conn_dwell_timer = QTimer(self)
-        self._conn_dwell_timer.setSingleShot(True)
-        self._conn_dwell_timer.timeout.connect(self._on_conn_dwell)
+        # 테두리 스냅(화살표 도구 전용) — 도형 테두리 어디든 최근접점에 붙음
+        self._snap_preview = None    # 화살표 도구 유휴 시 커서 근처 테두리 최근접점(마커 표시), 씬 좌표 or None
+        self._arrow_snap_exit = None # 그리는 화살표 시작이 테두리에 스냅됐으면 그 바깥 법선(이탈 접선), or None
+        self._arrow_tip_snap = None  # 그리는 화살표 tip이 테두리에 스냅된 지점(씬 좌표) or None
 
     def _is_empty_area(self, view_pos) -> bool:
         """클릭 위치에 선택 가능한 주석 아이템이 없으면(배경뿐) True."""
@@ -1517,10 +1555,8 @@ class _AnnotatorView(QGraphicsView):
         if moved:
             self._owner.push_undo_move(moved)
 
-    # ---- 테두리 연결점 (네모/원 → 자동 S자 화살표) --------------------------
-    _CONN_SHOW_PX = 18.0   # 테두리 링 두께(안·밖 각 방향, 뷰 픽셀) — 이 안에서만 연결점 노출
-    _CONN_HIT_PX = 12.0    # 연결점 하이라이트·press·스냅 대상 판정(뷰 픽셀)
-    _CONN_DWELL_MS = 130   # 링 안에 이만큼 머물러야 표시(빠른 통과는 안 뜸)
+    # ---- 테두리 스냅 (화살표 도구가 네모/원 테두리에서 시작·도착하면 붙음) ----
+    _BORDER_SNAP_PX = 14.0  # 커서~테두리 최근접점이 이 픽셀 이내면 스냅(시작·tip 공통, 뷰 픽셀)
 
     def _view_scale(self) -> float:
         m = self.transform().m11()
@@ -1535,133 +1571,97 @@ class _AnnotatorView(QGraphicsView):
         return [it for it in self.scene().items()
                 if isinstance(it, (_RectItem, _EllipseItem))]
 
-    def _conn_candidate_at(self, view_pos):
-        """커서가 어떤 네모/원의 '테두리 링' 안이면 (도형, 점목록, hover_idx), 아니면 (None,[],-1).
-
-        표시 영역은 도형 '테두리를 감싸는 얇은 링'(안쪽 margin ~ 바깥쪽 margin)뿐이다 —
-        채운 halo(내부까지)는 ① 테두리에 안 닿은 내부에서도 뜨고 ② 바깥으로 나가는 길에 반드시
-        통과해 반짝였다. 링이라 둘레를 따라 움직여도 연속(개별 점 디스크 사이 빈틈 없음)이고
-        속 빈 도형의 내부=빈 공간 설계와도 일치. 회전·스케일은 커서를 로컬로 변환해 반영."""
-        if not self._owner.is_edit_mode() or self._conn_drawing:
-            return None, [], -1
+    def _border_snap_at(self, view_pos):
+        """커서가 어떤 네모/원 테두리에서 _BORDER_SNAP_PX 이내면 (snap_scene, exit_unit), 아니면 None.
+        여러 도형이 후보면 가장 가까운 테두리점을 고른다."""
         scene_pt = self.mapToScene(view_pos)
-        for it in self._conn_shapes():
-            eff = self._view_scale() * (it.scale() or 1.0)
-            margin = self._CONN_SHOW_PX / (eff if eff > 1e-6 else 1.0)
-            cr = it._content_rect()
-            lp = it.mapFromScene(scene_pt)
-            outer = cr.adjusted(-margin, -margin, margin, margin)
-            inner = cr.adjusted(margin, margin, -margin, -margin)  # 얇으면 음수→contains 항상 False
-            if outer.contains(lp) and not inner.contains(lp):
-                cand = _shape_conn_points(it)
-                # HIT 판정: 개별 점 12px 이내면 그 점을 하이라이트·press 대상으로.
-                near_i, near_d = -1, self._CONN_HIT_PX
-                for i, (sp, _n) in enumerate(cand):
-                    d = self._view_dist(sp, view_pos)
-                    if d < near_d:
-                        near_d, near_i = d, i
-                return it, cand, near_i
-        return None, [], -1
+        best = None
+        bestd = self._BORDER_SNAP_PX
+        bexit = None
+        for sh in self._conn_shapes():
+            sp, n = _nearest_border(sh, scene_pt)
+            d = self._view_dist(sp, view_pos)
+            if d <= bestd:
+                bestd, best, bexit = d, sp, n
+        if best is None:
+            return None
+        return best, bexit
 
-    def _set_conn_shown(self, item, pts, hover):
-        changed = (item is not self._conn_item) or (hover != self._conn_hover_idx)
-        self._conn_item, self._conn_pts, self._conn_hover_idx = item, pts, hover
-        if changed:
+    def _update_snap_preview(self, view_pos):
+        """화살표 도구 유휴 시 커서 근처 테두리 최근접점을 마커로 예고(스냅 발동 가능 표시)."""
+        prev = self._snap_preview
+        new = None
+        if (self._owner.is_edit_mode() and self._owner.current_tool == "arrow"
+                and not self._drawing):
+            snap = self._border_snap_at(view_pos)
+            if snap is not None:
+                new = snap[0]
+        self._snap_preview = new
+        if new != prev:
             self.viewport().update()
 
-    def _cancel_conn_dwell(self):
-        self._conn_dwell_item = None
-        self._conn_dwell_timer.stop()
-
-    def _on_conn_dwell(self):
-        # dwell 만료 — 커서가 후보 링에 계속 있으면(마우스 무브가 dwell 상태를 동기화하므로
-        # 여기 도달했다면 아직 그 링 안) 그때 표시.
-        item = self._conn_dwell_item
-        self._conn_dwell_item = None
-        if item is None or self._conn_dwell_pos is None:
-            return
-        cand, pts, hover = self._conn_candidate_at(self._conn_dwell_pos)
-        if cand is item:
-            self._set_conn_shown(item, pts, hover)
-
-    def _update_conn_hover(self, view_pos):
-        """커서 위치에 따라 연결점 표시를 갱신. 새 도형은 dwell(머무름) 후에만 표시."""
-        cand, pts, hover = self._conn_candidate_at(view_pos)
-        if cand is None:
-            self._cancel_conn_dwell()
-            self._set_conn_shown(None, [], -1)
-            return
-        if cand is self._conn_item:
-            self._set_conn_shown(cand, pts, hover)  # 이미 표시 중 → 따라가기(hover 갱신)
-            return
-        # 미표시 새 후보 → dwell 대기(빠른 통과는 안 뜨고, 잠깐 머물러야 표시)
-        self._conn_dwell_pos = view_pos
-        if cand is not self._conn_dwell_item:
-            self._conn_dwell_item = cand
-            self._conn_dwell_timer.start(self._CONN_DWELL_MS)
-            if self._conn_item is not None:      # 다른 도형이 떠 있었으면 즉시 숨김
-                self._set_conn_shown(None, [], -1)
-
-    def _begin_conn_arrow(self, scene_pt, exit_dir):
-        owner = self._owner
-        it = _ArrowItem(owner.current_color, owner.current_width, owner.arrow_head_at_end)
-        it.set_points(scene_pt, scene_pt)
-        self._start = scene_pt
-        self._conn_exit = QPointF(exit_dir)
-        self._conn_drawing = True
-        self._cancel_conn_dwell()
-        self._conn_item, self._conn_pts, self._conn_hover_idx = None, [], -1
-        self.viewport().update()
-        self._begin_draw(it)
-
-    def _update_conn_arrow(self, view_pos):
-        """연결점 화살표 드래그 갱신 — tip=커서(타깃 연결점 근처면 스냅) + 자동 S자 제어점.
-        곡선 tip 접선: 스냅되면 그 변의 법선(수직 진입), 아니면 시작 접선과 평행(부드러운 S)."""
+    def _update_arrow_draw(self, event):
+        """화살표 그리기 갱신 — tip=커서(테두리 근처면 스냅). 시작·tip 중 하나라도 테두리에
+        스냅되면 그 바깥 법선을 이탈/도착 접선으로 쓴 3차 베지어(자동 S자), 둘 다 자유면 직선."""
         it = self._temp
-        tip = self.mapToScene(view_pos)
-        ex, ey = self._conn_exit.x(), self._conn_exit.y()
-        back = QPointF(-ex, -ey)  # tip→ctrl2 방향(=진행방향 반대). 기본은 시작과 평행하게 도착.
-        for sh in self._conn_shapes():
-            snapped = False
-            for sp, nd in _shape_conn_points(sh):
-                if self._view_dist(sp, view_pos) <= self._CONN_HIT_PX:
-                    tip, back, snapped = sp, QPointF(nd), True  # 타깃 바깥 법선 쪽에 ctrl2(수직 도착)
-                    break
-            if snapped:
-                break
+        view_pos = event.position().toPoint()
+        tip = self._cur_point(event)   # Shift 각도 제약 반영(스냅되면 아래에서 덮어씀)
+        # tip 스냅 — 도형 테두리 최근접점
+        snap = self._border_snap_at(view_pos)
+        back = None
+        if snap is not None:
+            tip, back = snap[0], snap[1]   # 타깃 바깥 법선 쪽에 ctrl2 → 수직 도착
+        self._arrow_tip_snap = snap[0] if snap is not None else None
         start = self._start
+        exit_dir = self._arrow_snap_exit
         dist = math.hypot(tip.x() - start.x(), tip.y() - start.y())
         it.prepareGeometryChange()
         it._p2 = QPointF(tip)
-        if dist < 8:
-            it._ctrl1 = it._ctrl2 = None  # 너무 짧으면 직선(엉킴 방지)
+        if (exit_dir is None and back is None) or dist < 8:
+            it._ctrl1 = it._ctrl2 = None   # 양끝 자유거나 너무 짧으면 직선
         else:
             k = max(30.0, min(dist * 0.5, 200.0))
+            if exit_dir is not None:
+                ex, ey = exit_dir.x(), exit_dir.y()          # 시작 테두리 이탈 접선
+            else:
+                ex, ey = (tip.x() - start.x()) / dist, (tip.y() - start.y()) / dist  # tip 향해
+            if back is not None:
+                bx, by = back.x(), back.y()                  # tip 테두리 도착 접선(바깥 법선)
+            else:
+                bx, by = -ex, -ey                            # 시작과 평행하게 도착(부드러운 S)
             it._ctrl1 = QPointF(start.x() + ex * k, start.y() + ey * k)
-            it._ctrl2 = QPointF(tip.x() + back.x() * k, tip.y() + back.y() * k)
+            it._ctrl2 = QPointF(tip.x() + bx * k, tip.y() + by * k)
         it.update()
+        self.viewport().update()   # tip 마커 갱신
+
+    def _draw_snap_marker(self, painter, sp, s):
+        base = 5.0 / s
+        painter.setPen(QPen(QColor("white"), 1.5 / s))
+        painter.setBrush(QBrush(QColor(_BLUE)))
+        painter.drawEllipse(sp, base, base)
 
     def leaveEvent(self, event):
-        # 커서가 뷰를 벗어나면 연결점 표시·dwell 정리(잔상 방지).
-        self._cancel_conn_dwell()
-        if self._conn_item is not None:
-            self._conn_item, self._conn_pts, self._conn_hover_idx = None, [], -1
+        # 커서가 뷰를 벗어나면 스냅 예고 마커 정리(잔상 방지).
+        if self._snap_preview is not None:
+            self._snap_preview = None
             self.viewport().update()
         super().leaveEvent(event)
 
     def drawForeground(self, painter, rect):
         super().drawForeground(painter, rect)
-        if self._conn_item is None or self._conn_drawing or not self._owner.is_edit_mode():
+        if not self._owner.is_edit_mode():
             return
         s = self._view_scale()
-        base = 5.0 / s
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for i, (sp, _n) in enumerate(self._conn_pts):
-            hot = (i == self._conn_hover_idx)
-            painter.setPen(QPen(QColor("white"), (2.0 if hot else 1.0) / s))
-            painter.setBrush(QBrush(QColor(_BLUE)))
-            r = base * (1.4 if hot else 1.0)
-            painter.drawEllipse(sp, r, r)
+        if self._drawing and self._temp is not None:
+            # 그리는 중 — 스냅된 시작·tip에 마커
+            if self._arrow_snap_exit is not None:
+                self._draw_snap_marker(painter, self._start, s)
+            if self._arrow_tip_snap is not None:
+                self._draw_snap_marker(painter, self._arrow_tip_snap, s)
+        elif self._snap_preview is not None:
+            # 유휴 — 화살표 도구가 테두리 근처(스냅 발동 예고)
+            self._draw_snap_marker(painter, self._snap_preview, s)
 
     # ---- 줌 (휠) — 주석 위면 속성 변경, 아니면 owner의 hug-zoom(창이 이미지에 맞게) ----
     def wheelEvent(self, event):
@@ -1725,12 +1725,19 @@ class _AnnotatorView(QGraphicsView):
         # 안 그러면 끝점이 도형 연결점과 겹칠 때 매번 새 화살표가 생긴다.
         if self._over_selected_endpoint(event.position().toPoint()):
             return super().mousePressEvent(event)
-        # 테두리 연결점 위에서 press → 현재 도구와 무관하게 자동 S자 화살표 그리기 시작.
-        if self._conn_hover_idx >= 0 and self._conn_pts:
-            sp, ndir = self._conn_pts[self._conn_hover_idx]
-            self._begin_conn_arrow(sp, ndir)
-            return
         tool = self._owner.current_tool
+        # 화살표 도구 + 도형 테두리 근처 press → 테두리에 스냅된 곡선 화살표 시작(도형 선택/이동보다 우선).
+        if tool == "arrow":
+            snap = self._border_snap_at(event.position().toPoint())
+            if snap is not None:
+                owner = self._owner
+                it = _ArrowItem(owner.current_color, owner.current_width, owner.arrow_head_at_end)
+                self._start = snap[0]
+                self._arrow_snap_exit = snap[1]
+                self._arrow_tip_snap = None
+                it.set_points(self._start, self._start)
+                self._begin_draw(it)
+                return
         if tool == "select":
             # Qt 기본: 빈 영역 드래그 = 러버밴드 다중선택, 아이템 위 = 이동/선택.
             # 창 이동은 상단 코랄 드래그바로. (편집 모드 본문 pan은 제거)
@@ -1765,6 +1772,8 @@ class _AnnotatorView(QGraphicsView):
         elif tool == "arrow":
             it = _ArrowItem(owner.current_color, owner.current_width, owner.arrow_head_at_end)
             it.set_points(sp, sp)
+            self._arrow_snap_exit = None   # 자유 시작(테두리 스냅 아님) → 직선/자유 곡선
+            self._arrow_tip_snap = None
             self._begin_draw(it)
         elif tool == "pen":
             self._path = QPainterPath(sp)
@@ -1802,10 +1811,8 @@ class _AnnotatorView(QGraphicsView):
         self.scene().addItem(item)
         self._temp = item
         self._drawing = True
-        self._cancel_conn_dwell()
-        if self._conn_item is not None:  # 그리기 시작하면 연결점 표시 정리
-            self._conn_item, self._conn_pts, self._conn_hover_idx = None, [], -1
-            self.viewport().update()
+        self._snap_preview = None   # 그리기 시작 → 유휴 스냅 예고 마커 정리
+        self.viewport().update()
 
     def _update_hover_cursor(self, view_pos):
         """편집 모드 hover 커서: 주석 위=이동, 도형 도구+빈영역=십자, select+빈영역=손바닥."""
@@ -1813,8 +1820,8 @@ class _AnnotatorView(QGraphicsView):
         tool = self._owner.current_tool
         if self._bend_handle_at(view_pos) is not None:
             vp.setCursor(Qt.CursorShape.PointingHandCursor)  # 곡선 조절 손잡이(이동과 구분)
-        elif self._conn_hover_idx >= 0:
-            vp.setCursor(Qt.CursorShape.CrossCursor)          # 연결점 — 화살표 뽑기
+        elif tool == "arrow" and self._snap_preview is not None:
+            vp.setCursor(Qt.CursorShape.CrossCursor)          # 테두리 스냅 — 화살표 시작(도형 위여도)
         elif tool == "pen":
             vp.setCursor(Qt.CursorShape.CrossCursor)         # 펜 — 주석 위에서도 항상 그리기
         elif not self._is_empty_area(view_pos):
@@ -1837,30 +1844,23 @@ class _AnnotatorView(QGraphicsView):
                 self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
             return
         if not (event.buttons() & Qt.MouseButton.LeftButton):
-            self._update_conn_hover(event.position().toPoint())
+            self._update_snap_preview(event.position().toPoint())
             self._update_hover_cursor(event.position().toPoint())
-        if self._conn_drawing and self._temp is not None:
-            self._update_conn_arrow(event.position().toPoint())
-            return
         if self._drawing and self._temp is not None:
-            sp = self._cur_point(event)
             tool = self._owner.current_tool
+            if tool == "arrow":
+                self._update_arrow_draw(event)   # 테두리 스냅 + 자동 S자
+                return
+            sp = self._cur_point(event)
             if tool in ("rect", "ellipse"):
                 self._temp.setRect(QRectF(self._start, sp).normalized())
             elif tool == "line":
                 self._temp.setLine(QLineF(self._start, sp))
-            elif tool == "arrow":
-                self._temp.set_points(self._start, sp)
             elif tool == "pen" and self._path is not None:
                 self._path.lineTo(sp)
                 self._temp.setPath(self._path)
             return
         super().mouseMoveEvent(event)
-        # 아이템 이동(좌드래그) 중엔 hover 재계산을 건너뛰므로(위 1707행) 캐시된 연결점이
-        # 옛 위치에 남아 도형을 못 따라온다. 움직인 도형에서 실시간 재계산해 함께 따라오게 한다.
-        if (event.buttons() & Qt.MouseButton.LeftButton) and self._conn_item is not None:
-            self._conn_pts = _shape_conn_points(self._conn_item)
-            self.viewport().update()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:
@@ -1873,17 +1873,17 @@ class _AnnotatorView(QGraphicsView):
         if self._drawing and self._temp is not None:
             item = self._temp
             tool = self._owner.current_tool
-            conn = self._conn_drawing
             self._drawing = False
             self._temp = None
             self._path = None
-            self._conn_drawing = False
+            self._arrow_snap_exit = None
+            self._arrow_tip_snap = None
+            self.viewport().update()   # 스냅 마커 지우기
             # 드래그 없이 클릭만 한 경우 폐기. boundingRect는 펜 두께·화살촉만큼
             # 부풀어 클릭 판정에 못 쓰므로(특히 화살표), 시작점→놓은 점 이동량으로 본다.
             release = self.mapToScene(event.position().toPoint())
             moved = max(abs(release.x() - self._start.x()), abs(release.y() - self._start.y()))
-            # 연결점 화살표는 도구가 select여도 이동량 기준으로 폐기(클릭만이면 무효).
-            discard = moved < 4 if conn else (tool in _SHAPE_TOOLS and moved < 4)
+            discard = tool in _SHAPE_TOOLS and moved < 4
             if discard:
                 self.scene().removeItem(item)  # 클릭만 한 경우 폐기
                 self.scene().clearSelection()  # 빈 공간 클릭 = 선택 해제
@@ -1896,7 +1896,7 @@ class _AnnotatorView(QGraphicsView):
                 # 방금 그린 주석을 바로 선택 — 추가 클릭 없이 이동/색·두께 수정 가능.
                 # 단 펜은 연속 그리기라 선택 네모가 거슬리므로 선택하지 않는다.
                 self.scene().clearSelection()
-                if conn or tool != "pen":
+                if tool != "pen":
                     item.setSelected(True)
             return
         self._commit_move()   # 드래그 이동이 있었으면 undo에 기록
@@ -1966,7 +1966,7 @@ class _AnnotatorView(QGraphicsView):
             if (mods & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_V:
                 self._owner.paste_selection()
                 return
-            if mods == Qt.KeyboardModifier.NoModifier and key in self._SHORTCUTS:
+            if mods == Qt.KeyboardModifier.AltModifier and key in self._SHORTCUTS:
                 self._owner.set_tool(self._SHORTCUTS[key])
                 return
             if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
