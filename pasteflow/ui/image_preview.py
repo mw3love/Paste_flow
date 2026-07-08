@@ -8,8 +8,8 @@
 - 편집 모드: 툴바·액션바 표시, 그리기/선택/크기조절, 창 이동은 상단 핸들로만. ESC = 편집 종료.
 """
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGraphicsScene, QGraphicsView, QFrame,
-    QMenu, QLabel, QApplication, QToolButton,
+    QWidget, QVBoxLayout, QGraphicsScene, QGraphicsView, QFrame,
+    QMenu, QApplication, QToolButton,
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, QSize, QEvent, pyqtSignal
 
@@ -19,7 +19,7 @@ from pasteflow.ui.theme import (
 )
 from pasteflow.models import ClipboardItem
 from pasteflow.ui.image_annotator import (
-    _EditorMixin, _AnnotatorView, _DragBar, _pixmap_from_data, _tool_icon,
+    _EditorMixin, _AnnotatorView, _pixmap_from_data, _tool_icon,
     flatten_scene_to_png,
 )
 
@@ -176,54 +176,42 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # chrome(타이틀바+툴바)은 레이아웃이 아니라 이미지 위에 '떠 있는' 자식 컨테이너로 둔다.
+        # chrome(툴바)은 레이아웃이 아니라 이미지 아래에 '떠 있는' 자식 컨테이너로 둔다.
         # 편집 토글 시 보이기/숨기기만 하므로 창 크기·위치가 안 바뀌고(= 잔상 0), 이미지도 안
-        # 움직인다. 대신 편집 중에는 툴바가 이미지 상단 일부를 덮는다(CleanShot/Snipaste식).
+        # 움직인다. Snipaste식으로 툴바는 이미지 하단 예약 strip에 뜬다. 타이틀바(드래그 핸들)는
+        # 없앴다 — 창 이동은 휠(가운데)클릭 드래그가 담당(_AnnotatorView), 닫기는 우상단 floating.
         self._chrome = QWidget(self)
         self._chrome.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         chrome_l = QVBoxLayout(self._chrome)
         chrome_l.setContentsMargins(0, 0, 0, 0)
         chrome_l.setSpacing(0)
 
-        # 상단 드래그 핸들 (편집 모드 창 이동) — 배경색은 활성/비활성(파랑/코랄)과 통일.
-        # 제목은 굵게, 단축키 힌트는 작은 secondary 색, 우측에 닫기 버튼.
-        self._dragbar = _DragBar(self)
-        self._dragbar.setObjectName("dragbar")
-        bar_l = QHBoxLayout(self._dragbar)
-        bar_l.setContentsMargins(10, 0, 6, 0)
-        bar_l.setSpacing(8)
-        title = QLabel("주석 편집")
-        title.setObjectName("title")
-        bar_l.addWidget(title)
-        hint = QLabel("드래그 이동 · Space 토글 · ESC 종료")
-        hint.setObjectName("hint")
-        bar_l.addWidget(hint)
-        bar_l.addStretch(1)
-        close_btn = QToolButton()
-        close_btn.setObjectName("titleclose")
-        close_btn.setIcon(_tool_icon("close", neutral_override=_BG))  # 밝은 바 위 어두운 X
-        close_btn.setIconSize(QSize(18, 18))
-        close_btn.setToolTip("닫기 (ESC)")
-        close_btn.clicked.connect(self.close)
-        bar_l.addWidget(close_btn)
-        chrome_l.addWidget(self._dragbar)
-
         # 툴바
         self._toolbar_host = QWidget()
         self._toolbar_host.setLayout(self._build_toolbar())
         chrome_l.addWidget(self._toolbar_host)
 
+        # 닫기 ✕ — 이미지 우상단 안쪽 floating(편집 모드에서만 표시). 반투명 검정 원 위 흰 X.
+        self._edit_close_btn = QToolButton(self)
+        self._edit_close_btn.setObjectName("editclose")
+        self._edit_close_btn.setIcon(_tool_icon("close", neutral_override="#ffffff"))
+        self._edit_close_btn.setIconSize(QSize(16, 16))
+        self._edit_close_btn.setFixedSize(26, 26)
+        self._edit_close_btn.setToolTip("닫기 (ESC)")
+        self._edit_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._edit_close_btn.clicked.connect(self.close)
+        self._edit_close_btn.setVisible(False)
+
         # 이미지 뷰 — 레이아웃의 유일한 위젯이라 창이 이미지에 딱 맞는다(hug). chrome은 떠 있어
         # 레이아웃에 영향을 주지 않으므로, 편집 토글로 창 높이가 바뀌지 않는다.
         root.addWidget(self._view, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
-        # 완료 버튼(복사/저장/닫기)은 툴바 오른쪽에 합쳐졌으므로 별도 액션바 없음
         self._chrome.setVisible(False)  # 뷰어 모드 시작
-        # 상단 strip(=chrome 높이)을 항상 예약(top 마진) — 이미지는 그 아래에 배치되고,
+        # 하단 strip(=chrome 높이)을 항상 예약(bottom 마진) — 이미지는 창 상단에 배치되고,
         # 빈 strip은 투명(WA_TranslucentBackground)이라 뷰어 모드에선 안 보인다. 편집 토글로
         # 창 크기·위치가 안 바뀌어 잔상이 없고, 툴바는 strip 안에 떠서 이미지를 덮지 않는다.
         self._chrome_h = self._chrome.sizeHint().height()
-        root.setContentsMargins(0, self._chrome_h, 0, 0)
+        root.setContentsMargins(0, 0, 0, self._chrome_h)
 
     # ------------------------------------------------------------------
     # 표시 + hug-zoom
@@ -252,10 +240,8 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         self._apply_zoom(z0)
 
         if screen:
-            # 창 상단엔 투명 strip(chrome_h)이 있으므로, 그만큼 창을 위로 올려 '이미지'가
-            # 의도한 위치(패널/커서 근처)에 오게 한다.
+            # 이미지가 창 좌상단에 오고 투명 strip은 하단이라, 창 위치 = 이미지 위치.
             pos = compute_preview_pos(panel_geom, self.size(), screen, cascade_offset)
-            pos.setY(max(screen.availableGeometry().top(), pos.y() - self._chrome_h))
             self.move(pos)
         self.show()
         self.raise_()
@@ -266,14 +252,14 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         """캡처한 논리 전역 사각형(place_rect)에 이미지를 1:1로 정확히 덮어 띄운다(핀 제자리).
 
         줌은 픽맵 픽셀→place_rect 논리폭 비율로 잡아 DPI 배율과 무관하게 딱 맞춘다. 이미지는
-        상단 투명 strip(_chrome_h) 아래에 놓이므로 창을 그만큼 위로 올려 이미지 좌상단이
-        place_rect 좌상단에 오게 한다. 등장 시 테두리를 1회 반짝여 '떠 있는 핀'임을 알린다.
+        창 좌상단에 놓이고 투명 strip은 하단이라, 창 좌상단 = place_rect 좌상단이다.
+        등장 시 테두리를 1회 반짝여 '떠 있는 핀'임을 알린다.
         """
         sr = self._scene.sceneRect()
         z = place_rect.width() / sr.width() if sr.width() > 0 else 1.0
         self._apply_zoom(z)
-        # 이미지 좌상단 = 창 좌상단 + (0, _chrome_h) 이므로 창을 strip 높이만큼 위로.
-        self.move(place_rect.left(), place_rect.top() - self._chrome_h)
+        # 이미지 좌상단 = 창 좌상단이므로 place_rect 좌상단에 그대로 배치.
+        self.move(place_rect.left(), place_rect.top())
         self.show()
         self.raise_()
         self.activateWindow()
@@ -310,20 +296,30 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         vh = max(1, round(sr.height() * self._zoom))
         self._view.setFixedSize(vw, vh)
         self.adjustSize()  # 레이아웃 위젯은 뷰뿐 → 창이 이미지에 딱 맞는다(hug)
-        # 편집 중이면 떠 있는 chrome을 이미지 상단에 다시 배치(줌으로 폭이 바뀌었을 수 있음)
+        # 편집 중이면 떠 있는 chrome을 이미지 하단에 다시 배치(줌으로 크기가 바뀌었을 수 있음)
         if getattr(self, "_chrome", None) is not None and self._chrome.isVisible():
             self._layout_chrome()
+            self._layout_edit_close()
 
     def _layout_chrome(self):
-        """편집 모드에서 chrome(타이틀바+툴바)을 상단 예약 strip에 배치한다(이미지 위가 아님).
+        """편집 모드에서 chrome(툴바)을 하단 예약 strip에 배치한다(이미지 아래, Snipaste식).
         툴바가 이미지보다 넓으면 창 '폭만' 오른쪽으로 늘려 잘리지 않게 한다 — top-left를
         고정하고 높이는 그대로라, 이미지는 가로/세로 어느 쪽으로도 움직이지 않는다(잔상 없음).
         이미지가 툴바보다 넓은 일반적인 경우엔 창 크기 변화가 아예 없다."""
         win_w = max(self._view.width(), self._chrome.sizeHint().width())
         if self.width() != win_w:
             self.resize(win_w, self.height())  # 폭만, top-left 고정
-        self._chrome.setGeometry(0, 0, win_w, self._chrome_h)
+        self._chrome.setGeometry(0, self.height() - self._chrome_h, win_w, self._chrome_h)
         self._chrome.raise_()
+
+    def _layout_edit_close(self):
+        """닫기 ✕를 이미지(뷰) 우상단 안쪽에 배치. 이미지는 창 좌상단(0,0)에서 시작하므로
+        뷰 폭 기준으로 위치를 잡는다(툴바가 더 넓어 창이 늘어도 이미지 우상단에 고정)."""
+        btn = getattr(self, "_edit_close_btn", None)
+        if btn is None:
+            return
+        btn.move(self._view.width() - btn.width() - 8, 8)
+        btn.raise_()
 
     def _on_wheel_zoom(self, delta: int):
         factor = 1.15 if delta > 0 else 1 / 1.15
@@ -341,6 +337,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         # 겹쳐 배치(_layout_chrome), 종료 시 숨기고 창을 이미지에 다시 딱 맞춘다.
         self._edit_mode = not self._edit_mode
         self._chrome.setVisible(self._edit_mode)
+        self._edit_close_btn.setVisible(self._edit_mode)  # ✕는 편집 모드에서만
         if self._edit_mode:
             self.set_tool("select")  # RubberBandDrag
             self.activateWindow()
@@ -351,7 +348,8 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         self._update_text_opts_bar()      # 뷰어 전환 시 텍스트 옵션 바 숨김
         self._update_badge_size_stepper()  # 뷰어 전환 시 번호 크기 스테퍼 숨김
         if self._edit_mode:
-            self._layout_chrome()         # 이미지 상단에 겹쳐 배치(+필요 시 폭만 확장)
+            self._layout_chrome()         # 이미지 하단 strip에 배치(+필요 시 폭만 확장)
+            self._layout_edit_close()     # ✕를 이미지 우상단에 배치
         else:
             self._apply_zoom(self._zoom)  # 뷰어 복귀 — 창을 이미지에 다시 hug(폭 확장 되돌림)
         self._view.setFocus()

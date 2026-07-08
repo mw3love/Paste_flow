@@ -10,13 +10,14 @@ Shift: 정사각형/정원/45° 스냅. 선택 후 우하단 핸들 드래그로
 import io
 import math
 import struct
+import time
 
 from PyQt6.QtCore import (
     Qt, QPoint, QPointF, QRectF, QLineF, QSize, QBuffer, QIODevice, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QPainter, QPen, QBrush, QColor, QPainterPath,
-    QPainterPathStroker, QPolygonF, QFont, QIcon, QCursor,
+    QPainterPathStroker, QPolygonF, QFont, QIcon, QCursor, QConicalGradient,
 )
 from PyQt6.QtWidgets import (
     QWidget, QGraphicsScene, QGraphicsView, QGraphicsRectItem,
@@ -238,6 +239,31 @@ def _arrow_dir_icon(head_at_end: bool) -> QIcon:
         p.drawPolygon(QPolygonF([QPointF(21, 9), QPointF(15, 5), QPointF(15, 13)]))
     else:
         p.drawPolygon(QPolygonF([QPointF(3, 9), QPointF(9, 5), QPointF(9, 13)]))
+    p.end()
+    return QIcon(pm)
+
+
+def _rainbow_icon(current: QColor | None = None, size: int = 20) -> QIcon:
+    """무지개 색 버튼 아이콘 — 무지개 링 + 가운데 현재 색 점(팔레트 팝업 진입점)."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    g = QConicalGradient(size / 2, size / 2, 90)
+    for stop, hexs in (
+        (0.00, "#FF3B30"), (0.17, "#FF9500"), (0.34, "#FFCC00"),
+        (0.50, "#34C759"), (0.67, "#007AFF"), (0.84, "#AF52DE"),
+        (1.00, "#FF3B30"),
+    ):
+        g.setColorAt(stop, QColor(hexs))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(g)
+    p.drawEllipse(1, 1, size - 2, size - 2)
+    if current is not None:
+        r = size * 0.30
+        p.setBrush(QColor(current))
+        p.setPen(QPen(QColor("#FFFFFF"), 1.4))
+        p.drawEllipse(QPointF(size / 2, size / 2), r, r)
     p.end()
     return QIcon(pm)
 
@@ -848,7 +874,7 @@ class _WidthWheel(QWidget):
     def __init__(self, width: int):
         super().__init__()
         self._w = width
-        self.setFixedSize(62, 26)
+        self.setFixedSize(56, 22)
         self.setToolTip("두께 — 휠로 조절")
         self.setCursor(Qt.CursorShape.SizeVerCursor)
 
@@ -1263,6 +1289,20 @@ class _DragBar(QWidget):
         self._press = None
 
 
+class _ColorPalettePopup(QWidget):
+    """무지개 버튼 색 팔레트 팝업. 바깥 클릭 시 자동으로 닫히는 Qt.Popup이며,
+    닫힌 시각(hidden_at)을 기록해 '버튼 재클릭=토글 off'를 안정적으로 구현하게 한다
+    (팝업이 열린 상태로 버튼을 누르면 Popup이 먼저 닫히므로, 그 직후 재오픈을 막아야 함)."""
+
+    def __init__(self, parent):
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.hidden_at = 0.0
+
+    def hideEvent(self, event):
+        self.hidden_at = time.monotonic()
+        super().hideEvent(event)
+
+
 # ---------------------------------------------------------------------------
 # 편집기 다이얼로그
 # ---------------------------------------------------------------------------
@@ -1318,15 +1358,17 @@ class _EditorMixin:
     # ---- 툴바 / 액션바 (호스트가 배치) -------------------------------------
     def _build_toolbar(self) -> QHBoxLayout:
         tools = QHBoxLayout()
-        tools.setContentsMargins(8, 4, 8, 4)
-        tools.setSpacing(4)
+        tools.setContentsMargins(6, 2, 6, 2)
+        tools.setSpacing(3)
+
+        tools.addStretch(1)  # 여분 공간은 왼쪽으로 — 버튼들을 하단 바 우측으로 몰아 배치
 
         # 도구 (아이콘)
         group = QButtonGroup(self)
         group.setExclusive(True)
         for key, name, sc in _TOOLS:
             btn = QToolButton()
-            btn.setIconSize(QSize(22, 22))
+            btn.setIconSize(QSize(18, 18))
             btn.setCheckable(True)
             btn.setToolTip(f"{name} ({sc})")
             btn.clicked.connect(lambda _c, k=key: self.set_tool(k))
@@ -1337,38 +1379,22 @@ class _EditorMixin:
         # 되돌리기 — 도구 행 끝(번호 옆)
         undo_btn = QToolButton()
         undo_btn.setIcon(_tool_icon("undo"))
-        undo_btn.setIconSize(QSize(22, 22))
+        undo_btn.setIconSize(QSize(18, 18))
         undo_btn.setToolTip("되돌리기 (Ctrl+Z)")
         undo_btn.clicked.connect(self.undo)
         tools.addWidget(undo_btn)
 
         tools.addWidget(self._vsep())
 
-        # 색상: 프리셋 스와치(네모) + 스포이드 + 현재색(동그라미)
-        for hexs in _COLOR_PRESETS:
-            color = QColor(hexs)
-            btn = QToolButton()
-            btn.setObjectName("swatch")
-            btn.setFixedSize(20, 20)
-            btn.setCheckable(True)
-            btn.setToolTip(hexs)
-            btn.setStyleSheet(self._swatch_style(color, False))
-            btn.clicked.connect(lambda _c, cc=color: self._set_color(cc))
-            tools.addWidget(btn)
-            self._preset_buttons.append((color, btn))
-
-        self._eyedrop_btn = QToolButton()
-        self._eyedrop_btn.setIcon(_tool_icon("eyedrop"))
-        self._eyedrop_btn.setIconSize(QSize(22, 22))
-        self._eyedrop_btn.setToolTip("스포이드 — 화면에서 색 따오기 (클릭으로 선택, ESC 취소)")
-        self._eyedrop_btn.clicked.connect(self._start_eyedropper)
-        tools.addWidget(self._eyedrop_btn)
-
-        # 현재 색 — 동그라미(프리셋 네모와 구분), 스포이드 옆
-        self._color_box = QLabel()
-        self._color_box.setFixedSize(22, 22)
-        self._color_box.setToolTip("현재 색")
-        tools.addWidget(self._color_box)
+        # 색상: 무지개 버튼 1개 — 클릭하면 프리셋 7색 + 스포이드 팔레트 팝업(공간 절약).
+        # 현재 색은 무지개 버튼 가운데 점으로 표시한다.
+        self._color_palette = self._build_color_palette()
+        self._color_btn = QToolButton()
+        self._color_btn.setIcon(_rainbow_icon(self.current_color))
+        self._color_btn.setIconSize(QSize(20, 20))
+        self._color_btn.setToolTip("색 — 클릭하면 팔레트(프리셋·스포이드)")
+        self._color_btn.clicked.connect(self._show_color_palette)
+        tools.addWidget(self._color_btn)
 
         tools.addWidget(self._vsep())
 
@@ -1380,23 +1406,20 @@ class _EditorMixin:
         tools.addWidget(self._vsep())
 
         # 완료 액션 — 아이콘 버튼, 두께 옆 고정 (이미지 줌으로 창이 넓어져도 위치 불변).
-        # 복사/저장은 같은 중립색으로 통일(예전 복사 #primary 파랑은 '선택됨'처럼 보여 제거).
-        # 닫기는 상단 제목바로 이동(호스트가 배치).
+        # 복사/저장은 같은 중립색으로 통일. 닫기는 이미지 우상단 floating(호스트가 배치).
         copy_btn = QToolButton()
         copy_btn.setIcon(_tool_icon("copy"))
-        copy_btn.setIconSize(QSize(22, 22))
+        copy_btn.setIconSize(QSize(18, 18))
         copy_btn.setToolTip("복사 — 클립보드에 복사 (히스토리에도 새 항목으로 저장)")
         copy_btn.clicked.connect(self._do_copy)
         tools.addWidget(copy_btn)
 
         export_btn = QToolButton()
         export_btn.setIcon(_tool_icon("save"))
-        export_btn.setIconSize(QSize(22, 22))
+        export_btn.setIconSize(QSize(18, 18))
         export_btn.setToolTip("저장 — PNG 파일로 저장")
         export_btn.clicked.connect(self._do_export)
         tools.addWidget(export_btn)
-
-        tools.addStretch(1)  # 여분 공간은 오른쪽으로 — 버튼은 도구 옆에 고정
 
         # 화살표 방향 토글 — 평소 숨김, 화살표 도구 활성 시 화살표 버튼 아래 floating
         self._arrow_dir_btn = QToolButton(self)
@@ -1418,6 +1441,73 @@ class _EditorMixin:
         self._badge_size_stepper.changed.connect(lambda v: self._set_badge_size(v, from_stepper=True))
         self._badge_size_stepper.setVisible(False)
         return tools
+
+    # ---- 색 팔레트 팝업 (무지개 버튼 클릭 시) -------------------------------
+    def _build_color_palette(self) -> QWidget:
+        """프리셋 7색 + 스포이드를 담은 팝업. 무지개 버튼 클릭 시 아래에 뜨고,
+        Popup 플래그라 바깥을 클릭하면 자동으로 닫힌다."""
+        pal = _ColorPalettePopup(self)
+        pal.setObjectName("colorpalette")
+        pal.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        pal.setStyleSheet(
+            f"QWidget#colorpalette {{ background-color: {_SURFACE0};"
+            f" border: 1px solid {_BORDER}; border-radius: 6px; }}"
+            f"QToolButton {{ background-color: {_SURFACE0}; border: 1px solid {_BORDER};"
+            f" border-radius: 4px; padding: 2px; }}"
+            f"QToolButton:hover {{ background-color: {_SURFACE2}; }}"
+        )
+        row = QHBoxLayout(pal)
+        row.setContentsMargins(6, 6, 6, 6)
+        row.setSpacing(4)
+        for hexs in _COLOR_PRESETS:
+            color = QColor(hexs)
+            btn = QToolButton()
+            btn.setObjectName("swatch")
+            btn.setFixedSize(20, 20)
+            btn.setCheckable(True)
+            btn.setToolTip(hexs)
+            btn.setStyleSheet(self._swatch_style(color, False))
+            btn.clicked.connect(lambda _c, cc=color: self._pick_palette_color(cc))
+            row.addWidget(btn)
+            self._preset_buttons.append((color, btn))
+        self._eyedrop_btn = QToolButton()
+        self._eyedrop_btn.setIcon(_tool_icon("eyedrop"))
+        self._eyedrop_btn.setIconSize(QSize(18, 18))
+        self._eyedrop_btn.setToolTip("스포이드 — 화면에서 색 따오기 (클릭으로 선택, ESC 취소)")
+        self._eyedrop_btn.clicked.connect(self._pick_palette_eyedrop)
+        row.addWidget(self._eyedrop_btn)
+        pal.adjustSize()
+        return pal
+
+    def _show_color_palette(self):
+        # 토글: 열려 있으면 닫는다. 또한 팝업이 열린 상태에서 버튼을 누르면 Qt.Popup이
+        # 먼저 자동으로 닫히므로(hideEvent), 그 직후(<0.25s) 클릭은 재오픈하지 않아
+        # '한 번 더 누르면 사라진다'가 성립한다.
+        pal = self._color_palette
+        if pal.isVisible():
+            pal.hide()
+            return
+        if time.monotonic() - pal.hidden_at < 0.25:
+            return
+        pal.adjustSize()
+        pos = self._color_btn.mapToGlobal(QPoint(0, self._color_btn.height() + 4))
+        pal.move(pos)
+        pal.show()
+        pal.raise_()
+        pal.activateWindow()
+
+    def _pick_palette_color(self, color):
+        self._set_color(color)
+        self._color_palette.hide()
+
+    def _pick_palette_eyedrop(self):
+        self._color_palette.hide()
+        self._start_eyedropper()
+
+    def _update_color_btn(self):
+        btn = getattr(self, "_color_btn", None)
+        if btn is not None:
+            btn.setIcon(_rainbow_icon(self.current_color))
 
     def _build_text_opts_bar(self) -> QWidget:
         bar = QWidget(self)
@@ -1465,29 +1555,25 @@ class _EditorMixin:
 
     def _editor_stylesheet(self, view_border: str) -> str:
         """편집 UI 전체 스타일시트. view_border로 그래픽스뷰(이미지) 테두리 색을 바꿔
-        호스트가 활성/비활성 테두리(파랑=활성/주황=비활성)를 표현한다.
-        제목바는 고정 코랄 — 활성/비활성 신호는 이미지 테두리에만 두어 깜빡임을 줄인다."""
+        호스트가 활성/비활성 테두리(코랄=활성/회색=비활성)를 표현한다."""
         return f"""
             QWidget {{
                 background-color: {_BG};
                 color: {_TEXT};
                 font-size: 12px;
             }}
-            QWidget#dragbar {{ background-color: {_PEACH}; }}
-            QLabel#title {{ color: {_BG}; font-weight: bold; background: transparent; }}
-            QLabel#hint {{ color: {_SURFACE2}; background: transparent; }}
-            QToolButton#titleclose {{
-                background: transparent;
+            QToolButton#editclose {{
+                background-color: rgba(0, 0, 0, 0.45);
                 border: none;
-                border-radius: 4px;
-                padding: 2px;
+                border-radius: 13px;
+                padding: 3px;
             }}
-            QToolButton#titleclose:hover {{ background-color: rgba(0, 0, 0, 0.18); }}
+            QToolButton#editclose:hover {{ background-color: {_PEACH}; }}
             QToolButton {{
                 background-color: {_SURFACE0};
                 border: 1px solid {_BORDER};
                 border-radius: 4px;
-                padding: 3px;
+                padding: 2px;
             }}
             QToolButton:hover {{ background-color: {_SURFACE2}; }}
             QToolButton:checked {{
@@ -1629,11 +1715,8 @@ class _EditorMixin:
 
     def _set_color(self, color: QColor):
         self.current_color = QColor(color)
-        # 현재 색은 동그라미(border-radius=절반)로 프리셋 네모 스와치와 구분
-        self._color_box.setStyleSheet(
-            f"background-color: {self.current_color.name()};"
-            f" border: 2px solid {_SUBTEXT}; border-radius: 11px;"
-        )
+        # 현재 색은 무지개 버튼 가운데 점으로 표시(팔레트 팝업 진입점)
+        self._update_color_btn()
         name = self.current_color.name().lower()
         for c, btn in self._preset_buttons:
             sel = c.name().lower() == name
