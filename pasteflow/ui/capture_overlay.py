@@ -72,6 +72,7 @@ class _MONITORINFO(ctypes.Structure):
 # ── 최상위 창 열거(얼린 스냅용) ────────────────────────────────────────────────
 _GW_HWNDNEXT = 2
 _DWMWA_CLOAKED = 14  # DWM 클로킹(가상 데스크톱 밖·UWP 유령 창) 판별
+_DWMWA_EXTENDED_FRAME_BOUNDS = 9  # 비가시 리사이즈 테두리 제외한 '보이는' 창 경계(물리 픽셀)
 
 _user32.GetCursorPos.argtypes = [ctypes.POINTER(_POINT)]
 _user32.GetTopWindow.argtypes = [wintypes.HWND]
@@ -96,6 +97,22 @@ def _is_cloaked(hwnd) -> bool:
     return res == 0 and val.value != 0
 
 
+def _visible_rect(hwnd) -> _RECT | None:
+    """창의 '보이는' 물리 사각형. DWM 확장 프레임 경계를 우선 써 GetWindowRect가 포함하는
+    비가시 리사이즈 테두리(~8px)를 제외한다 — 이 테두리가 남으면 창 스냅이 옆 모니터로
+    삐져나가거나(코랄 넘침) 캡처 시 모니터 밖 빈공간이 검게 잡힌다. DWM 실패 시 GetWindowRect 폴백."""
+    r = _RECT()
+    hr = _dwmapi.DwmGetWindowAttribute(
+        hwnd, _DWMWA_EXTENDED_FRAME_BOUNDS, ctypes.byref(r), ctypes.sizeof(r))
+    if hr == 0 and r.right > r.left and r.bottom > r.top:
+        return r
+    r2 = _RECT()
+    if _user32.GetWindowRect(hwnd, ctypes.byref(r2)) \
+            and r2.right > r2.left and r2.bottom > r2.top:
+        return r2
+    return None
+
+
 def _enum_top_windows(exclude: set[int]) -> list[tuple[int, int, int, int, int]]:
     """보이는 최상위 창을 (hwnd, l, t, r, b) 물리 사각형으로 Z-order(위→아래) 순 반환.
 
@@ -113,9 +130,8 @@ def _enum_top_windows(exclude: set[int]) -> list[tuple[int, int, int, int, int]]
                     and _user32.IsWindowVisible(hwnd) \
                     and not _user32.IsIconic(hwnd) \
                     and not _is_cloaked(hwnd):
-                r = _RECT()
-                if _user32.GetWindowRect(hwnd, ctypes.byref(r)) \
-                        and r.right > r.left and r.bottom > r.top:
+                r = _visible_rect(hwnd)  # DWM 확장 프레임 우선(비가시 테두리 제외)
+                if r is not None:
                     out.append((int(hwnd), r.left, r.top, r.right, r.bottom))
         except Exception:
             pass
@@ -397,12 +413,18 @@ class CaptureOverlay:
         if hit is None:
             return None
         _hwnd, wl, wt, wr, wb = hit
+        win_rect = QRect(wl, wt, wr - wl, wb - wt)  # 얼려둔 창 사각형은 이미 DWM 확장프레임(비가시 테두리 제외)
         try:
             rect_phys = uia.rect_in_window_at(_hwnd, px, py)
         except Exception:
             rect_phys = None
         if rect_phys is None:
-            rect_phys = QRect(wl, wt, wr - wl, wb - wt)
+            rect_phys = win_rect  # 크롬 웹 본문 등 MSAA가 요소를 안 주는 영역 → 창 전체 스냅
+        else:
+            # 요소는 담긴 창보다 클 수 없다 — 오버사이즈 rect가 창 밖으로 삐져나가지 않게 클램프.
+            rect_phys = rect_phys.intersected(win_rect)
+            if rect_phys.isEmpty():
+                rect_phys = win_rect
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         if screen is None:
             return None
