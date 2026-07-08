@@ -16,7 +16,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QPainter, QPen, QBrush, QColor, QPainterPath,
-    QPolygonF, QFont, QIcon, QCursor,
+    QPainterPathStroker, QPolygonF, QFont, QIcon, QCursor,
 )
 from PyQt6.QtWidgets import (
     QWidget, QGraphicsScene, QGraphicsView, QGraphicsRectItem,
@@ -279,6 +279,7 @@ class _HandleResizeMixin:
     _HANDLE_MIN = 5.0    # 씬 단위 하한(항상 잡히게)
     _HANDLE_MAX = 12.0   # 씬 단위 상한
     _ROT_GAP = 14.0  # 도형 윗변 ~ 회전 원 사이 빈 줄기(씬 단위, 원 크기와 무관하게 일정)
+    _EDGE_HIT_MIN = 8.0  # 속 빈 도형 테두리 클릭 최소 히트폭(씬 단위) — 얇은 선도 잡히게
 
     def _handle_px(self) -> float:
         """핸들 한 변(로컬 단위). 주석 표시 크기에 비례 + [MIN,MAX] 클램프."""
@@ -497,6 +498,17 @@ class _RectItem(_HandleResizeMixin, QGraphicsRectItem):
         c.setBrush(QBrush(self.brush()))
         return self._copy_common_to(c)
 
+    def _base_shape(self):
+        # 속 빈 네모(NoBrush)는 '테두리 링'만 클릭 영역으로 — 내부를 통과시켜 네모 안에서
+        # 다른 주석을 잡거나 새 도형(화살표 등)을 그릴 수 있게. 채움이 있으면 기본대로 전체.
+        if self.brush().style() != Qt.BrushStyle.NoBrush:
+            return super()._base_shape()
+        path = QPainterPath()
+        path.addRect(self.rect())
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(self.pen().widthF(), self._EDGE_HIT_MIN / self._scale_or_1()))
+        return stroker.createStroke(path)
+
     def paint(self, painter, option, widget=None):
         self._paint_base_no_select(painter, option, widget)
         self._paint_handle(painter)
@@ -518,6 +530,17 @@ class _EllipseItem(_HandleResizeMixin, QGraphicsEllipseItem):
         # 0이 아니면 shape()를 호출하므로, 사각형 기하에서 직접 계산해 재귀를 끊는다.
         extra = self.pen().widthF() / 2.0 + 1.0
         return self.rect().adjusted(-extra, -extra, extra, extra)
+
+    def _base_shape(self):
+        # 속 빈 원(NoBrush)은 '테두리 링'만 클릭 영역으로(네모와 동일). QGraphicsEllipseItem
+        # 기본 shape()는 boundingRect()를 부르지 않고 rect에서 직접 만드므로 재귀 없음.
+        if self.brush().style() != Qt.BrushStyle.NoBrush:
+            return super()._base_shape()
+        path = QPainterPath()
+        path.addEllipse(self.rect())
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(self.pen().widthF(), self._EDGE_HIT_MIN / self._scale_or_1()))
+        return stroker.createStroke(path)
 
     def paint(self, painter, option, widget=None):
         self._paint_base_no_select(painter, option, widget)
