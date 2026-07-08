@@ -17,7 +17,8 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QPainter, QPen, QBrush, QColor, QPainterPath,
-    QPainterPathStroker, QPolygonF, QFont, QIcon, QCursor, QConicalGradient,
+    QPainterPathStroker, QPolygonF, QFont, QFontMetricsF, QIcon, QCursor,
+    QConicalGradient,
 )
 from PyQt6.QtWidgets import (
     QWidget, QGraphicsScene, QGraphicsView, QGraphicsRectItem,
@@ -794,6 +795,18 @@ class _TextItem(_HandleResizeMixin, QGraphicsTextItem):
         c.set_bg(self._bg)
         return self._copy_common_to(c)
 
+    def boundingRect(self):
+        # 편집 중(텍스트 입력)엔 회전 핸들 예약(우상단 여백)을 빼 Qt 편집 프레임이 글자에
+        # 딱 맞게 한다 — 안 그러면 핸들 자리만큼 점선 프레임이 위·우로 크게 벌어진다.
+        if self.textInteractionFlags() != Qt.TextInteractionFlag.NoTextInteraction:
+            return self._content_rect()
+        return super().boundingRect()
+
+    def setTextInteractionFlags(self, flags):
+        # 편집 진입/종료로 boundingRect가 바뀌므로 경계 캐시 갱신(프레임 잔상 방지).
+        self.prepareGeometryChange()
+        super().setTextInteractionFlags(flags)
+
     def focusOutEvent(self, event):
         self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         super().focusOutEvent(event)
@@ -801,7 +814,7 @@ class _TextItem(_HandleResizeMixin, QGraphicsTextItem):
         if not self.toPlainText().strip():
             QTimer.singleShot(0, self._discard_if_empty)
         else:
-            self.setSelected(True)  # 작성 완료한 텍스트를 바로 선택 — 추가 클릭 없이 이동/수정
+            self.setSelected(False)  # 완료(ESC/Ctrl+Enter) 후 점선 없이 글자만 — 재편집은 V 도구로
 
     def _discard_if_empty(self):
         if not self.toPlainText().strip() and self.scene() is not None:
@@ -866,48 +879,6 @@ class _ColorLoupe(QWidget):
         p.setPen(QColor(_TEXT))
         p.drawText(QRectF(0, 48, self.width(), 22),
                    Qt.AlignmentFlag.AlignCenter, self._hex)
-
-
-# ---------------------------------------------------------------------------
-# 두께 휠 — 숫자 + 실제 굵기 미리보기, 휠로 조절
-# ---------------------------------------------------------------------------
-
-class _WidthWheel(QWidget):
-    changed = pyqtSignal(int)
-
-    def __init__(self, width: int):
-        super().__init__()
-        self._w = width
-        self.setFixedSize(56, 22)
-        self.setToolTip("두께 — 휠로 조절")
-        self.setCursor(Qt.CursorShape.SizeVerCursor)
-
-    def set_width(self, width: int):
-        self._w = max(_MIN_WIDTH, min(int(width), _MAX_WIDTH))
-        self.update()
-
-    def wheelEvent(self, event):
-        if event.angleDelta().y() == 0:
-            return
-        self.set_width(self._w + (1 if event.angleDelta().y() > 0 else -1))
-        self.changed.emit(self._w)
-
-    def paintEvent(self, event):
-        # 밝은 툴바 pill에 맞춰 light 테마로 렌더(옅은 inset 배경 + 어두운 텍스트/선).
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor("#e9e9e9"))
-        p.setPen(QPen(QColor("#cfcfcf"), 1))
-        p.drawRect(0, 0, self.width() - 1, self.height() - 1)
-        p.setPen(QColor(_ICON_DARK))
-        f = QFont()
-        f.setPointSize(9)
-        p.setFont(f)
-        p.drawText(QRectF(5, 0, 22, self.height()),
-                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, str(self._w))
-        vis = min(self._w, 14)
-        p.setPen(QPen(QColor(_ICON_DARK), vis, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawLine(QPointF(28, self.height() / 2), QPointF(self.width() - 8, self.height() / 2))
 
 
 # ---------------------------------------------------------------------------
@@ -1017,11 +988,23 @@ class _AnnotatorView(QGraphicsView):
                 return False
         return True
 
-    # ---- 줌 (휠) — owner의 hug-zoom으로 위임 (창이 이미지에 맞게 리사이즈) ----
+    # ---- 줌 (휠) — 주석 위면 속성 변경, 아니면 owner의 hug-zoom(창이 이미지에 맞게) ----
     def wheelEvent(self, event):
-        if event.angleDelta().y() == 0:
+        dy = event.angleDelta().y()
+        if dy == 0:
             return
-        self._owner._on_wheel_zoom(event.angleDelta().y())
+        # 편집 모드에서 커서 아래에 주석이 있으면 줌 대신 그 주석 속성을 조절
+        # (도형=두께 / 텍스트·번호=크기). 없으면 기존대로 이미지 줌.
+        if self._owner.is_edit_mode():
+            bg = getattr(self._owner, "_bg_item", None)
+            for it in self.items(event.position().toPoint()):
+                if it is bg:
+                    continue
+                if it.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable:
+                    self._owner.adjust_item_property(it, 1 if dy > 0 else -1)
+                    event.accept()
+                    return
+        self._owner._on_wheel_zoom(dy)
 
     # ---- Shift 제약 적용 ---------------------------------------------------
     @staticmethod
@@ -1105,7 +1088,11 @@ class _AnnotatorView(QGraphicsView):
             it = _TextItem(owner.current_color)
             it.apply_font_size(owner.current_font_size)
             it.set_bg(owner.current_text_bg)
-            it.setPos(sp)
+            # I-beam(세로 막대 중심)이 클릭점 → 캐럿이 그 자리에 오도록 배치 보정.
+            # documentMargin만큼 왼쪽, 첫 줄 높이 절반만큼 위로 당긴다(안 하면 글자가 처져 보임).
+            margin = it.document().documentMargin()
+            line_h = QFontMetricsF(it.font()).height()
+            it.setPos(QPointF(sp.x() - margin, sp.y() - margin - line_h / 2))
             self.scene().addItem(it)
             owner.push_undo_add(it)
             it.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
@@ -1139,6 +1126,8 @@ class _AnnotatorView(QGraphicsView):
             vp.setCursor(Qt.CursorShape.SizeAllCursor)       # 주석 위 — 선택/이동
         elif tool == "select":
             vp.setCursor(Qt.CursorShape.ArrowCursor)         # 빈 영역 — 러버밴드 선택
+        elif tool == "text":
+            vp.setCursor(Qt.CursorShape.IBeamCursor)         # 텍스트 — 캐럿 위치 표시
         else:
             vp.setCursor(Qt.CursorShape.CrossCursor)         # 도형 그리기
 
@@ -1221,10 +1210,20 @@ class _AnnotatorView(QGraphicsView):
         )
         key = event.key()
         mods = event.modifiers()
+        if editing_text and key == Qt.Key.Key_Escape:
+            # 텍스트 편집 중 ESC = 편집기 닫기가 아니라 텍스트 완료(=Ctrl+Enter와 동일).
+            # clearFocus → focusOutEvent가 정리(빈 텍스트 폐기 / 비어있지 않으면 선택 해제).
+            fi.clearFocus()
+            return
         if not editing_text and key == Qt.Key.Key_Space:
             self._owner.toggle_edit_mode()
             return
         if not editing_text and key == Qt.Key.Key_Escape:
+            # 선택된 주석이 있으면 ESC는 선택(파란 점선)만 해제 — 편집기는 안 닫는다.
+            # 선택이 없을 때만 편집기 종료로 넘어간다(주석 → 뷰어 → 닫기 단계적 취소).
+            if self.scene().selectedItems():
+                self.scene().clearSelection()
+                return
             self._owner._on_escape()
             return
         if self._owner.is_edit_mode() and not editing_text:
@@ -1403,14 +1402,9 @@ class _EditorMixin:
 
         tools.addWidget(self._vsep())
 
-        # 두께 휠
-        self._width_wheel = _WidthWheel(self.current_width)
-        self._width_wheel.changed.connect(lambda w: self._set_width(w, from_wheel=True))
-        tools.addWidget(self._width_wheel)
+        # 두께 조절은 주석 위에서 휠로 대체(adjust_item_property) — 별도 두께 위젯 제거.
 
-        tools.addWidget(self._vsep())
-
-        # 완료 액션 — 아이콘 버튼, 두께 옆 고정 (이미지 줌으로 창이 넓어져도 위치 불변).
+        # 완료 액션 — 아이콘 버튼, 색 옆 고정 (이미지 줌으로 창이 넓어져도 위치 불변).
         # 복사/저장은 같은 중립색으로 통일. 닫기는 이미지 우상단 floating(호스트가 배치).
         copy_btn = QToolButton()
         copy_btn.setIcon(_tool_icon("copy", neutral_override=_ICON_DARK))
@@ -1632,6 +1626,7 @@ class _EditorMixin:
         # 도구 기본 커서 — hover 이벤트 전 stale 방지(주석 위 SizeAll은 다음 move에서 갱신)
         self._view.viewport().setCursor(
             Qt.CursorShape.ArrowCursor if tool == "select"
+            else Qt.CursorShape.IBeamCursor if tool == "text"
             else Qt.CursorShape.CrossCursor
         )
         # 선택 항목 repaint — 핸들이 선택(V) 도구에서만 보이므로 도구 전환 시 즉시 반영
@@ -1734,15 +1729,6 @@ class _EditorMixin:
             if hasattr(it, "apply_color"):
                 it.apply_color(self.current_color)
 
-    def _set_width(self, width: int, from_wheel: bool = False):
-        self.current_width = max(_MIN_WIDTH, min(int(width), _MAX_WIDTH))
-        if not from_wheel:
-            self._width_wheel.set_width(self.current_width)
-        # 선택된 도형이 있으면 그 두께도 즉시 변경
-        for it in self._scene.selectedItems():
-            if hasattr(it, "apply_width"):
-                it.apply_width(self.current_width)
-
     def _set_font_size(self, size: int, from_stepper: bool = False):
         self.current_font_size = max(_MIN_FONT, min(int(size), _MAX_FONT))
         if not from_stepper:
@@ -1767,6 +1753,31 @@ class _EditorMixin:
         for it in self._scene.selectedItems():
             if isinstance(it, _BadgeItem):
                 it.setScale(scale)
+
+    def adjust_item_property(self, item, step: int):
+        """주석 위 휠 — 도형은 두께(±1), 텍스트·번호는 크기(±2)를 step 방향으로 조절.
+        조절값을 도구 기본값·툴바에도 반영해 다음에 그리는 주석도 같은 두께·크기가 되게 한다
+        (undo는 색·두께 변경과 동일하게 미추적)."""
+        if isinstance(item, _TextItem):
+            new = max(_MIN_FONT, min(item.font().pointSize() + step * 2, _MAX_FONT))
+            item.apply_font_size(new)
+            self.current_font_size = new
+            self._font_size_stepper.set_value(new)
+        elif isinstance(item, _BadgeItem):
+            cur = round(item.scale() * _DEFAULT_BADGE)
+            new = max(_MIN_BADGE, min(cur + step * 2, _MAX_BADGE))
+            item.setScale(new / float(_DEFAULT_BADGE))
+            self.current_badge_size = new
+            self._badge_size_stepper.set_value(new)
+        else:
+            if isinstance(item, _ArrowItem):
+                new = max(_MIN_WIDTH, min(item._width + step, _MAX_WIDTH))
+            elif hasattr(item, "apply_width") and hasattr(item, "pen"):
+                new = max(_MIN_WIDTH, min(int(round(item.pen().widthF())) + step, _MAX_WIDTH))
+            else:
+                return
+            item.apply_width(new)
+            self.current_width = new
 
     def _toggle_arrow_dir(self):
         self.arrow_head_at_end = not self.arrow_head_at_end
