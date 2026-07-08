@@ -29,6 +29,19 @@ _PREVIEW_MARGIN = 8
 _CASCADE_STEP = 24
 _CASCADE_NEAR = 150  # 이 거리(px) 안에 있는 기존 창만 cascade 대상으로 셈
 
+# 팝업 본체·chrome strip은 투명(뒤 비침), 툴바만 Snipaste식 밝은 pill로 띄운다.
+# 공유 스타일시트의 `QWidget{background:_BG}`(검정)가 이것들까지 덮으므로 ID 선택자로 되돌린다.
+# 툴바(toolbarhost)는 밝은 바 + 어두운 아이콘(플랫 버튼) — 활성 도구만 옅은 파랑으로 강조.
+_CHROME_QSS = (
+    "\nQWidget#previewroot, QWidget#previewchrome { background: transparent; }"
+    "\nQWidget#toolbarhost {"
+    " background-color: #f4f4f4; border: 1px solid #cfcfcf; border-radius: 8px; }"
+    "\nQWidget#toolbarhost QToolButton {"
+    " background-color: transparent; border: none; border-radius: 5px; padding: 3px; }"
+    "\nQWidget#toolbarhost QToolButton:hover { background-color: #e2e2e2; }"
+    "\nQWidget#toolbarhost QToolButton:checked { background-color: #cfe3ff; }"
+)
+
 
 def compute_preview_pos(
     panel_geom: QRect,
@@ -181,15 +194,18 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         # 움직인다. Snipaste식으로 툴바는 이미지 하단 예약 strip에 뜬다. 타이틀바(드래그 핸들)는
         # 없앴다 — 창 이동은 휠(가운데)클릭 드래그가 담당(_AnnotatorView), 닫기는 우상단 floating.
         self._chrome = QWidget(self)
+        self._chrome.setObjectName("previewchrome")
         self._chrome.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         chrome_l = QVBoxLayout(self._chrome)
-        chrome_l.setContentsMargins(0, 0, 0, 0)
+        # 여백을 줘서 밝은 pill이 strip 안에 '떠 있게'(우측·상하 gap) 배치.
+        chrome_l.setContentsMargins(0, 4, 6, 4)
         chrome_l.setSpacing(0)
 
-        # 툴바
+        # 툴바 — AlignRight로 내용에 딱 맞는 compact pill을 우측에 띄운다(full-width 바 아님).
         self._toolbar_host = QWidget()
+        self._toolbar_host.setObjectName("toolbarhost")
         self._toolbar_host.setLayout(self._build_toolbar())
-        chrome_l.addWidget(self._toolbar_host)
+        chrome_l.addWidget(self._toolbar_host, 0, Qt.AlignmentFlag.AlignRight)
 
         # 닫기 ✕ — 이미지 우상단 안쪽 floating(편집 모드에서만 표시). 반투명 검정 원 위 흰 X.
         self._edit_close_btn = QToolButton(self)
@@ -275,7 +291,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         self._flashing = True
         self.setStyleSheet(
             self._editor_stylesheet("#ffffff")
-            + "\nQWidget#previewroot { background: transparent; }"
+            + _CHROME_QSS
         )
         QTimer.singleShot(160, self._end_flash)
 
@@ -433,11 +449,10 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
     # ------------------------------------------------------------------
     def _apply_active_style(self, active: bool):
         # 활성(보고 있는 창) = 코랄(주인공), 비활성 = 중립 회색(존재만 표시, 안 튐).
-        # 공유 스타일시트의 `QWidget{background:_BG}`가 팝업 자신에도 적용돼 투명 strip을 덮으므로,
-        # ID 선택자로 팝업 본체 배경만 투명으로 되돌린다(자식 chrome·뷰 배경은 그대로 불투명).
+        # 팝업 본체는 투명(뒤 비침), 툴바는 밝은 pill로 재지정한다(_CHROME_QSS — 아래 append).
         self.setStyleSheet(
             self._editor_stylesheet(_PEACH if active else _SURFACE2)
-            + "\nQWidget#previewroot { background: transparent; }"
+            + _CHROME_QSS
         )
 
     def changeEvent(self, event):

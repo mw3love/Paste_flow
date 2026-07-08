@@ -45,6 +45,10 @@ _COLOR_PRESETS = [
 ]
 _DEFAULT_COLOR = _COLOR_PRESETS[0]
 
+# 밝은 툴바(Snipaste식 pill) 위 중립 아이콘 색 — 어두운 회색(선택·되돌리기·복사·저장).
+# 그리기 도구 아이콘은 current_color(색)로 칠해져 밝은 바에서도 보인다.
+_ICON_DARK = "#3a3a3a"
+
 # 그리기 도구가 만드는 도형(릴리스 시 너무 작으면 폐기 대상)
 _SHAPE_TOOLS = ("rect", "ellipse", "line", "arrow")
 # 현재 색으로 아이콘을 칠하는 도구(나머지는 중립색)
@@ -889,19 +893,20 @@ class _WidthWheel(QWidget):
         self.changed.emit(self._w)
 
     def paintEvent(self, event):
+        # 밝은 툴바 pill에 맞춰 light 테마로 렌더(옅은 inset 배경 + 어두운 텍스트/선).
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor(_SURFACE0))
-        p.setPen(QPen(QColor(_BORDER), 1))
+        p.fillRect(self.rect(), QColor("#e9e9e9"))
+        p.setPen(QPen(QColor("#cfcfcf"), 1))
         p.drawRect(0, 0, self.width() - 1, self.height() - 1)
-        p.setPen(QColor(_TEXT))
+        p.setPen(QColor(_ICON_DARK))
         f = QFont()
         f.setPointSize(9)
         p.setFont(f)
         p.drawText(QRectF(5, 0, 22, self.height()),
                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, str(self._w))
         vis = min(self._w, 14)
-        p.setPen(QPen(QColor(_TEXT), vis, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(QPen(QColor(_ICON_DARK), vis, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawLine(QPointF(28, self.height() / 2), QPointF(self.width() - 8, self.height() / 2))
 
 
@@ -1361,7 +1366,7 @@ class _EditorMixin:
         tools.setContentsMargins(6, 2, 6, 2)
         tools.setSpacing(3)
 
-        tools.addStretch(1)  # 여분 공간은 왼쪽으로 — 버튼들을 하단 바 우측으로 몰아 배치
+        # 우측 배치는 호스트(chrome_l AlignRight)가 담당 — pill이 내용에 딱 맞게 hug하도록 stretch 없음.
 
         # 도구 (아이콘)
         group = QButtonGroup(self)
@@ -1378,7 +1383,7 @@ class _EditorMixin:
 
         # 되돌리기 — 도구 행 끝(번호 옆)
         undo_btn = QToolButton()
-        undo_btn.setIcon(_tool_icon("undo"))
+        undo_btn.setIcon(_tool_icon("undo", neutral_override=_ICON_DARK))
         undo_btn.setIconSize(QSize(18, 18))
         undo_btn.setToolTip("되돌리기 (Ctrl+Z)")
         undo_btn.clicked.connect(self.undo)
@@ -1408,14 +1413,14 @@ class _EditorMixin:
         # 완료 액션 — 아이콘 버튼, 두께 옆 고정 (이미지 줌으로 창이 넓어져도 위치 불변).
         # 복사/저장은 같은 중립색으로 통일. 닫기는 이미지 우상단 floating(호스트가 배치).
         copy_btn = QToolButton()
-        copy_btn.setIcon(_tool_icon("copy"))
+        copy_btn.setIcon(_tool_icon("copy", neutral_override=_ICON_DARK))
         copy_btn.setIconSize(QSize(18, 18))
         copy_btn.setToolTip("복사 — 클립보드에 복사 (히스토리에도 새 항목으로 저장)")
         copy_btn.clicked.connect(self._do_copy)
         tools.addWidget(copy_btn)
 
         export_btn = QToolButton()
-        export_btn.setIcon(_tool_icon("save"))
+        export_btn.setIcon(_tool_icon("save", neutral_override=_ICON_DARK))
         export_btn.setIconSize(QSize(18, 18))
         export_btn.setToolTip("저장 — PNG 파일로 저장")
         export_btn.clicked.connect(self._do_export)
@@ -1544,7 +1549,8 @@ class _EditorMixin:
     def _vsep(self) -> QLabel:
         sep = QLabel()
         sep.setFixedWidth(1)
-        sep.setStyleSheet(f"background-color: {_BORDER};")
+        # 밝은 툴바 pill 위 구분선 — 옅은 회색(어두운 _BORDER는 밝은 바에서 너무 튐).
+        sep.setStyleSheet("background-color: #d0d0d0;")
         return sep
 
     @staticmethod
@@ -1711,7 +1717,7 @@ class _EditorMixin:
 
     def _refresh_tool_icons(self):
         for key, btn in self._tool_buttons.items():
-            btn.setIcon(_tool_icon(key, self.current_color))
+            btn.setIcon(_tool_icon(key, self.current_color, neutral_override=_ICON_DARK))
 
     def _set_color(self, color: QColor):
         self.current_color = QColor(color)
