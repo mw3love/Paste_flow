@@ -622,6 +622,45 @@ class _PathItem(_HandleResizeMixin, QGraphicsPathItem):
         self._paint_handle(painter)
 
 
+def _cubic_axis_extrema(p0: float, c1: float, c2: float, p3: float):
+    """한 축(x 또는 y)에서 3차 베지어가 극값을 갖는 t(∈[0,1])들을 반환.
+    B'(t)=0 → A t² + B t + C = 0 (A=−p0+3c1−3c2+p3의 미분 계수). 근만 반환(끝점 0·1은 콜러가 포함)."""
+    a = c1 - p0
+    b = c2 - c1
+    c = p3 - c2
+    A = a - 2 * b + c
+    B = 2 * (b - a)
+    C = a
+    ts = []
+    if abs(A) < 1e-9:
+        if abs(B) > 1e-9:
+            ts.append(-C / B)
+    else:
+        disc = B * B - 4 * A * C
+        if disc >= 0:
+            sq = math.sqrt(disc)
+            ts.append((-B + sq) / (2 * A))
+            ts.append((-B - sq) / (2 * A))
+    return [t for t in ts if 0.0 < t < 1.0]
+
+
+def _cubic_bezier_bbox(p1: QPointF, c1: QPointF, c2: QPointF, p2: QPointF) -> QRectF:
+    """3차 베지어 곡선의 '타이트한' 경계 사각형(제어점 볼록껍질이 아니라 곡선이 실제로 지나는 범위).
+    각 축에서 극값 t + 끝점(0·1)의 곡선 좌표를 모아 min/max."""
+    def eval_at(t, a, b, cc, d):
+        mt = 1.0 - t
+        return (mt * mt * mt * a + 3 * mt * mt * t * b
+                + 3 * mt * t * t * cc + t * t * t * d)
+
+    xs = [p1.x(), p2.x()]
+    ys = [p1.y(), p2.y()]
+    for t in _cubic_axis_extrema(p1.x(), c1.x(), c2.x(), p2.x()):
+        xs.append(eval_at(t, p1.x(), c1.x(), c2.x(), p2.x()))
+    for t in _cubic_axis_extrema(p1.y(), c1.y(), c2.y(), p2.y()):
+        ys.append(eval_at(t, p1.y(), c1.y(), c2.y(), p2.y()))
+    return QRectF(QPointF(min(xs), min(ys)), QPointF(max(xs), max(ys)))
+
+
 class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
     """선 + 끝점 삼각형 화살촉. 머리 방향(head_at_end) 선택 가능."""
 
@@ -726,23 +765,63 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
             return False
         return self._owner_tool() in (None, "select", "arrow")
 
+    def _tip_and_angle(self):
+        """화살촉이 놓이는 tip 점과 그 지점의 진행 방향 각도(paint와 동일 규칙)."""
+        tail, tip = (self._p1, self._p2) if self._head_at_end else (self._p2, self._p1)
+        if self._ctrl1 is None:
+            length = math.hypot(tip.x() - tail.x(), tip.y() - tail.y())
+            angle = math.atan2(tip.y() - tail.y(), tip.x() - tail.x()) if length > 1e-6 else 0.0
+        else:
+            C2, P3 = (self._ctrl2, self._p2) if self._head_at_end else (self._ctrl1, self._p1)
+            angle = math.atan2(P3.y() - C2.y(), P3.x() - C2.x())
+        return tip, angle
+
+    def _head_points(self):
+        """화살촉 삼각형 세 꼭짓점(tip + 뒤쪽 두 점)."""
+        tip, angle = self._tip_and_angle()
+        size = max(14, self._width * 3)
+        a1 = angle + math.radians(150)
+        a2 = angle - math.radians(150)
+        return [
+            QPointF(tip),
+            QPointF(tip.x() + size * math.cos(a1), tip.y() + size * math.sin(a1)),
+            QPointF(tip.x() + size * math.cos(a2), tip.y() + size * math.sin(a2)),
+        ]
+
     def _content_rect(self) -> QRectF:
-        extra = self._width + max(14, self._width * 3) + 4
         if self._ctrl1 is None:
             r = QRectF(self._p1, self._p2).normalized()
         else:
-            # 곡선은 네 점(p1·c1·c2·p2)의 볼록껍질 안에 있으므로 네 점을 감싸면 안전한 상계.
-            xs = (self._p1.x(), self._p2.x(), self._ctrl1.x(), self._ctrl2.x())
-            ys = (self._p1.y(), self._p2.y(), self._ctrl1.y(), self._ctrl2.y())
-            r = QRectF(QPointF(min(xs), min(ys)), QPointF(max(xs), max(ys)))
-        return r.adjusted(-extra, -extra, extra, extra)
+            # 곡선이 '실제로 지나는' 타이트 경계(제어점 볼록껍질은 S자에서 과도하게 넓어짐).
+            r = _cubic_bezier_bbox(self._p1, self._ctrl1, self._ctrl2, self._p2)
+        # 선 몸통은 획 반폭만 여유(둥근 캡), 화살촉은 tip에만 튀어나오므로 삼각형 꼭짓점만 합친다
+        # (옛 방식은 화살촉 크기를 네 변 모두에 더해 박스가 곡선보다 과하게 넓었음).
+        stroke = self._width / 2.0 + 2
+        r = r.adjusted(-stroke, -stroke, stroke, stroke)
+        hx = [p.x() for p in self._head_points()]
+        hy = [p.y() for p in self._head_points()]
+        head_r = QRectF(QPointF(min(hx), min(hy)), QPointF(max(hx), max(hy)))
+        return r.united(head_r.adjusted(-2, -2, 2, 2))
 
     def _base_shape(self):
-        # QGraphicsItem 기본 shape는 boundingRect(회전 여유 포함) 기반 → content로 한정해
-        # 화살표 위쪽 빈 공간이 클릭 영역에 새지 않게 한다.
-        p = QPainterPath()
-        p.addRect(self._content_rect())
-        return p
+        # 클릭/hit 영역은 '실제 선+화살촉'만 감싼다(박스 전체가 아니라). 그래야 곡선 안쪽
+        # 빈/오목 공간이 _is_empty_area에서 '비어 있음'으로 잡혀 거기에 새 주석을 그릴 수 있다.
+        body = QPainterPath()
+        body.moveTo(self._p1)
+        if self._ctrl1 is None:
+            body.lineTo(self._p2)
+        else:
+            body.cubicTo(self._ctrl1, self._ctrl2, self._p2)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(self._width, 10) + 4)   # 잡기 쉬운 폭
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        shape = stroker.createStroke(body)
+        shape.addPolygon(QPolygonF(self._head_points()))
+        if self._bend_active():   # 초록 bend 핸들도 잡을 수 있게
+            for which in (1, 2):
+                shape.addEllipse(self._bend_handle_rect(which))
+        return shape
 
     def paint(self, painter, option, widget=None):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -758,7 +837,6 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         if self._ctrl1 is None:
             # 직선: 선은 화살촉 밑변까지만 그린다. 짧은 화살표에서 base가 tail 뒤로 넘어가
             # 선이 거꾸로 삐져나오지 않도록 tail~tip 구간 안으로 클램프한다.
-            angle = math.atan2(tip.y() - tail.y(), tip.x() - tail.x())
             t = max(0.0, 1.0 - (size * 0.85) / length) if length > 1 else 0.0
             base = QPointF(tail.x() + (tip.x() - tail.x()) * t,
                            tail.y() + (tip.y() - tail.y()) * t)
@@ -787,22 +865,33 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(path)
-            angle = math.atan2(P3.y() - C2.y(), P3.x() - C2.x())
 
-        a1 = angle + math.radians(150)
-        a2 = angle - math.radians(150)
-        head = QPolygonF([
-            tip,
-            QPointF(tip.x() + size * math.cos(a1), tip.y() + size * math.sin(a1)),
-            QPointF(tip.x() + size * math.cos(a2), tip.y() + size * math.sin(a2)),
-        ])
+        head = QPolygonF(self._head_points())
         painter.setBrush(QBrush(self._color))
         painter.setPen(QPen(self._color, 1, Qt.PenStyle.SolidLine,
                             Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.drawPolygon(head)
         if self.isSelected():
-            _draw_selection_box(painter, self._content_rect(), self._scale_or_1())
+            self._paint_selection_outline(painter, self._scale_or_1())
         self._paint_handle(painter)
+
+    def _paint_selection_outline(self, painter, scale):
+        # 선택 표시를 네모가 아니라 '선을 따라가는' 점선으로 — 선+화살촉을 살짝 넓게 감싼 외곽선.
+        body = QPainterPath()
+        body.moveTo(self._p1)
+        if self._ctrl1 is None:
+            body.lineTo(self._p2)
+        else:
+            body.cubicTo(self._ctrl1, self._ctrl2, self._p2)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(self._width + 8)   # 선보다 살짝 넓게 감싸 점선이 선 양옆을 훑게
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        outline = stroker.createStroke(body)
+        outline.addPolygon(QPolygonF(self._head_points()))
+        painter.setPen(QPen(QColor(_BLUE), 1.0 / (scale or 1.0), Qt.PenStyle.DashLine))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(outline.simplified())
 
     def _paint_handle(self, painter):
         # 크기조절·회전 핸들(믹스인) + 곡선용 bend 핸들 2개(곡선 t=1/3·2/3 지점의 초록 원).
@@ -823,6 +912,17 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
                 hp.addEllipse(self._bend_handle_rect(which))
             return base.united(hp)
         return base
+
+    def boundingRect(self) -> QRectF:
+        # 실제로 칠하는 것(선택 외곽선=선두께+8, 초록 bend 핸들)이 _content_rect보다 살짝
+        # 바깥으로 나가므로 boundingRect에 모두 포함한다 — 안 그러면 bend 드래그 때 무효화가
+        # 누락돼 초록점 궤적 잔상이 남는다(다음 전체 리페인트 전까지).
+        r = super().boundingRect()
+        if self._bend_active():
+            for which in (1, 2):
+                r = r.united(self._bend_handle_rect(which))
+        pad = 4.0 + 4.0 / self._scale_or_1()   # 외곽선 초과분 + 점선 펜 + 안티에일리어싱 여유
+        return r.adjusted(-pad, -pad, pad, pad)
 
     def mousePressEvent(self, event):
         # bend 핸들을 회전/크기조절보다 먼저 잡는다(곡선 조절점 2개).
