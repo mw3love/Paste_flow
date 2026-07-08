@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,
     QStyle, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QEvent
 from PyQt6.QtGui import QColor, QFontMetrics
 
 from pasteflow.ui.theme import COLORS, PEACH_HOVER
@@ -312,6 +312,14 @@ class SettingsDialog(QDialog):
         )
         self.setStyleSheet(DIALOG_STYLE)
 
+    def changeEvent(self, event):
+        """최소화 차단 — 설정창은 작업표시줄 버튼이 없어 최소화 시 주모니터 좌하단
+        구석에 park되는 OS 기본 동작이 어색하다. 어떤 경로(시스템 메뉴 등)로든
+        최소화되면 즉시 원상 복구한다."""
+        if event.type() == QEvent.Type.WindowStateChange and self.isMinimized():
+            self.showNormal()
+        super().changeEvent(event)
+
     def _finalize_size(self):
         """창 크기를 콘텐츠에 맞추되 화면을 넘지 않게 cap — 넘으면 스크롤.
 
@@ -470,25 +478,25 @@ class SettingsDialog(QDialog):
         ai_form.addRow(ai_desc)
 
         # API 백엔드 — 공식/게이트웨이별로 키·모델·캐시를 각각 보관해 동시 등록·자유 전환.
-        self._backend_label = QLabel("API 백엔드:")
+        self._backend_label = QLabel("•  API 백엔드:")
         self._backend_combo = QComboBox()
         self._backend_combo.setStyleSheet(_combo_style)
         self._backend_combo.addItem("Google AI Studio", "official")
         self._backend_combo.addItem("Mindlogic Gateway", "gateway")
         ai_form.addRow(self._backend_label, self._backend_combo)
 
-        self._api_key_label = QLabel("API 키:")
+        self._api_key_label = QLabel("•  API 키:")
         self._api_key_edit = QLineEdit()
         self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._api_key_edit.setPlaceholderText("Google AI Studio 키")
         ai_form.addRow(self._api_key_label, self._api_key_edit)
 
-        self._base_url_label = QLabel("Base URL:")
+        self._base_url_label = QLabel("•  Base URL:")
         self._base_url_edit = QLineEdit()
         self._base_url_edit.setPlaceholderText("예: https://factchat-cloud.mindlogic.ai/v1/gateway")
         ai_form.addRow(self._base_url_label, self._base_url_edit)
 
-        self._model_label = QLabel("모델명:")
+        self._model_label = QLabel("•  모델명:")
         self._model_combo = QComboBox()
         self._model_combo.setEditable(True)
         self._model_combo.setStyleSheet(_combo_style)
@@ -510,14 +518,8 @@ class SettingsDialog(QDialog):
         model_row.addWidget(self._model_refresh_btn)
         ai_form.addRow(self._model_label, model_row)
 
-        # 가장 저렴 모델 안내 힌트 — 콤보 목록 변경 시 _update_model_hint()로 갱신
-        self._model_hint = QLabel()
-        self._model_hint.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
-        self._model_hint.setWordWrap(True)
-        ai_form.addRow("", self._model_hint)
-        self._update_model_hint()
-
-        # API 연결 테스트 — 현재 backend/키/URL로 모델 목록을 받아 키·연결 유효성 확인
+        # API 연결 테스트 — 모델명 바로 아래에 배치(설명 힌트보다 위). 힌트를 그룹 맨 아래로
+        # 내려 워드랩 공간을 넉넉히 확보한다.
         self._test_btn = QPushButton("연결 테스트")
         self._test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._test_btn.setToolTip("입력한 API 키·URL로 실제 연결해 키가 유효한지 확인합니다.")
@@ -532,6 +534,14 @@ class SettingsDialog(QDialog):
         test_row.addWidget(self._test_status, 1)
         ai_form.addRow("", test_row)
 
+        # 가장 저렴 모델 안내 힌트 — 콤보 목록 변경 시 _update_model_hint()로 갱신.
+        # 연결 테스트 아래(그룹 맨 아래)라 워드랩 공간이 넉넉하다.
+        self._model_hint = QLabel()
+        self._model_hint.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
+        self._model_hint.setWordWrap(True)
+        ai_form.addRow("", self._model_hint)
+        self._update_model_hint()
+
         self._backend_combo.currentIndexChanged.connect(self._on_backend_changed)
 
         layout.addWidget(ai_group)
@@ -543,7 +553,7 @@ class SettingsDialog(QDialog):
         self._history_max_spin = QSpinBox()
         self._history_max_spin.setRange(10, 500)
         self._history_max_spin.setValue(50)
-        general_form.addRow("히스토리 최대 개수:", self._history_max_spin)
+        general_form.addRow("•  히스토리 최대 개수:", self._history_max_spin)
 
         self._queue_idle_spin = QSpinBox()
         self._queue_idle_spin.setRange(1, 3600)
@@ -553,7 +563,7 @@ class SettingsDialog(QDialog):
             "마지막 복사로부터 이 시간이 지나면 다음 복사는 큐의 첫 항목으로 시작합니다.\n"
             "(일반 Ctrl+V는 시간과 무관하게 즉시 큐를 비웁니다.)"
         )
-        general_form.addRow("순차 큐 자동 초기화:", self._queue_idle_spin)
+        general_form.addRow("•  순차 큐 자동 초기화:", self._queue_idle_spin)
 
         # 캡처 저장 폴더 — 경로 표시 + 찾아보기
         self._capture_folder_edit = QLineEdit()
@@ -566,7 +576,7 @@ class SettingsDialog(QDialog):
         folder_row.setContentsMargins(0, 0, 0, 0)
         folder_row.addWidget(self._capture_folder_edit, 1)
         folder_row.addWidget(browse_btn)
-        general_form.addRow("캡처 저장 폴더:", folder_row)
+        general_form.addRow("•  캡처 저장 폴더:", folder_row)
 
         self._auto_start_check = QCheckBox("Windows 시작 시 자동 실행")
         general_form.addRow(self._auto_start_check)
