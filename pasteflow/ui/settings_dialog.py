@@ -312,10 +312,43 @@ class SettingsDialog(QDialog):
         )
         self.setStyleSheet(DIALOG_STYLE)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._strip_min_max_buttons()
+
+    def _strip_min_max_buttons(self):
+        """타이틀바에서 최소화·최대화 버튼을 실제로 제거한다.
+
+        창 플래그를 'WindowCloseButtonHint'만 줘도 Windows HWND에는 WS_MINIMIZEBOX/
+        WS_MAXIMIZEBOX가 남아 최소화 버튼이 그려진다(Qt→Win32 매핑 특성). 그 버튼을
+        누르면 changeEvent가 되돌려 '눌러도 안 되는 버튼'이 된다. WS_SYSMENU는 두되
+        (닫기·시스템 메뉴 유지) min/max box 비트를 모두 지우면 Windows가 닫기 버튼만
+        그린다(하나만 지우면 남은 쪽이 회색으로 표시됨). 네이티브 창 재생성에도 살아남게
+        show마다 재적용한다."""
+        try:
+            import ctypes
+            GWL_STYLE = -16
+            WS_MINIMIZEBOX = 0x00020000
+            WS_MAXIMIZEBOX = 0x00010000
+            user32 = ctypes.windll.user32
+            hwnd = int(self.winId())
+            style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+            new_style = style & ~WS_MINIMIZEBOX & ~WS_MAXIMIZEBOX
+            if new_style != style:
+                user32.SetWindowLongW(hwnd, GWL_STYLE, new_style)
+                SWP_NOSIZE = 0x0001; SWP_NOMOVE = 0x0002
+                SWP_NOZORDER = 0x0004; SWP_FRAMECHANGED = 0x0020
+                user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                )
+        except Exception:
+            pass
+
     def changeEvent(self, event):
-        """최소화 차단 — 설정창은 작업표시줄 버튼이 없어 최소화 시 주모니터 좌하단
-        구석에 park되는 OS 기본 동작이 어색하다. 어떤 경로(시스템 메뉴 등)로든
-        최소화되면 즉시 원상 복구한다."""
+        """최소화 안전망 — 최소화 버튼은 _strip_min_max_buttons()로 제거하지만,
+        그 호출이 어떤 이유로 실패하거나 시스템 메뉴 등 다른 경로로 최소화되면
+        즉시 원상 복구한다(작업표시줄 버튼이 없어 좌하단 park되는 것 방지)."""
         if event.type() == QEvent.Type.WindowStateChange and self.isMinimized():
             self.showNormal()
         super().changeEvent(event)
@@ -353,14 +386,16 @@ class SettingsDialog(QDialog):
         self._content = QWidget()
         scroll.setWidget(self._content)
         layout = QVBoxLayout(self._content)
-        layout.setSpacing(8)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(6)
+        layout.setContentsMargins(16, 12, 16, 12)
 
         # ── 기능 단축키 그룹 (변경 가능) — 아래 기본 단축키 다음에 배치 ──
         # 인식 편의를 위해 4개 하위 묶음을 얇은 구분선으로 분리(쭉 나열 대신 시각 그룹화):
         #  ① 패널  ② 경로 붙여넣기류  ③ 영역 캡처·핀류  ④ AI(호출·OCR)
         hotkey_group = QGroupBox("기능 단축키 (변경 가능)")
         hotkey_form = QFormLayout(hotkey_group)
+        hotkey_form.setVerticalSpacing(4)
+        hotkey_form.setContentsMargins(10, 8, 10, 8)
 
         def _hk_sep():
             line = QFrame()
@@ -471,6 +506,8 @@ class SettingsDialog(QDialog):
         ai_group = QGroupBox("AI 연동 (Gemini / Mindlogic API)")
         self._ai_form = QFormLayout(ai_group)
         ai_form = self._ai_form
+        ai_form.setVerticalSpacing(4)
+        ai_form.setContentsMargins(10, 8, 10, 8)
 
         ai_desc = QLabel("AI 호출 및 AI OCR 사용 시 필수 입력.")
         ai_desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
@@ -534,14 +571,6 @@ class SettingsDialog(QDialog):
         test_row.addWidget(self._test_status, 1)
         ai_form.addRow("", test_row)
 
-        # 가장 저렴 모델 안내 힌트 — 콤보 목록 변경 시 _update_model_hint()로 갱신.
-        # 연결 테스트 아래(그룹 맨 아래)라 워드랩 공간이 넉넉하다.
-        self._model_hint = QLabel()
-        self._model_hint.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
-        self._model_hint.setWordWrap(True)
-        ai_form.addRow("", self._model_hint)
-        self._update_model_hint()
-
         self._backend_combo.currentIndexChanged.connect(self._on_backend_changed)
 
         layout.addWidget(ai_group)
@@ -549,6 +578,8 @@ class SettingsDialog(QDialog):
         # ── 일반 설정 그룹 ──
         general_group = QGroupBox("일반")
         general_form = QFormLayout(general_group)
+        general_form.setVerticalSpacing(4)
+        general_form.setContentsMargins(10, 8, 10, 8)
 
         self._history_max_spin = QSpinBox()
         self._history_max_spin.setRange(10, 500)
@@ -760,7 +791,6 @@ class SettingsDialog(QDialog):
 
     def _fill_model_combo(self, verified: list[str], unverified: list[str]):
         """콤보를 검증 모델(상단) + 구분선 + 미검증 모델(하단, 회색)로 채운다."""
-        self._verified_models = verified
         self._model_combo.clear()
         for name in verified:
             self._model_combo.addItem(name)
@@ -780,7 +810,6 @@ class SettingsDialog(QDialog):
                 Qt.ItemDataRole.ToolTipRole,
             )
         self._adjust_model_popup_width()
-        self._update_model_hint()
 
     def _adjust_model_popup_width(self):
         """드롭다운 팝업만 최장 모델명에 맞춰 넓힌다 — 콤보 본체/설정창 폭은 불변.
@@ -799,16 +828,6 @@ class SettingsDialog(QDialog):
         if widest:
             # 스크롤바·여백 여유분 가산
             self._model_combo.view().setMinimumWidth(widest + 40)
-
-    def _update_model_hint(self):
-        """검증 모델 중 가장 저렴한 것(verified[0])을 힌트 라벨에 표시."""
-        if not hasattr(self, "_model_hint"):
-            return
-        verified = getattr(self, "_verified_models", [])
-        if not verified:
-            self._model_hint.setText("(검증된 모델 없음 — ↻ 새로고침을 시도하세요)")
-            return
-        self._model_hint.setText(f"💡 가장 저렴: {verified[0]}")
 
     def _populate_model_combo(self):
         """현재 backend의 캐시로 모델 콤보 구성. 캐시 없으면 화이트리스트 기본값."""

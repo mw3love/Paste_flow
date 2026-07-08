@@ -875,6 +875,10 @@ class PasteFlowApp:
 
     def _on_ocr_requested(self):
         """메인 스레드: OCR 오버레이 시작"""
+        if self._is_settings_open():
+            from pasteflow.ui.toast import ToastNotification
+            ToastNotification("설정창을 닫은 뒤 AI OCR을 사용하세요", icon="⚙️")
+            return
         self._ocr_overlay.start()
 
     def _on_ocr_region_captured(self, pixmap):
@@ -891,7 +895,19 @@ class PasteFlowApp:
 
     def _on_capture_requested(self):
         """메인 스레드: 영역 캡처 오버레이 시작 (마그네틱 CaptureOverlay)"""
+        if self._is_settings_open():
+            from pasteflow.ui.toast import ToastNotification
+            ToastNotification("설정창을 닫은 뒤 영역 캡처를 사용하세요", icon="⚙️")
+            return
         self._capture_overlay.start()
+
+    def _is_settings_open(self) -> bool:
+        """설정창(application-modal exec)이 열려 있는지 — 캡처/OCR 진입점이 확인.
+
+        열려 있으면 오버레이가 떠도 모달 그랩에 막혀 입력이 안 되므로, 미리보기
+        오버레이를 아예 띄우지 않고 안내 토스트로 대신한다.
+        """
+        return getattr(self, "_settings_dialog", None) is not None
 
     def _on_capture_region(self, pixmap, rect):
         """메인 스레드: 선택 영역 픽맵 → 클립보드(DIB) + 히스토리·큐 + 파일 저장 + 토스트.
@@ -1982,7 +1998,13 @@ class PasteFlowApp:
         dlg.settings_changed.connect(self._on_settings_changed)
         dlg.raise_()
         dlg.activateWindow()
-        dlg.exec()
+        # 설정창은 application-modal(exec)이라 열려 있는 동안 캡처/OCR 오버레이가
+        # 떠도 입력을 못 받는다 → 진입점이 이 참조로 열림 여부를 확인해 안내 토스트로 막는다.
+        self._settings_dialog = dlg
+        try:
+            dlg.exec()
+        finally:
+            self._settings_dialog = None
 
     def _on_settings_changed(self, new_settings: dict):
         """설정 변경 적용"""
