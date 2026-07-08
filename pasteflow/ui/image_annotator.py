@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 from pasteflow.ui.theme import (
     BASE as _BG, SURFACE0 as _SURFACE0, SURFACE1 as _BORDER,
     SURFACE2 as _SURFACE2, TEXT as _TEXT, BLUE as _BLUE, SUBTEXT0 as _SUBTEXT,
-    PEACH as _PEACH,
+    PEACH as _PEACH, GREEN as _GREEN,
 )
 
 _MIN_WIDTH, _MAX_WIDTH, _DEFAULT_WIDTH = 1, 40, 6
@@ -629,6 +629,8 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         super().__init__()
         self._p1 = QPointF(0, 0)
         self._p2 = QPointF(0, 0)
+        self._ctrl = None      # 2차 베지어 제어점(None=직선). 로컬(=씬) 좌표.
+        self._bending = False  # bend 핸들 드래그 중 여부
         self._color = QColor(color)
         self._width = width
         self._head_at_end = head_at_end
@@ -662,11 +664,45 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
     def clone(self):
         c = _ArrowItem(QColor(self._color), self._width, self._head_at_end)
         c.set_points(QPointF(self._p1), QPointF(self._p2))
+        if self._ctrl is not None:
+            c._ctrl = QPointF(self._ctrl)
         return self._copy_common_to(c)
+
+    # ---- 곡선(2차 베지어) 헬퍼 -------------------------------------------
+    def _straight_mid(self) -> QPointF:
+        return QPointF((self._p1.x() + self._p2.x()) / 2.0,
+                       (self._p1.y() + self._p2.y()) / 2.0)
+
+    def _curve_mid(self) -> QPointF:
+        """곡선 위 t=0.5 지점(bend 핸들 위치). 직선이면 두 끝점의 중점."""
+        if self._ctrl is None:
+            return self._straight_mid()
+        # 2차 베지어 B(0.5) = 0.25·p1 + 0.5·ctrl + 0.25·p2
+        return QPointF(0.25 * self._p1.x() + 0.5 * self._ctrl.x() + 0.25 * self._p2.x(),
+                       0.25 * self._p1.y() + 0.5 * self._ctrl.y() + 0.25 * self._p2.y())
+
+    def _bend_handle_rect(self) -> QRectF:
+        d = self._handle_px()
+        c = self._curve_mid()
+        return QRectF(c.x() - d / 2, c.y() - d / 2, d, d)
+
+    def _bend_active(self) -> bool:
+        # bend 핸들은 크기조절·회전과 달리 arrow 도구에서도 활성 — 그리기 직후(자동 선택 상태)에
+        # 도구 전환 없이 바로 곡선을 줄 수 있게. 크기조절·회전 핸들은 여전히 select 전용.
+        if not self.isSelected():
+            return False
+        return self._owner_tool() in (None, "select", "arrow")
 
     def _content_rect(self) -> QRectF:
         extra = self._width + max(14, self._width * 3) + 4
-        return QRectF(self._p1, self._p2).normalized().adjusted(-extra, -extra, extra, extra)
+        if self._ctrl is None:
+            r = QRectF(self._p1, self._p2).normalized()
+        else:
+            # 곡선은 세 점(p1·ctrl·p2)의 볼록껍질 안에 있으므로 세 점을 감싸면 안전한 상계.
+            xs = (self._p1.x(), self._p2.x(), self._ctrl.x())
+            ys = (self._p1.y(), self._p2.y(), self._ctrl.y())
+            r = QRectF(QPointF(min(xs), min(ys)), QPointF(max(xs), max(ys)))
+        return r.adjusted(-extra, -extra, extra, extra)
 
     def _base_shape(self):
         # QGraphicsItem 기본 shape는 boundingRect(회전 여유 포함) 기반 → content로 한정해
@@ -679,20 +715,42 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         tail, tip = (self._p1, self._p2) if self._head_at_end else (self._p2, self._p1)
         length = math.hypot(tip.x() - tail.x(), tip.y() - tail.y())
-        if length < 1:
-            return  # 클릭만 한 0길이 화살표는 머리도 그리지 않음(깜빡임 방지)
+        if self._ctrl is None and length < 1:
+            return  # 클릭만 한 0길이 직선 화살표는 머리도 그리지 않음(깜빡임 방지)
 
         size = max(14, self._width * 3)
-        angle = math.atan2(tip.y() - tail.y(), tip.x() - tail.x())
-        # 선은 화살촉 밑변까지만 그린다. 짧은 화살표에서 base가 tail 뒤로 넘어가
-        # 선이 거꾸로 삐져나오지 않도록 tail~tip 구간 안으로 클램프한다.
-        t = max(0.0, 1.0 - (size * 0.85) / length) if length > 1 else 0.0
-        base = QPointF(tail.x() + (tip.x() - tail.x()) * t,
-                       tail.y() + (tip.y() - tail.y()) * t)
         pen = QPen(self._color, self._width, Qt.PenStyle.SolidLine,
                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.drawLine(tail, base)
+
+        if self._ctrl is None:
+            # 직선: 선은 화살촉 밑변까지만 그린다. 짧은 화살표에서 base가 tail 뒤로 넘어가
+            # 선이 거꾸로 삐져나오지 않도록 tail~tip 구간 안으로 클램프한다.
+            angle = math.atan2(tip.y() - tail.y(), tip.x() - tail.x())
+            t = max(0.0, 1.0 - (size * 0.85) / length) if length > 1 else 0.0
+            base = QPointF(tail.x() + (tip.x() - tail.x()) * t,
+                           tail.y() + (tip.y() - tail.y()) * t)
+            painter.setPen(pen)
+            painter.drawLine(tail, base)
+        else:
+            # 곡선: tail→(제어점)→tip 2차 베지어. 화살촉은 tip의 접선(제어점→tip)을 따라 돎.
+            # 직선과 동일하게 선은 화살촉 밑변까지만 — tip에서 접선 방향으로 size·0.85 뒤로
+            # 물러난 지점까지 곡선을 잘라 그린다(안 자르면 굵은 선 끝이 화살촉 밖으로 삐져나옴).
+            # tip 접선 크기 |B'(1)|=2·|tip−ctrl| 로 되돌릴 파라미터 dt를 근사하고 De Casteljau로 분할.
+            seg = math.hypot(tip.x() - self._ctrl.x(), tip.y() - self._ctrl.y())
+            dt = min(0.5, (size * 0.85) / (2 * seg)) if seg > 1e-6 else 0.0
+            te = 1.0 - dt
+            ax = tail.x() + (self._ctrl.x() - tail.x()) * te
+            ay = tail.y() + (self._ctrl.y() - tail.y()) * te
+            bx = self._ctrl.x() + (tip.x() - self._ctrl.x()) * te
+            by = self._ctrl.y() + (tip.y() - self._ctrl.y()) * te
+            cx = ax + (bx - ax) * te  # 곡선 위 te 지점(=화살촉 밑변)
+            cy = ay + (by - ay) * te
+            path = QPainterPath(tail)
+            path.quadTo(QPointF(ax, ay), QPointF(cx, cy))
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
+            angle = math.atan2(tip.y() - self._ctrl.y(), tip.x() - self._ctrl.x())
 
         a1 = angle + math.radians(150)
         a2 = angle - math.radians(150)
@@ -708,6 +766,58 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         if self.isSelected():
             _draw_selection_box(painter, self._content_rect(), self._scale_or_1())
         self._paint_handle(painter)
+
+    def _paint_handle(self, painter):
+        # 크기조절·회전 핸들(믹스인) + 곡선용 bend 핸들(곡선 중간점의 초록 원).
+        super()._paint_handle(painter)
+        if not self._bend_active():
+            return
+        s = self._scale_or_1()
+        r = self._bend_handle_rect()
+        painter.setPen(QPen(QColor("white"), 1.0 / s))
+        painter.setBrush(QBrush(QColor(_GREEN)))
+        painter.drawEllipse(r)
+
+    def shape(self):
+        base = super().shape()  # 믹스인: base_shape + (선택 시)크기조절·회전 핸들
+        if self._bend_active():
+            hp = QPainterPath()
+            hp.addEllipse(self._bend_handle_rect())
+            return base.united(hp)
+        return base
+
+    def mousePressEvent(self, event):
+        # bend 핸들을 회전/크기조절보다 먼저 잡는다(곡선 중간점).
+        if self._bend_active() and self._bend_handle_rect().contains(event.pos()):
+            self._bending = True
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if getattr(self, "_bending", False):
+            self.prepareGeometryChange()  # 제어점이 boundingRect를 바꾼다
+            m = event.pos()
+            mid = self._straight_mid()
+            # 직선-복귀 스냅: 커서가 원래 직선 중간점 근처면 직선으로 되돌린다.
+            thresh = max(6.0, self._width * 2) / self._scale_or_1()
+            if math.hypot(m.x() - mid.x(), m.y() - mid.y()) < thresh:
+                self._ctrl = None
+            else:
+                # 곡선 중간점 B(0.5)이 커서 m을 지나게: C = 2·m − 0.5·(p1+p2)
+                self._ctrl = QPointF(2 * m.x() - 0.5 * (self._p1.x() + self._p2.x()),
+                                     2 * m.y() - 0.5 * (self._p1.y() + self._p2.y()))
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if getattr(self, "_bending", False):
+            self._bending = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class _BadgeItem(_HandleResizeMixin, QGraphicsItem):
@@ -988,6 +1098,16 @@ class _AnnotatorView(QGraphicsView):
                 return False
         return True
 
+    def _bend_handle_at(self, view_pos):
+        """커서(view 좌표) 아래에 활성 bend 핸들이 있으면 그 화살표, 없으면 None.
+        호버 커서를 몸통(이동)과 구분하는 데 쓴다."""
+        scene_pt = self.mapToScene(view_pos)
+        for it in self.items(view_pos):
+            if isinstance(it, _ArrowItem) and it._bend_active() \
+                    and it._bend_handle_rect().contains(it.mapFromScene(scene_pt)):
+                return it
+        return None
+
     # ---- 줌 (휠) — 주석 위면 속성 변경, 아니면 owner의 hug-zoom(창이 이미지에 맞게) ----
     def wheelEvent(self, event):
         dy = event.angleDelta().y()
@@ -1120,7 +1240,9 @@ class _AnnotatorView(QGraphicsView):
         """편집 모드 hover 커서: 주석 위=이동, 도형 도구+빈영역=십자, select+빈영역=손바닥."""
         vp = self.viewport()
         tool = self._owner.current_tool
-        if tool == "pen":
+        if self._bend_handle_at(view_pos) is not None:
+            vp.setCursor(Qt.CursorShape.PointingHandCursor)  # 곡선 조절 손잡이(이동과 구분)
+        elif tool == "pen":
             vp.setCursor(Qt.CursorShape.CrossCursor)         # 펜 — 주석 위에서도 항상 그리기
         elif not self._is_empty_area(view_pos):
             vp.setCursor(Qt.CursorShape.SizeAllCursor)       # 주석 위 — 선택/이동
