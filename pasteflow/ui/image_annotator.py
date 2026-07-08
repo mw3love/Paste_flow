@@ -323,10 +323,56 @@ class _HandleResizeMixin:
     def _init_resize(self):
         self._resizing = False
         self._rotating = False
+        self._drag_endpoint = None  # 끝점 드래그 중인 인덱스(0·1, None=없음) — 선·화살표만
         self._press_scale = 1.0
         self._press_dist = 1.0
         self._press_rot = 0.0
         self._press_angle = 0.0
+
+    # ---- 끝점(양끝 이동) 모드 -------------------------------------------
+    # 선·화살표처럼 '2점으로 완전히 결정되는' 도형은 회전+균일스케일 핸들 대신
+    # 양끝점 핸들을 쓴다(끝점 2개면 길이·각도가 모두 결정 → 회전/스케일 중복). 기본은 off라
+    # 네모·원·번호·텍스트는 기존 회전+스케일 핸들을 그대로 쓴다.
+    _ENDPOINT_TOOLS = (None, "select", "line", "arrow")
+
+    def _uses_endpoints(self) -> bool:
+        return False
+
+    def _endpoints(self):
+        """끝점들의 로컬 좌표 리스트(선·화살표가 override)."""
+        return []
+
+    def _set_endpoint(self, idx: int, p: QPointF):
+        """끝점 idx를 로컬 좌표 p로 이동(선·화살표가 override)."""
+        pass
+
+    def _endpoint_active(self) -> bool:
+        if not self.isSelected():
+            return False
+        return self._owner_tool() in self._ENDPOINT_TOOLS
+
+    def _endpoint_rect(self, idx: int) -> QRectF:
+        d = self._handle_px()
+        c = self._endpoints()[idx]
+        return QRectF(c.x() - d / 2, c.y() - d / 2, d, d)
+
+    def _snap_endpoint(self, idx: int, p: QPointF) -> QPointF:
+        """Shift 스냅: 반대쪽 끝점을 기준으로 0/45/90°에 스냅."""
+        pts = self._endpoints()
+        anchor = pts[1 - idx] if len(pts) == 2 else pts[idx]
+        dx, dy = p.x() - anchor.x(), p.y() - anchor.y()
+        dist = math.hypot(dx, dy)
+        rad = math.radians(round(math.degrees(math.atan2(dy, dx)) / 45.0) * 45.0)
+        return QPointF(anchor.x() + dist * math.cos(rad), anchor.y() + dist * math.sin(rad))
+
+    def _paint_endpoint_handles(self, painter: QPainter):
+        if not self._endpoint_active():
+            return
+        s = self._scale_or_1()
+        painter.setPen(QPen(QColor("white"), 1.0 / s))
+        painter.setBrush(QBrush(QColor(_BLUE)))
+        for i in range(len(self._endpoints())):
+            painter.drawRect(self._endpoint_rect(i))
 
     # 선택된 도형에 현재 색/두께 적용 — pen 기반(rect/ellipse/line/path) 공통 구현.
     # arrow/badge/text는 pen이 없거나 색 보관 방식이 달라 각자 오버라이드한다.
@@ -375,6 +421,11 @@ class _HandleResizeMixin:
     # prepareGeometryChange로 갱신한다.
     def boundingRect(self) -> QRectF:
         pad = 3.0 / self._scale_or_1()
+        if self._uses_endpoints():
+            r = self._content_rect()
+            for i in range(len(self._endpoints())):
+                r = r.united(self._endpoint_rect(i))
+            return r.adjusted(-pad, -pad, pad, pad)
         return self._content_rect().united(self._rot_handle_rect().adjusted(-pad, -pad, pad, pad))
 
     def _handle_local_rect(self) -> QRectF:
@@ -417,6 +468,9 @@ class _HandleResizeMixin:
         return True
 
     def _paint_handle(self, painter: QPainter):
+        if self._uses_endpoints():
+            self._paint_endpoint_handles(painter)
+            return
         if not self._handle_active():
             return
         s = self._scale_or_1()
@@ -436,19 +490,29 @@ class _HandleResizeMixin:
         painter.setBrush(QBrush(QColor(_BLUE)))
         painter.drawRect(r)
 
-    def _paint_base_no_select(self, painter, option, widget):
-        # Qt 기본 paint는 선택 시 (회전 핸들까지 확장된) boundingRect 둘레에 점선을 자동으로
-        # 그려 위쪽으로 점선이 딸려 올라간다. State_Selected를 꺼서 그 자동 점선을 막고,
-        # 선택박스는 _content_rect에만 직접 그린다(arrow/badge와 동일하게 타이트하게).
+    def _paint_base(self, painter, option, widget):
+        # Qt 기본 paint의 자동 선택 점선(회전 핸들까지 확장된 boundingRect 둘레)을 막고
+        # 베이스 도형만 그린다. 선택 표시는 호출자가 직접 그린다.
         opt = QStyleOptionGraphicsItem(option)
         opt.state &= ~QStyle.StateFlag.State_Selected
         super().paint(painter, opt, widget)
+
+    def _paint_base_no_select(self, painter, option, widget):
+        # 베이스 + 타이트 선택박스(_content_rect에만). 네모·원이 사용한다.
+        self._paint_base(painter, option, widget)
         if self.isSelected():
             _draw_selection_box(painter, self._content_rect(), self._scale_or_1())
 
     def shape(self):
         # 선택 시 핸들 영역을 클릭 영역에 포함 — 속 빈 도형도 핸들을 잡을 수 있게.
         base = self._base_shape()
+        if self._uses_endpoints():
+            if self._endpoint_active():
+                hp = QPainterPath()
+                for i in range(len(self._endpoints())):
+                    hp.addRect(self._endpoint_rect(i))
+                return base.united(hp)
+            return base
         if self._handle_active():
             hp = QPainterPath()
             hp.addRect(self._handle_local_rect())
@@ -457,6 +521,15 @@ class _HandleResizeMixin:
         return base
 
     def mousePressEvent(self, event):
+        if self._uses_endpoints():
+            if self._endpoint_active():
+                for i in range(len(self._endpoints())):
+                    if self._endpoint_rect(i).contains(event.pos()):
+                        self._drag_endpoint = i
+                        event.accept()
+                        return
+            super().mousePressEvent(event)
+            return
         if self._handle_active():
             # 회전 핸들이 바깥쪽이라 먼저 검사한다.
             if self._rot_handle_rect().contains(event.pos()):
@@ -479,6 +552,15 @@ class _HandleResizeMixin:
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if getattr(self, "_drag_endpoint", None) is not None:
+            self.prepareGeometryChange()  # 끝점이 boundingRect를 바꾼다
+            p = event.pos()
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                p = self._snap_endpoint(self._drag_endpoint, p)
+            self._set_endpoint(self._drag_endpoint, p)
+            self.update()
+            event.accept()
+            return
         if getattr(self, "_rotating", False):
             center = self.mapToScene(self._content_rect().center())
             cur = QLineF(center, event.scenePos()).angle()
@@ -500,6 +582,10 @@ class _HandleResizeMixin:
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if getattr(self, "_drag_endpoint", None) is not None:
+            self._drag_endpoint = None
+            event.accept()
+            return
         if getattr(self, "_rotating", False) or getattr(self, "_resizing", False):
             self._rotating = False
             self._resizing = False
@@ -588,6 +674,20 @@ class _LineItem(_HandleResizeMixin, QGraphicsLineItem):
         c.setPen(QPen(self.pen()))
         return self._copy_common_to(c)
 
+    def _uses_endpoints(self):
+        return True
+
+    def _endpoints(self):
+        line = self.line()
+        return [line.p1(), line.p2()]
+
+    def _set_endpoint(self, idx, p):
+        line = self.line()
+        if idx == 0:
+            self.setLine(QLineF(QPointF(p), line.p2()))
+        else:
+            self.setLine(QLineF(line.p1(), QPointF(p)))
+
     def _content_rect(self):
         # Qt 기본 QGraphicsLineItem.boundingRect()는 펜 두께가 0이 아니면 내부적으로
         # shape()를 호출하는데, 믹스인 shape()가 핸들 계산에 다시 boundingRect()를 부르므로
@@ -596,8 +696,30 @@ class _LineItem(_HandleResizeMixin, QGraphicsLineItem):
         extra = self.pen().widthF() / 2.0 + 1.0
         return QRectF(line.p1(), line.p2()).normalized().adjusted(-extra, -extra, extra, extra)
 
+    def boundingRect(self):
+        # 선택 외곽선(획+8)이 _content_rect보다 살짝 바깥으로 나가므로 여유를 더 준다
+        # (안 그러면 수평/수직 선에서 점선 잔상이 남을 수 있음).
+        pad = 5.0 / self._scale_or_1()
+        return super().boundingRect().adjusted(-pad, -pad, pad, pad)
+
+    def _paint_selection_outline(self, painter, scale):
+        # 화살표와 동일하게 '선을 따라가는' 점선(네모 박스 아님). 획을 살짝 넓게 감싼다.
+        line = self.line()
+        body = QPainterPath()
+        body.moveTo(line.p1())
+        body.lineTo(line.p2())
+        stroker = QPainterPathStroker()
+        stroker.setWidth(self.pen().widthF() + 8)
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        outline = stroker.createStroke(body)
+        painter.setPen(QPen(QColor(_BLUE), 1.0 / (scale or 1.0), Qt.PenStyle.DashLine))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(outline.simplified())
+
     def paint(self, painter, option, widget=None):
-        self._paint_base_no_select(painter, option, widget)
+        self._paint_base(painter, option, widget)
+        if self.isSelected():
+            self._paint_selection_outline(painter, self._scale_or_1())
         self._paint_handle(painter)
 
 
@@ -617,8 +739,31 @@ class _PathItem(_HandleResizeMixin, QGraphicsPathItem):
         extra = self.pen().widthF() / 2.0 + 1.0
         return self.path().boundingRect().adjusted(-extra, -extra, extra, extra)
 
+    def _handle_active(self):
+        # 펜은 회전·확대 핸들을 두지 않는다 — 그리기 전용이라 잘못 그리면 삭제·되돌리기로
+        # 수정하지 변형하지 않는다. 선택 시 획 따라가는 점선만, 이동은 획 잡아 끌기(movable).
+        return False
+
+    def boundingRect(self):
+        # 선택 외곽선(획+8)이 _content_rect보다 살짝 바깥으로 나가므로 여유를 더 준다.
+        pad = 5.0 / self._scale_or_1()
+        return super().boundingRect().adjusted(-pad, -pad, pad, pad)
+
+    def _paint_selection_outline(self, painter, scale):
+        # 펜 획을 따라가는 점선(네모 박스 아님) — 획을 살짝 넓게 감싼다.
+        stroker = QPainterPathStroker()
+        stroker.setWidth(self.pen().widthF() + 8)
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        outline = stroker.createStroke(self.path())
+        painter.setPen(QPen(QColor(_BLUE), 1.0 / (scale or 1.0), Qt.PenStyle.DashLine))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(outline.simplified())
+
     def paint(self, painter, option, widget=None):
-        self._paint_base_no_select(painter, option, widget)
+        self._paint_base(painter, option, widget)
+        if self.isSelected():
+            self._paint_selection_outline(painter, self._scale_or_1())
         self._paint_handle(painter)
 
 
@@ -708,6 +853,25 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
             c._ctrl1 = QPointF(self._ctrl1)
             c._ctrl2 = QPointF(self._ctrl2)
         return self._copy_common_to(c)
+
+    # ---- 끝점(양끝 이동) 핸들 -------------------------------------------
+    def _uses_endpoints(self):
+        return True
+
+    def _endpoints(self):
+        return [self._p1, self._p2]
+
+    def _set_endpoint(self, idx, p):
+        # 끝점을 옮길 때 곡선이면 그 쪽 제어점도 같은 delta로 따라가게 해 곡선 형태·접선을 유지.
+        p = QPointF(p)
+        if idx == 0:
+            if self._ctrl1 is not None:
+                self._ctrl1 = self._ctrl1 + (p - self._p1)
+            self._p1 = p
+        else:
+            if self._ctrl2 is not None:
+                self._ctrl2 = self._ctrl2 + (p - self._p2)
+            self._p2 = p
 
     # ---- 곡선(3차 베지어) 헬퍼 -------------------------------------------
     _BEND_TS = (1.0 / 3.0, 2.0 / 3.0)  # bend 핸들 2개의 곡선 파라미터(t)
