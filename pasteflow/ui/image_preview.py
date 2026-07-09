@@ -377,7 +377,6 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
             self._view.setDragMode(QGraphicsView.DragMode.NoDrag)
         self._update_arrow_dir_btn()      # 뷰어 전환 시 floating 방향 토글 숨김
         self._update_text_opts_bar()      # 뷰어 전환 시 텍스트 옵션 바 숨김
-        self._update_badge_size_stepper()  # 뷰어 전환 시 번호 크기 스테퍼 숨김
         if self._edit_mode:
             self._layout_chrome()         # 이미지 하단 strip에 배치(+필요 시 폭만 확장)
             self._layout_edit_close()     # ✕를 이미지 우상단에 배치

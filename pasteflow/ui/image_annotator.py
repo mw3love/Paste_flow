@@ -274,7 +274,8 @@ def _rainbow_icon(current: QColor | None = None, size: int = 20) -> QIcon:
 
 
 def _bg_swatch_icon(bg) -> QIcon:
-    """텍스트 배경 스와치 — 색 채움(반투명은 흰 바탕에 합성). bg=None이면 투명(대각선)."""
+    """텍스트 배경 스와치 — 불투명색은 그대로 채움, 반투명색은 체커보드 위에 얹어(투명 표시
+    관용) 회색 불투명과 헷갈리지 않게 한다. bg=None이면 투명(대각선)."""
     pm = QPixmap(20, 20)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
@@ -286,12 +287,27 @@ def _bg_swatch_icon(bg) -> QIcon:
         p.drawRoundedRect(rect, 3, 3)
         p.drawLine(5, 15, 15, 5)                         # 투명 표시 대각선
     else:
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("white"))                      # 반투명 색을 흰 바탕에 얹어 합성된 모습
-        p.drawRoundedRect(rect, 3, 3)
-        p.setBrush(QBrush(bg))
-        p.drawRoundedRect(rect, 3, 3)
-        p.setPen(QPen(QColor(_SUBTEXT), 1))
+        clip = QPainterPath()
+        clip.addRoundedRect(rect, 3, 3)
+        p.setClipPath(clip)
+        p.fillRect(rect, QColor("white"))
+        if bg.alpha() < 255:
+            # 반투명 → 체커보드 바탕(칸 4px)을 깔아 '뒤가 비친다'를 시각화
+            cell = 4
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#bfbfbf"))
+            yy = 2
+            while yy < 18:
+                xx = 2
+                while xx < 18:
+                    if ((int(xx) // cell) + (int(yy) // cell)) % 2 == 0:
+                        p.drawRect(QRectF(xx, yy, cell, cell))
+                    xx += cell
+                yy += cell
+        p.setBrush(QBrush(bg))                           # 실제 배경색(반투명이면 체커가 비침)
+        p.drawRect(rect)
+        p.setClipping(False)
+        p.setPen(QPen(QColor(_SUBTEXT), 1))              # 테두리
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRoundedRect(rect, 3, 3)
     p.end()
@@ -378,6 +394,34 @@ class _HandleResizeMixin:
         dist = math.hypot(dx, dy)
         rad = math.radians(round(math.degrees(math.atan2(dy, dx)) / 45.0) * 45.0)
         return QPointF(anchor.x() + dist * math.cos(rad), anchor.y() + dist * math.sin(rad))
+
+    def _connects_to_border(self) -> bool:
+        """이 아이템의 끝점이 도형 테두리에 재스냅되는가(화살표만 override)."""
+        return False
+
+    def _endpoint_border_snap(self, local_p: QPointF):
+        """끝점 드래그 중 근처 네모/원 테두리에 스냅(생성 때와 동일 _border_snap_at 재사용).
+        스냅되면 (로컬 최근접점, 바깥 법선 scene), 아니면 None — 뗐다 다시 가져가도 붙는 경로."""
+        if not self._connects_to_border():
+            return None
+        sc = self.scene()
+        if sc is None or not sc.views():
+            return None
+        view = sc.views()[0]
+        snap = getattr(view, "_border_snap_at", None)
+        if snap is None:
+            return None
+        res = snap(view.mapFromScene(self.mapToScene(local_p)))
+        if res is None:
+            return None
+        return self.mapFromScene(res[0]), res[1]
+
+    def _move_endpoint_with_snap(self, idx: int, local_p: QPointF):
+        """끝점 idx를 이동하되 테두리 근처면 스냅(기본: 점 스냅만. 화살표는 S자 곡선 재계산 override)."""
+        snapped = self._endpoint_border_snap(local_p)
+        if snapped is not None:
+            local_p = snapped[0]
+        self._set_endpoint(idx, local_p)
 
     def _paint_endpoint_handles(self, painter: QPainter):
         if not self._endpoint_active():
@@ -570,8 +614,11 @@ class _HandleResizeMixin:
             self.prepareGeometryChange()  # 끝점이 boundingRect를 바꾼다
             p = event.pos()
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                p = self._snap_endpoint(self._drag_endpoint, p)
-            self._set_endpoint(self._drag_endpoint, p)
+                # Shift = 각도 스냅(테두리 스냅과 상호배타)
+                self._set_endpoint(self._drag_endpoint, self._snap_endpoint(self._drag_endpoint, p))
+            else:
+                # 근처 도형 테두리에 재스냅(뗐다 다시 붙이기). 화살표는 S자 곡선까지 복원.
+                self._move_endpoint_with_snap(self._drag_endpoint, p)
             self.update()
             event.accept()
             return
@@ -896,6 +943,9 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
     def _uses_endpoints(self):
         return True
 
+    def _connects_to_border(self):
+        return True  # 끝점을 뗐다 도형 테두리 근처로 다시 가져가면 재스냅
+
     def _endpoints(self):
         return [self._p1, self._p2]
 
@@ -910,6 +960,51 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
             if self._ctrl2 is not None:
                 self._ctrl2 = self._ctrl2 + (p - self._p2)
             self._p2 = p
+
+    def _move_endpoint_with_snap(self, idx, local_p):
+        # 끝점을 테두리에 재스냅하면 생성 때처럼 바깥 법선으로 제어점을 다시 잡아 S자(수직 도착/이탈)
+        # 복원, 테두리 밖이면 끝점만 이동(수동으로 구부린 곡선은 delta 추종으로 보존).
+        snapped = self._endpoint_border_snap(local_p)
+        if snapped is None:
+            self._set_endpoint(idx, local_p)
+            return
+        self._set_endpoint(idx, snapped[0])
+        self._recompute_snap_curve(idx, snapped[1])
+
+    def _scene_dir_to_local(self, d_scene: QPointF) -> QPointF:
+        """scene 방향벡터 → 로컬 방향벡터(회전·스케일 반영, 위치 오프셋 제거)."""
+        o = self.mapFromScene(QPointF(0.0, 0.0))
+        v = self.mapFromScene(d_scene)
+        return QPointF(v.x() - o.x(), v.y() - o.y())
+
+    def _endpoint_border_normal(self, idx):
+        """끝점 idx가 지금 도형 테두리 근처면 그 바깥 법선(scene), 아니면 None."""
+        snapped = self._endpoint_border_snap(self._endpoints()[idx])
+        return snapped[1] if snapped is not None else None
+
+    def _recompute_snap_curve(self, dragged_idx, n_dragged_scene):
+        # 두 끝의 바깥 법선(scene)을 모아 생성 때(_update_arrow_draw)와 같은 공식으로 제어점 재계산.
+        # 드래그한 끝은 방금 스냅한 법선, 반대 끝은 여전히 테두리 위인지 재조회.
+        normals = [None, None]
+        normals[dragged_idx] = n_dragged_scene
+        normals[1 - dragged_idx] = self._endpoint_border_normal(1 - dragged_idx)
+        p1, p2 = self._p1, self._p2
+        dx, dy = p2.x() - p1.x(), p2.y() - p1.y()
+        dist = math.hypot(dx, dy)
+        if (normals[0] is None and normals[1] is None) or dist < 8:
+            self._ctrl1 = self._ctrl2 = None
+            return
+        k = max(30.0, min(dist * 0.5, 200.0))
+        if normals[0] is not None:
+            e1 = self._scene_dir_to_local(normals[0])          # 시작 테두리 이탈 접선(바깥 법선)
+        else:
+            e1 = QPointF(dx / dist, dy / dist)                 # tip 향해
+        if normals[1] is not None:
+            e2 = self._scene_dir_to_local(normals[1])          # tip 테두리 도착 접선(바깥 법선)
+        else:
+            e2 = QPointF(-e1.x(), -e1.y())                     # 시작과 평행(부드러운 S)
+        self._ctrl1 = QPointF(p1.x() + e1.x() * k, p1.y() + e1.y() * k)
+        self._ctrl2 = QPointF(p2.x() + e2.x() * k, p2.y() + e2.y() * k)
 
     # ---- 곡선(3차 베지어) 헬퍼 -------------------------------------------
     _BEND_TS = (1.0 / 3.0, 2.0 / 3.0)  # bend 핸들 2개의 곡선 파라미터(t)
@@ -1814,12 +1909,33 @@ class _AnnotatorView(QGraphicsView):
         self._snap_preview = None   # 그리기 시작 → 유휴 스냅 예고 마커 정리
         self.viewport().update()
 
+    def _editing_text_hover(self, view_pos) -> str | None:
+        """편집 중인 텍스트 위 hover면 'text'(내부=캐럿) / 'move'(테두리 band=이동), 아니면 None.
+        테두리 band는 화면 8px 두께로 잡아 뷰·아이템 스케일과 무관하게 일정하게 보이게 한다."""
+        scene_pt = self.mapToScene(view_pos)
+        for it in self.items(view_pos):
+            if isinstance(it, _TextItem) and \
+                    it.textInteractionFlags() != Qt.TextInteractionFlag.NoTextInteraction:
+                cr = it._content_rect()
+                band = 8.0 / (self._view_scale() * it._scale_or_1())  # 화면 8px → 로컬 두께
+                inner = cr.adjusted(band, band, -band, -band)
+                if inner.width() <= 0 or inner.height() <= 0:
+                    return "text"  # 너무 작으면 전부 캐럿(편집 중이므로 I빔 우선)
+                return "text" if inner.contains(it.mapFromScene(scene_pt)) else "move"
+        return None
+
     def _update_hover_cursor(self, view_pos):
-        """편집 모드 hover 커서: 주석 위=이동, 도형 도구+빈영역=십자, select+빈영역=손바닥."""
+        """편집 모드 hover 커서: 주석 위=이동, 도형 도구+빈영역=십자, select+빈영역=손바닥.
+        편집 중 텍스트는 예외 — 내부=캐럿(I빔), 테두리만 이동."""
         vp = self.viewport()
         tool = self._owner.current_tool
+        edit_text = self._editing_text_hover(view_pos)
         if self._bend_handle_at(view_pos) is not None:
             vp.setCursor(Qt.CursorShape.PointingHandCursor)  # 곡선 조절 손잡이(이동과 구분)
+        elif edit_text == "text":
+            vp.setCursor(Qt.CursorShape.IBeamCursor)         # 편집 중 텍스트 내부 — 캐럿
+        elif edit_text == "move":
+            vp.setCursor(Qt.CursorShape.SizeAllCursor)       # 편집 중 텍스트 테두리 — 이동
         elif tool == "arrow" and self._snap_preview is not None:
             vp.setCursor(Qt.CursorShape.CrossCursor)          # 테두리 스냅 — 화살표 시작(도형 위여도)
         elif tool == "pen":
@@ -2053,12 +2169,19 @@ class _EditorMixin:
         _win_drag_end/_on_wheel_zoom/close — _AnnotatorView가 호출
     """
 
+    # 세션 내 마지막으로 쓴 획 두께·글자 크기·번호 크기를 기억 — 새 편집기(다음에 연 이미지)도
+    # 기본값이 아니라 이 값으로 시작한다(매번 기본으로 리셋되던 불편 해소, 크기 스테퍼 제거의 근거).
+    # 앱 재시작 시엔 초기화.
+    _last_width = _DEFAULT_WIDTH
+    _last_font_size = _DEFAULT_FONT
+    _last_badge_size = _DEFAULT_BADGE
+
     def _init_editor_state(self):
         self.current_tool = "select"
         self.current_color = QColor(_DEFAULT_COLOR)
-        self.current_width = _DEFAULT_WIDTH
-        self.current_font_size = _DEFAULT_FONT  # 새 텍스트의 기본 글자 크기(pt)
-        self.current_badge_size = _DEFAULT_BADGE  # 새 번호 마커의 기본 지름(px)
+        self.current_width = _EditorMixin._last_width
+        self.current_font_size = _EditorMixin._last_font_size  # 새 텍스트의 기본 글자 크기(pt)
+        self.current_badge_size = _EditorMixin._last_badge_size  # 새 번호 마커의 기본 지름(px)
         self.arrow_head_at_end = True
         self.current_text_bg = None  # 새 텍스트의 기본 배경(None=투명)
         self._undo: list[tuple[str, list]] = []
@@ -2143,17 +2266,10 @@ class _EditorMixin:
         self._arrow_dir_btn.clicked.connect(self._toggle_arrow_dir)
         self._arrow_dir_btn.setVisible(False)
 
-        # 텍스트 하위 옵션 바 — 텍스트 도구 활성 시 T 버튼 아래에 수평 floating.
-        # (배경 스와치 직접 선택 + 글자 크기 스테퍼를 한 줄에)
+        # 텍스트 하위 옵션 바 — 텍스트 도구 활성 시 T 버튼 위에 수평 floating(배경 스와치만).
+        # 글자·번호 크기 스테퍼는 제거 — 크기는 주석 위 휠로 조절하고 마지막 값을 기억한다.
         self._text_opts_bar = self._build_text_opts_bar()
         self._text_opts_bar.setVisible(False)
-
-        # 번호 크기 스테퍼 — 번호(C) 도구 활성 시 C 버튼 아래 floating. 값이 유지돼 다음 번호도 같은 크기.
-        self._badge_size_stepper = _SizeStepper(
-            self.current_badge_size, _MIN_BADGE, _MAX_BADGE, "", "번호 크기 — 휠 또는 ▾ ▴ 클릭")
-        self._badge_size_stepper.setParent(self)
-        self._badge_size_stepper.changed.connect(lambda v: self._set_badge_size(v, from_stepper=True))
-        self._badge_size_stepper.setVisible(False)
         return tools
 
     # ---- 색 팔레트 팝업 (무지개 버튼 클릭 시) -------------------------------
@@ -2245,12 +2361,6 @@ class _EditorMixin:
             bg_group.addButton(btn)
             row.addWidget(btn)
             self._bg_buttons.append((bg, btn))
-        row.addWidget(self._vsep())
-        # 글자 크기 스테퍼 — 같은 줄 오른쪽
-        self._font_size_stepper = _SizeStepper(
-            self.current_font_size, _MIN_FONT, _MAX_FONT, "pt", "글자 크기 — 휠 또는 ▾ ▴ 클릭")
-        self._font_size_stepper.changed.connect(lambda s: self._set_font_size(s, from_stepper=True))
-        row.addWidget(self._font_size_stepper)
         bar.adjustSize()
         self._sync_bg_buttons()
         return bar
@@ -2349,25 +2459,9 @@ class _EditorMixin:
             it.update()
         self._update_arrow_dir_btn()
         self._update_text_opts_bar()
-        self._update_badge_size_stepper()
-
-    def _update_badge_size_stepper(self):
-        """번호 도구가 활성이고 편집 모드일 때만 C 버튼 아래에 번호 크기 스테퍼 floating."""
-        st = getattr(self, "_badge_size_stepper", None)
-        if st is None:
-            return
-        edit = self.is_edit_mode() if hasattr(self, "is_edit_mode") else True
-        if self.current_tool == "badge" and edit:
-            c_btn = self._tool_buttons.get("badge")
-            if c_btn is not None:
-                st.move(c_btn.mapTo(self, QPoint(0, c_btn.height() + 2)))
-            st.setVisible(True)
-            st.raise_()
-        else:
-            st.setVisible(False)
 
     def _update_text_opts_bar(self):
-        """텍스트 도구가 활성이고 편집 모드일 때만 T 버튼 아래에 텍스트 옵션 바 floating."""
+        """텍스트 도구가 활성이고 편집 모드일 때만 T 버튼 위에 텍스트 옵션 바 floating."""
         bar = getattr(self, "_text_opts_bar", None)
         if bar is None:
             return
@@ -2376,7 +2470,8 @@ class _EditorMixin:
             text_btn = self._tool_buttons.get("text")
             if text_btn is not None:
                 bar.adjustSize()
-                bar.move(text_btn.mapTo(self, QPoint(0, text_btn.height() + 2)))
+                # 툴바가 창 하단이라 버튼 '위'로 띄운다(아래면 창 밖으로 잘림).
+                bar.move(text_btn.mapTo(self, QPoint(0, -bar.height() - 2)))
             bar.setVisible(True)
             bar.raise_()
         else:
@@ -2385,10 +2480,9 @@ class _EditorMixin:
     def _set_text_bg(self, bg):
         self.current_text_bg = QColor(bg) if bg is not None else None
         self._sync_bg_buttons()
-        # 선택된 텍스트 항목에도 즉시 적용
-        for it in self._scene.selectedItems():
-            if isinstance(it, _TextItem):
-                it.set_bg(self.current_text_bg)
+        # 작성 중인 텍스트 우선, 없으면 선택된 텍스트에 즉시 적용(글자 크기와 동일 대상 규칙).
+        for it in self._font_size_targets():
+            it.set_bg(self.current_text_bg)
 
     def _sync_bg_buttons(self):
         """현재 배경(current_text_bg)에 해당하는 스와치만 체크 표시."""
@@ -2426,9 +2520,9 @@ class _EditorMixin:
         if self.current_tool == "arrow":
             arrow_btn = self._tool_buttons.get("arrow")
             if arrow_btn is not None:
-                top_left = arrow_btn.mapTo(self, QPoint(0, arrow_btn.height() + 2))
-                btn.move(top_left)
                 btn.resize(arrow_btn.width(), 22)
+                # 툴바가 창 하단이라 버튼 '위'로 띄운다(아래면 창 밖으로 잘림).
+                btn.move(arrow_btn.mapTo(self, QPoint(0, -btn.height() - 2)))
             btn.setIcon(_arrow_dir_icon(self.arrow_head_at_end))
             btn.setVisible(True)
             btn.raise_()
@@ -2463,30 +2557,12 @@ class _EditorMixin:
             if hasattr(it, "apply_color"):
                 it.apply_color(self.current_color)
 
-    def _set_font_size(self, size: int, from_stepper: bool = False):
-        self.current_font_size = max(_MIN_FONT, min(int(size), _MAX_FONT))
-        if not from_stepper:
-            self._font_size_stepper.set_value(self.current_font_size)
-        # 편집 중인 텍스트가 있으면 그 텍스트만, 없으면 선택된 텍스트들에 적용
-        for it in self._font_size_targets():
-            it.apply_font_size(self.current_font_size)
-
     def _font_size_targets(self) -> list:
         fi = self._scene.focusItem()
         if isinstance(fi, _TextItem) and \
                 fi.textInteractionFlags() != Qt.TextInteractionFlag.NoTextInteraction:
             return [fi]  # 작성 중인 텍스트만 — 기존 선택 텍스트가 같이 커지지 않게
         return [it for it in self._scene.selectedItems() if isinstance(it, _TextItem)]
-
-    def _set_badge_size(self, size: int, from_stepper: bool = False):
-        self.current_badge_size = max(_MIN_BADGE, min(int(size), _MAX_BADGE))
-        if not from_stepper:
-            self._badge_size_stepper.set_value(self.current_badge_size)
-        scale = self.current_badge_size / float(_DEFAULT_BADGE)
-        # 선택된 번호 마커가 있으면 그 크기도 즉시 변경
-        for it in self._scene.selectedItems():
-            if isinstance(it, _BadgeItem):
-                it.setScale(scale)
 
     def adjust_item_property(self, item, step: int):
         """주석 위 휠 — 도형은 두께(±1), 텍스트·번호는 크기(±2)를 step 방향으로 조절.
@@ -2496,13 +2572,13 @@ class _EditorMixin:
             new = max(_MIN_FONT, min(item.font().pointSize() + step * 2, _MAX_FONT))
             item.apply_font_size(new)
             self.current_font_size = new
-            self._font_size_stepper.set_value(new)
+            _EditorMixin._last_font_size = new   # 마지막 글자 크기 기억 → 다음 편집기도 이 값으로
         elif isinstance(item, _BadgeItem):
             cur = round(item.scale() * _DEFAULT_BADGE)
             new = max(_MIN_BADGE, min(cur + step * 2, _MAX_BADGE))
             item.setScale(new / float(_DEFAULT_BADGE))
             self.current_badge_size = new
-            self._badge_size_stepper.set_value(new)
+            _EditorMixin._last_badge_size = new  # 마지막 번호 크기 기억 → 다음 편집기도 이 값으로
         else:
             if isinstance(item, _ArrowItem):
                 new = max(_MIN_WIDTH, min(item._width + step, _MAX_WIDTH))
@@ -2512,6 +2588,7 @@ class _EditorMixin:
                 return
             item.apply_width(new)
             self.current_width = new
+            _EditorMixin._last_width = new   # 마지막 두께 기억 → 다음 편집기도 이 값으로 시작
 
     def _toggle_arrow_dir(self):
         # 선택된 화살표가 있으면 각자 자기 방향을 뒤집고 기본값·아이콘을 첫 화살표에 맞춘다.

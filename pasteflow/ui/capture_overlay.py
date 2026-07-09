@@ -203,7 +203,9 @@ class _CaptureScreen(QWidget):
     # ── Qt 마우스 이벤트 → 매니저 위임 ─────────────────────────────────────────
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
-            self._mgr._on_left_down()
+            # 드래그 시작점은 press 이벤트의 전역 좌표로 즉시 확정 — 다음 tick에서 샘플하면
+            # Explorer 위 UIA hit-test로 tick이 늦어질 때 커서가 이미 이동해 시작점이 밀린다.
+            self._mgr._on_left_down(e.globalPosition().toPoint())
         elif e.button() == Qt.MouseButton.RightButton:
             self._mgr._on_right_down()
 
@@ -296,8 +298,7 @@ class CaptureOverlay:
         self._pending: str | None = None  # None | "click" | "drag" — 마우스 up에서 세팅
         self._lbtn_down = False
         self._dragging = False
-        self._need_drag_start = False
-        self._drag_start: QPoint | None = None  # 드래그 시작 논리 좌표(첫 tick에서 샘플)
+        self._drag_start: QPoint | None = None  # 드래그 시작 논리 좌표(press 시점에 확정)
         # 얼린 최상위 창 (hwnd, l, t, r, b) 물리 — hwnd로 요소 스냅(창-스코프 hit-test)
         self._frozen_windows: list[tuple[int, int, int, int, int]] = []
         self._last_uia = 0.0  # hover 요소 hit-test 스로틀용 마지막 호출 시각(monotonic)
@@ -308,7 +309,6 @@ class CaptureOverlay:
         self._cancel_pending = False
         self._lbtn_down = False
         self._dragging = False
-        self._need_drag_start = False
         self._drag_start = None
         self._frozen_windows = []
         self._last_uia = 0.0
@@ -326,10 +326,10 @@ class CaptureOverlay:
 
     # ── Qt 마우스 이벤트 (오버레이 위젯에서 위임) ──────────────────────────────
 
-    def _on_left_down(self):
+    def _on_left_down(self, start_pos: QPoint):
         self._lbtn_down = True
         self._dragging = False
-        self._need_drag_start = True
+        self._drag_start = start_pos   # press 시점 좌표로 고정(tick 지연과 무관)
         self._pending = None
 
     def _on_left_up(self):
@@ -355,12 +355,11 @@ class CaptureOverlay:
             self._pending = None
             self._capture(self._target_rect_logical())
             return
-        # 좌버튼을 누른 채 임계 이상 이동 중이면 자유 사각형, 아니면 창 하이라이트
+        # 좌버튼을 누른 채 임계 이상 이동 중이면 자유 사각형, 아니면 창 하이라이트.
+        # 버튼이 눌린 동안은 hover hit-test(느린 UIA)를 스킵한다 — 창은 press 직전 하이라이트가
+        # 유지되고(그게 클릭 시 캡처 대상), 드래그면 자유 사각형만 그린다(Explorer 위 버벅임 제거).
         if self._lbtn_down:
             cur = QCursor.pos()
-            if self._need_drag_start:
-                self._drag_start = cur
-                self._need_drag_start = False
             if self._drag_start is not None and (
                     abs(cur.x() - self._drag_start.x()) > _DRAG_THRESHOLD
                     or abs(cur.y() - self._drag_start.y()) > _DRAG_THRESHOLD):
@@ -369,7 +368,7 @@ class CaptureOverlay:
                 gr = self._drag_rect_current()
                 for ov in self._overlays:
                     ov.set_highlight_global(gr)
-                return
+            return
         # hover 요소 hit-test: MSAA(창-스코프)는 COM이라 무거우므로 최소 간격으로 스로틀
         # (드래그 repaint는 매 tick=60fps로 돌고, 요소 조회만 ~30fps로 떼어냄)
         now = time.monotonic()
