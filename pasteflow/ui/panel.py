@@ -40,7 +40,6 @@ class PanelItemWidget(QWidget):
     """패널 내 개별 항목 위젯"""
 
     clicked = pyqtSignal(int, object)
-    double_clicked = pyqtSignal(int)
     context_menu_requested = pyqtSignal(int, object)
     external_drag_paste = pyqtSignal(int, QPoint, bool)  # (item_id, cursor_pos, alt_held)
 
@@ -163,7 +162,9 @@ class PanelItemWidget(QWidget):
     def _apply_bg_style(self):
         border_color = self._accent_color
         if self._is_selected:
-            self.setStyleSheet(f"background-color: {COLORS['surface2']}; border-radius: 6px; border: 1px solid {border_color};")
+            # 선택 = 코랄 강조(테마 규칙: 코랄=선택·주목). 회색 배경만 살짝 바뀌던 낮은
+            # 시인성을 개선 — 따뜻한 코랄 틴트 배경 + 코랄 테두리로 확실히 구분.
+            self.setStyleSheet(f"background-color: #4d3320; border-radius: 6px; border: 1px solid {COLORS['peach']};")
         elif self._is_hovered:
             self.setStyleSheet(f"background-color: {COLORS['surface1']}; border-radius: 6px; border: 1px solid {border_color};")
         else:
@@ -329,11 +330,6 @@ class PanelItemWidget(QWidget):
         self._drag_start_pos = None
         self._did_drag = False
         event.accept()
-
-    def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and not self._ext_drag_active:
-            self.double_clicked.emit(self.item_id)
-        super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event):
         if self.childAt(event.pos()) is None:
@@ -1004,7 +1000,6 @@ class ClipboardPanel(QWidget):
 
     def _connect_item_signals(self, widget: PanelItemWidget):
         widget.clicked.connect(self._on_item_clicked)
-        widget.double_clicked.connect(self._on_item_double_clicked)
         widget.context_menu_requested.connect(self._on_item_context_menu)
         widget.external_drag_paste.connect(self._on_item_external_drag_paste)
 
@@ -1039,14 +1034,6 @@ class ClipboardPanel(QWidget):
         self._last_clicked_id = item_id
         self._kbd_focus_id = item_id
         self._update_selection_visuals()
-
-    def _on_item_double_clicked(self, item_id: int):
-        item = self._find_item(item_id)
-        if item:
-            self._selected_ids.clear()
-            self._selected_ids.add(item_id)
-            self._update_selection_visuals()
-            self.paste_item_requested.emit(item)
 
     def _update_selection_visuals(self):
         for i in range(self._items_layout.count()):
@@ -1111,15 +1098,15 @@ class ClipboardPanel(QWidget):
             )
 
         if item_id in self._queue_item_ids:
-            queue_action = menu.addAction("큐 해제\tC")
+            queue_action = menu.addAction("큐 해제\tAlt+C")
             queue_action.triggered.connect(lambda: self.queue_deselect_requested.emit(item_id))
         else:
-            queue_action = menu.addAction("큐에 추가\tC")
+            queue_action = menu.addAction("큐에 추가\tAlt+C")
             queue_action.triggered.connect(lambda: self.queue_select_requested.emit(item_id))
 
         menu.addSeparator()
 
-        copy_action = menu.addAction("복사\tCtrl+C")
+        copy_action = menu.addAction("복사\tC")
         copy_action.triggered.connect(lambda: self._do_copy(item))
 
         if item.content_type == "image":
@@ -1501,7 +1488,7 @@ class ClipboardPanel(QWidget):
             event.accept()
             return
 
-        # ── Enter: 더블클릭 동작 (미리보기 / 붙여넣기) ──
+        # ── Enter: 포커스 항목 붙여넣기 ──
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self._kbd_activate()
             event.accept()
@@ -1533,8 +1520,15 @@ class ClipboardPanel(QWidget):
             event.accept()
             return
 
-        # ── C: 포커스 항목 큐에 추가 ──
-        if key == Qt.Key.Key_C and not mods & Qt.KeyboardModifier.ControlModifier:
+        # ── 복사: c 또는 Ctrl+C (단일 복사 / 다중 결합 복사) ──
+        #    복사를 자주 써서 단일 키 c도 함께 배정. 큐 토글은 Alt+C로 분리(아래).
+        if key == Qt.Key.Key_C and not mods & Qt.KeyboardModifier.AltModifier:
+            self._kbd_copy()
+            event.accept()
+            return
+
+        # ── Alt+C: 포커스 항목 큐에 추가/해제 토글 ──
+        if key == Qt.Key.Key_C and mods & Qt.KeyboardModifier.AltModifier:
             self._kbd_queue_toggle()
             event.accept()
             return
@@ -1542,19 +1536,6 @@ class ClipboardPanel(QWidget):
         # ── P: 포커스 항목 고정/해제 토글 ──
         if key == Qt.Key.Key_P and not mods & Qt.KeyboardModifier.ControlModifier:
             self._kbd_pin_toggle()
-            event.accept()
-            return
-
-        # ── Ctrl+C: 단일 복사 / 다중 결합 복사 ──
-        if key == Qt.Key.Key_C and mods & Qt.KeyboardModifier.ControlModifier:
-            if len(self._selected_ids) > 1:
-                combined = self._combine_selected_items()
-                if combined:
-                    self.combine_copy_requested.emit(combined)
-            else:
-                item = self._find_item(self._kbd_focus_id)
-                if item:
-                    self._do_copy(item)
             event.accept()
             return
 
@@ -1614,8 +1595,19 @@ class ClipboardPanel(QWidget):
         else:
             self.preview_text_requested.emit(item.id)
 
+    def _kbd_copy(self):
+        """c / Ctrl+C: 단일 복사, 다중 선택이면 결합 복사"""
+        if len(self._selected_ids) > 1:
+            combined = self._combine_selected_items()
+            if combined:
+                self.combine_copy_requested.emit(combined)
+        else:
+            item = self._find_item(self._kbd_focus_id)
+            if item:
+                self._do_copy(item)
+
     def _kbd_queue_toggle(self):
-        """C: 포커스 항목 큐 추가/해제 토글 — 앵커 항목이면 해제, 아니면 교체"""
+        """Alt+C: 포커스 항목 큐 추가/해제 토글 — 앵커 항목이면 해제, 아니면 교체"""
         if self._kbd_focus_id is None:
             return
         if self._queue_item_ids and self._kbd_focus_id == self._queue_item_ids[0]:

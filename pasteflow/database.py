@@ -213,6 +213,24 @@ class Database:
             )
             self.conn.commit()
 
+    def bump_history_to_top(self, item_id: int):
+        """비고정 항목을 히스토리 최상단으로 이동 (history_order = MIN - 1).
+
+        패널 히스토리에서 옛 항목을 복사하면 클립보드가 실제로 그 내용이 되므로
+        "최상단 = 현재 클립보드" 불변식을 지키기 위해 위로 올린다. 고정 항목은
+        pin_order로 정렬되어 대상이 아니므로 is_pinned = 0 가드로 제외한다.
+        """
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("SELECT MIN(history_order) FROM clipboard_items WHERE is_pinned = 0")
+            min_order = cur.fetchone()[0]
+            new_order = 0 if min_order is None else min_order - 1
+            cur.execute(
+                "UPDATE clipboard_items SET history_order = ? WHERE id = ? AND is_pinned = 0",
+                (new_order, item_id),
+            )
+            self.conn.commit()
+
     def update_item_text(self, item_id: int, new_text: str):
         """텍스트 내용 수정 — html/rtf/extra_formats 초기화"""
         preview = new_text.replace("\n", " ")

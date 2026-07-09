@@ -1515,9 +1515,16 @@ class PasteFlowApp:
         self.panel.refresh(pinned, history, pointer, total, queue_item_ids)
 
     def _on_panel_paste(self, item: ClipboardItem):
-        """패널 항목 클릭 붙여넣기 — auto_close 설정에 따라 패널 닫기 여부 결정"""
+        """패널 항목 붙여넣기(드래그·Enter) — auto_close 설정에 따라 패널 닫기 여부 결정.
+
+        direct_paste가 클립보드를 그 항목으로 교체하므로, 복사와 동일하게 비고정 항목을
+        히스토리 최상단으로 올려 "최상단 = 현재 클립보드" 불변식을 지킨다.
+        """
         full_item = self.db.get_item(item.id) or item
         target_hwnd = self._prev_foreground_hwnd
+
+        if not full_item.is_pinned and full_item.id is not None:
+            self.db.bump_history_to_top(full_item.id)
 
         if self.panel._auto_close:
             # 자동 닫기 ON: 즉시 숨기고 붙여넣기 (fade 대기 시 포그라운드 잠금 문제 발생)
@@ -1545,12 +1552,28 @@ class PasteFlowApp:
 
         threading.Thread(target=_do_paste, daemon=True).start()
 
+        # 패널이 열린 채 유지되면(auto_close OFF) 최상단으로 올라간 순서를 즉시 반영.
+        # ON이면 이미 숨겨졌으므로 다음에 열 때 DB 순서로 새로 그려진다.
+        if not self.panel._auto_close:
+            self._refresh_panel()
+
     def _on_copy_item(self, item: ClipboardItem):
-        """고정 항목 클릭 → 클립보드 복사 + 큐 추가"""
+        """고정/히스토리 항목 복사 → 클립보드 + 큐 추가 + (히스토리는) 최상단 이동 + 토스트.
+
+        옛 히스토리 항목을 복사하면 클립보드가 실제로 그 내용이 되므로, 일반 Ctrl+C와
+        동일하게 최상단으로 올려 "최상단 = 현재 클립보드" 불변식을 지키고 복사 토스트로
+        피드백을 준다. self-triggered `_set_clipboard`라 모니터가 재감지하지 않으므로
+        중복 항목은 생기지 않고, bump/토스트는 여기서 직접 처리한다.
+        """
         full_item = self.db.get_item(item.id) or item
         self.interceptor._set_clipboard(full_item)
         self.queue.add_item(full_item)
+        if not full_item.is_pinned and full_item.id is not None:
+            self.db.bump_history_to_top(full_item.id)
         self._refresh_panel()
+        if self._notify_on_copy:
+            _, total = self.queue.get_status()
+            self._on_copy_toast(full_item, total)
 
     def _on_queue_select(self, item_id: int):
         """패널 항목 클릭 → 큐 설정.
@@ -1941,7 +1964,12 @@ class PasteFlowApp:
                     return  # 저장 성공 시에만 반환; 실패 시 클립보드 경로로 fall-through
 
         # 기존 붙여넣기 경로 (텍스트/기타 항목, 또는 이미지→일반 앱)
+        # 클립보드를 항목 그 자체로 교체하므로 복사·Enter와 동일하게 최상단으로 올린다
+        # ("최상단 = 현재 클립보드"). Alt+드래그(경로 텍스트)·탐색기 저장(PNG)은 위에서
+        # 먼저 return하므로 클립보드=항목인 이 경로에만 적용된다.
         self.interceptor._set_clipboard(full_item)
+        if not full_item.is_pinned:
+            self.db.bump_history_to_top(full_item.id)
 
         target = _find_deepest_child(hwnd, screen_pt)
         class_name = ""
@@ -1962,6 +1990,10 @@ class PasteFlowApp:
         else:
             # Win32 / WinUI3: WM_PASTE 직접 전송
             win32gui.SendMessage(target, win32con.WM_PASTE, 0, 0)
+
+        # 최상단으로 올라간 순서를 패널에 반영 (드래그 소스라 패널은 열려 있음)
+        if self.panel.isVisible():
+            self._refresh_panel()
 
     def _apply_saved_panel_size(self):
         if self._saved_panel_geometry:

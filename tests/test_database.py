@@ -100,6 +100,40 @@ class TestGetRecent:
         assert items[0].text_content == "일반"
 
 
+class TestBumpToTop:
+    """옛 히스토리 항목 복사 시 최상단 이동"""
+
+    def test_bump_moves_item_to_top(self, db):
+        """중간 항목을 bump하면 히스토리 최상단으로 이동"""
+        db.save_item(ClipboardItem(content_type="text", text_content="첫째"))
+        second = db.save_item(ClipboardItem(content_type="text", text_content="둘째"))
+        db.save_item(ClipboardItem(content_type="text", text_content="셋째"))
+        # 현재 최상단은 "셋째"
+        db.bump_history_to_top(second.id)
+        items = db.get_recent_items(limit=10)
+        assert items[0].text_content == "둘째"
+        assert len(items) == 3  # 중복 생성 없음
+
+    def test_bump_top_item_is_noop(self, db):
+        """이미 최상단인 항목을 bump해도 순서 불변"""
+        db.save_item(ClipboardItem(content_type="text", text_content="첫째"))
+        top = db.save_item(ClipboardItem(content_type="text", text_content="둘째"))
+        db.bump_history_to_top(top.id)
+        items = db.get_recent_items(limit=10)
+        assert items[0].text_content == "둘째"
+
+    def test_bump_ignores_pinned(self, db):
+        """고정 항목은 bump 대상이 아님 (히스토리 순서 미변경)"""
+        first = db.save_item(ClipboardItem(content_type="text", text_content="일반1"))
+        pinned = db.save_item(ClipboardItem(content_type="text", text_content="고정"))
+        db.save_item(ClipboardItem(content_type="text", text_content="일반2"))
+        db.pin_item(pinned.id)
+        db.bump_history_to_top(pinned.id)  # 고정 항목 — 무효여야 함
+        items = db.get_recent_items(limit=10)
+        texts = [it.text_content for it in items]
+        assert texts == ["일반2", "일반1"]  # 고정 제외, 순서 그대로
+
+
 class TestFIFOLimit:
     """50개 FIFO 히스토리 제한"""
 
