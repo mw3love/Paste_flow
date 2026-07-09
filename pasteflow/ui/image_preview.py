@@ -179,7 +179,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         # (selectionChanged=선택 변화, changed=아이템 이동/편집. 줌은 _apply_zoom에서 호출.)
         self._scene.selectionChanged.connect(self._update_arrow_dir_btn)
         self._scene.changed.connect(lambda *a: self._update_arrow_dir_btn())
-        self.set_tool("select")
+        self.set_tool(None)  # 손 모드(도구 없음)로 시작 — 편집 진입 기본
         self._view.setDragMode(QGraphicsView.DragMode.NoDrag)  # 뷰어 시작
         self._set_color(self.current_color)
         self._apply_active_style(False)
@@ -370,7 +370,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         self._chrome.setVisible(self._edit_mode)
         self._edit_close_btn.setVisible(self._edit_mode)  # ✕는 편집 모드에서만
         if self._edit_mode:
-            self.set_tool("select")  # RubberBandDrag
+            self.set_tool(None)  # 손 모드로 진입 — 빈곳 드래그=창 이동, 주석 위=선택·이동
             self.activateWindow()
         else:
             self._scene.clearSelection()

@@ -35,9 +35,18 @@ from pasteflow.ui.theme import (
 )
 
 _MIN_WIDTH, _MAX_WIDTH, _DEFAULT_WIDTH = 1, 40, 6
-_MIN_FONT, _MAX_FONT, _DEFAULT_FONT = 6, 200, 16
+_MIN_FONT, _MAX_FONT, _DEFAULT_FONT = 2, 200, 16  # 휠 축소 하한을 2pt로(그 이하는 크기조절 점)
 # 번호 마커 지름(px). 기본 30 = _BadgeItem._R(15) * 2, scale 1.0에 대응.
 _MIN_BADGE, _MAX_BADGE, _DEFAULT_BADGE = 12, 120, 30
+
+
+def _clamp_int(v, lo, hi, default):
+    """v를 int로 파싱해 [lo, hi]로 클램프. 파싱 실패(None·빈문자열 등)면 default."""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(n, hi))
 
 # 대표 프리셋 색상 (빨강·주황·노랑·초록·파랑·검정·흰색)
 _COLOR_PRESETS = [
@@ -314,6 +323,47 @@ def _bg_swatch_icon(bg) -> QIcon:
     return QIcon(pm)
 
 
+_ROTATE_CURSOR = None
+
+
+def _rotate_cursor() -> QCursor:
+    """회전 핸들 hover용 커스텀 커서(곡선 화살표). Qt 기본에 회전 커서가 없어 픽스맵으로
+    1회 생성·캐시. 검은 본체 + 흰 halo라 밝은/어두운 배경 모두에서 보인다."""
+    global _ROTATE_CURSOR
+    if _ROTATE_CURSOR is not None:
+        return _ROTATE_CURSOR
+    pm = QPixmap(32, 32)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    rect = QRectF(8, 8, 16, 16)               # 반지름 8, 중심 (16,16)
+    path = QPainterPath()
+    path.arcMoveTo(rect, 55)
+    path.arcTo(rect, 55, 250)                 # 250° 열린 호
+    pe = path.pointAtPercent(1.0)             # 호 끝 — 화살촉을 실제 두 점 방향으로(각도 규약 회피)
+    pp = path.pointAtPercent(0.9)
+    dx, dy = pe.x() - pp.x(), pe.y() - pp.y()
+    L = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / L, dy / L
+    nx, ny = -uy, ux
+    b = QPointF(pe.x() - ux * 6.0, pe.y() - uy * 6.0)
+    tri = QPolygonF([QPointF(pe),
+                     QPointF(b.x() + nx * 4.0, b.y() + ny * 4.0),
+                     QPointF(b.x() - nx * 4.0, b.y() - ny * 4.0)])
+    for core, aw in ((QColor("white"), 5.0), (QColor("#111111"), 2.4)):  # 흰 halo → 검은 본체
+        pen = QPen(core, aw)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+        p.setBrush(QBrush(core))
+        p.drawPolygon(tri)
+    p.end()
+    _ROTATE_CURSOR = QCursor(pm, 16, 16)
+    return _ROTATE_CURSOR
+
+
 # ---------------------------------------------------------------------------
 # 크기조절 핸들 믹스인 — 선택 시 우하단 핸들 드래그로 균일 스케일
 # ---------------------------------------------------------------------------
@@ -326,7 +376,6 @@ class _HandleResizeMixin:
     _HANDLE_STROKE_FRAC = 1.4  # 획 두께 대비 핸들 비율 — 도형·선·화살표용
     _HANDLE_MIN = 5.0    # 씬 단위 하한(항상 잡히게)
     _HANDLE_MAX = 12.0   # 씬 단위 상한
-    _ROT_GAP = 14.0  # 도형 윗변 ~ 회전 원 사이 빈 줄기(씬 단위, 원 크기와 무관하게 일정)
     _EDGE_HIT_MIN = 8.0  # 속 빈 도형 테두리 클릭 최소 히트폭(씬 단위) — 얇은 선도 잡히게
 
     def _stroke_width(self) -> float:
@@ -492,12 +541,10 @@ class _HandleResizeMixin:
         return QRectF(c.x() - h, c.y() - h, h, h)
 
     def _rot_handle_center(self) -> QPointF:
-        # 우상단 코너 바깥쪽으로 대각선(45°) 오프셋 — 크기조절(우하단)과 오른쪽 변에 위아래로 정렬.
-        # 원이 가리는 부분(반지름)을 간격에 더해, 보이는 줄기(gap)가 핸들 크기와 무관하게 일정.
+        # 우상단 코너 안쪽 — 우하단 크기조절 점과 오른쪽 변에 위아래로 대칭인 점(줄기 없음).
         cr = self._content_rect()
-        r = self._handle_px() * 0.5  # 원 반지름(= 사각 변의 절반 → 사각과 같은 지름)
-        off = (self._ROT_GAP / self._scale_or_1() + r) * 0.70710678  # 대각선 성분
-        return QPointF(cr.right() + off, cr.top() - off)
+        r = self._handle_px() * 0.5  # 원 반지름(= 크기조절 사각 변의 절반 → 같은 지름)
+        return QPointF(cr.right() - r, cr.top() + r)
 
     def _rot_handle_rect(self) -> QRectF:
         d = self._handle_px()  # 원 지름 = 크기조절 사각 변
@@ -532,14 +579,10 @@ class _HandleResizeMixin:
         if not self._handle_active():
             return
         s = self._scale_or_1()
-        # 회전 핸들 — content 우상단 코너 바깥에 줄기 + 코랄 원
-        cr = self._content_rect()
-        corner = QPointF(cr.right(), cr.top())
+        # 회전 핸들 — 우상단 코너 안쪽 코랄 점(줄기 없음, 우하단 크기조절 점과 대칭)
         rc = self._rot_handle_center()
         rh = self._handle_px() * 0.5  # 반지름 — 지름이 크기조절 사각 변과 같게
-        painter.setPen(QPen(QColor(_PEACH), 1.0 / s))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawLine(corner, rc)
+        painter.setPen(QPen(QColor("white"), 1.0 / s))
         painter.setBrush(QBrush(QColor(_PEACH)))
         painter.drawEllipse(rc, rh, rh)
         # 크기조절 핸들 — 우하단 파란 사각
@@ -1073,10 +1116,16 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
             angle = math.atan2(P3.y() - C2.y(), P3.x() - C2.x())
         return tip, angle
 
+    def _head_size(self) -> float:
+        """화살촉 크기 — 선 두께에 비례(얇으면 작게, 굵으면 크게). 최소 7로 아주 얇은
+        선에서도 머리가 보이되, 옛 max(14,…) 바닥값이 얇은 선에서 머리를 불비례로
+        키우던 문제를 없앤다(두께 휠 조절 시 머리도 같이 줄고 커짐)."""
+        return max(self._width * 2.5, 7.0)
+
     def _head_points(self):
         """화살촉 삼각형 세 꼭짓점(tip + 뒤쪽 두 점)."""
         tip, angle = self._tip_and_angle()
-        size = max(14, self._width * 3)
+        size = self._head_size()
         a1 = angle + math.radians(150)
         a2 = angle - math.radians(150)
         return [
@@ -1127,7 +1176,7 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         if self._ctrl1 is None and length < 1:
             return  # 클릭만 한 0길이 직선 화살표는 머리도 그리지 않음(깜빡임 방지)
 
-        size = max(14, self._width * 3)
+        size = self._head_size()
         pen = QPen(self._color, self._width, Qt.PenStyle.SolidLine,
                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
 
@@ -1600,6 +1649,7 @@ class _AnnotatorView(QGraphicsView):
         self._snap_preview = None    # 화살표 도구 유휴 시 커서 근처 테두리 최근접점(마커 표시), 씬 좌표 or None
         self._arrow_snap_exit = None # 그리는 화살표 시작이 테두리에 스냅됐으면 그 바깥 법선(이탈 접선), or None
         self._arrow_tip_snap = None  # 그리는 화살표 tip이 테두리에 스냅된 지점(씬 좌표) or None
+        self._none_win_dragging = False  # 손 모드(도구 없음) 빈영역 좌드래그 = 창 이동 중
 
     def _is_empty_area(self, view_pos) -> bool:
         """클릭 위치에 선택 가능한 주석 아이템이 없으면(배경뿐) True."""
@@ -1619,6 +1669,20 @@ class _AnnotatorView(QGraphicsView):
                     and it._bend_handle_index_at(it.mapFromScene(scene_pt)):
                 return it
         return None
+
+    def _rot_handle_at(self, view_pos) -> bool:
+        """커서가 '선택된' 도형의 회전 점 안이면 True — hover 회전 커서 판정용."""
+        scene_pt = self.mapToScene(view_pos)
+        for it in self.scene().selectedItems():
+            rr = getattr(it, "_rot_handle_rect", None)
+            active = getattr(it, "_handle_active", None)
+            if rr is None or active is None or not active():
+                continue
+            if it._uses_endpoints():   # 선·화살표는 회전 핸들 없음(끝점 핸들 사용)
+                continue
+            if rr().contains(it.mapFromScene(scene_pt)):
+                return True
+        return False
 
     def _over_selected_endpoint(self, view_pos) -> bool:
         """커서가 '선택된' 선·화살표의 끝점 핸들 안이면 True(끝점 이동 우선 판정용)."""
@@ -1833,6 +1897,15 @@ class _AnnotatorView(QGraphicsView):
                 it.set_points(self._start, self._start)
                 self._begin_draw(it)
                 return
+        if tool is None:
+            # 손 모드: 빈 영역 좌드래그 = 창 이동, 주석 위 = 단일 선택/이동(하이브리드).
+            if self._is_empty_area(event.position().toPoint()):
+                self._owner._win_drag_start(event.globalPosition().toPoint())
+                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                self._none_win_dragging = True
+                return
+            self._snapshot_movable()   # 주석 드래그 이동을 undo로 되돌리기 위해
+            return super().mousePressEvent(event)
         if tool == "select":
             # Qt 기본: 빈 영역 드래그 = 러버밴드 다중선택, 아이템 위 = 이동/선택.
             # 창 이동은 상단 코랄 드래그바로. (편집 모드 본문 pan은 제거)
@@ -1932,6 +2005,8 @@ class _AnnotatorView(QGraphicsView):
         edit_text = self._editing_text_hover(view_pos)
         if self._bend_handle_at(view_pos) is not None:
             vp.setCursor(Qt.CursorShape.PointingHandCursor)  # 곡선 조절 손잡이(이동과 구분)
+        elif self._rot_handle_at(view_pos):
+            vp.setCursor(_rotate_cursor())                   # 회전 점 — 곡선 화살표 커서
         elif edit_text == "text":
             vp.setCursor(Qt.CursorShape.IBeamCursor)         # 편집 중 텍스트 내부 — 캐럿
         elif edit_text == "move":
@@ -1942,6 +2017,8 @@ class _AnnotatorView(QGraphicsView):
             vp.setCursor(Qt.CursorShape.CrossCursor)         # 펜 — 주석 위에서도 항상 그리기
         elif not self._is_empty_area(view_pos):
             vp.setCursor(Qt.CursorShape.SizeAllCursor)       # 주석 위 — 선택/이동
+        elif tool is None:
+            vp.setCursor(Qt.CursorShape.OpenHandCursor)      # 손 모드 빈 영역 — 창 이동
         elif tool == "select":
             vp.setCursor(Qt.CursorShape.ArrowCursor)         # 빈 영역 — 러버밴드 선택
         elif tool == "text":
@@ -1951,6 +2028,9 @@ class _AnnotatorView(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         if event.buttons() & Qt.MouseButton.MiddleButton:
+            self._owner._win_drag_move(event.globalPosition().toPoint())
+            return
+        if self._none_win_dragging:  # 손 모드 빈영역 좌드래그 = 창 이동
             self._owner._win_drag_move(event.globalPosition().toPoint())
             return
         if not self._owner.is_edit_mode():
@@ -1982,6 +2062,11 @@ class _AnnotatorView(QGraphicsView):
         if event.button() == Qt.MouseButton.MiddleButton:
             self._owner._win_drag_end()
             self.viewport().unsetCursor()
+            return
+        if self._none_win_dragging:  # 손 모드 창 이동 종료
+            self._owner._win_drag_end()
+            self._none_win_dragging = False
+            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
             return
         if not self._owner.is_edit_mode():
             self._owner._win_drag_end()
@@ -2169,12 +2254,28 @@ class _EditorMixin:
         _win_drag_end/_on_wheel_zoom/close — _AnnotatorView가 호출
     """
 
-    # 세션 내 마지막으로 쓴 획 두께·글자 크기·번호 크기를 기억 — 새 편집기(다음에 연 이미지)도
+    # 마지막으로 쓴 획 두께·글자 크기·번호 크기를 기억 — 새 편집기(다음에 연 이미지)도
     # 기본값이 아니라 이 값으로 시작한다(매번 기본으로 리셋되던 불편 해소, 크기 스테퍼 제거의 근거).
-    # 앱 재시작 시엔 초기화.
+    # DB에도 저장돼 앱 재시작 후에도 유지: 시작 시 main이 load_last_values로 주입,
+    # 변경 시 _persist_cb(main 등록)로 DB에 기록. (미등록이면 세션 내 기억만.)
     _last_width = _DEFAULT_WIDTH
     _last_font_size = _DEFAULT_FONT
     _last_badge_size = _DEFAULT_BADGE
+    _persist_cb = None   # callable(width, font, badge) → DB 저장 (main이 시작 시 1회 등록)
+
+    @classmethod
+    def load_last_values(cls, width, font, badge):
+        """앱 시작 시 DB에 저장된 마지막 두께·글자·번호 크기를 주입(파싱실패·범위 밖은 기본값)."""
+        cls._last_width = _clamp_int(width, _MIN_WIDTH, _MAX_WIDTH, _DEFAULT_WIDTH)
+        cls._last_font_size = _clamp_int(font, _MIN_FONT, _MAX_FONT, _DEFAULT_FONT)
+        cls._last_badge_size = _clamp_int(badge, _MIN_BADGE, _MAX_BADGE, _DEFAULT_BADGE)
+
+    def _persist_last_values(self):
+        """마지막 값 변경 시 DB에 기록(콜백 미등록이면 세션 내 기억만)."""
+        cb = _EditorMixin._persist_cb
+        if cb is not None:
+            cb(_EditorMixin._last_width, _EditorMixin._last_font_size,
+               _EditorMixin._last_badge_size)
 
     def _init_editor_state(self):
         self.current_tool = "select"
@@ -2207,13 +2308,14 @@ class _EditorMixin:
 
         # 도구 (아이콘)
         group = QButtonGroup(self)
-        group.setExclusive(True)
+        group.setExclusive(False)  # '0개 선택'(손 모드) 허용 — set_tool이 체크를 직접 관리
         for key, name, sc in _TOOLS:
             btn = QToolButton()
             btn.setIconSize(QSize(18, 18))
             btn.setCheckable(True)
             btn.setToolTip(f"{name} ({sc})")
-            btn.clicked.connect(lambda _c, k=key: self.set_tool(k))
+            # 활성 도구를 다시 누르면 손 모드(None)로 복귀 — 토글.
+            btn.clicked.connect(lambda _c, k=key: self.set_tool(None if self.current_tool == k else k))
             group.addButton(btn)
             tools.addWidget(btn)
             self._tool_buttons[key] = btn
@@ -2439,18 +2541,20 @@ class _EditorMixin:
         """
 
     # ---- 도구/색/두께 상태 -------------------------------------------------
-    def set_tool(self, tool: str):
+    def set_tool(self, tool):
         self.current_tool = tool
         if tool == "select":
             self._view.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
         else:
             self._view.setDragMode(QGraphicsView.DragMode.NoDrag)
-        btn = self._tool_buttons.get(tool)
-        if btn is not None and not btn.isChecked():
-            btn.setChecked(True)
+        # 버튼 체크 상태 직접 관리(그룹 비배타) — 손 모드(None)면 전부 해제.
+        for k, b in self._tool_buttons.items():
+            if b.isChecked() != (k == tool):
+                b.setChecked(k == tool)
         # 도구 기본 커서 — hover 이벤트 전 stale 방지(주석 위 SizeAll은 다음 move에서 갱신)
         self._view.viewport().setCursor(
-            Qt.CursorShape.ArrowCursor if tool == "select"
+            Qt.CursorShape.OpenHandCursor if tool is None
+            else Qt.CursorShape.ArrowCursor if tool == "select"
             else Qt.CursorShape.IBeamCursor if tool == "text"
             else Qt.CursorShape.CrossCursor
         )
@@ -2589,6 +2693,7 @@ class _EditorMixin:
             item.apply_width(new)
             self.current_width = new
             _EditorMixin._last_width = new   # 마지막 두께 기억 → 다음 편집기도 이 값으로 시작
+        self._persist_last_values()   # 변경된 마지막 값을 DB에 기록(재시작 후 유지)
 
     def _toggle_arrow_dir(self):
         # 선택된 화살표가 있으면 각자 자기 방향을 뒤집고 기본값·아이콘을 첫 화살표에 맞춘다.

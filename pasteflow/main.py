@@ -22,6 +22,7 @@ from pasteflow.ui.panel import (
     ClipboardPanel, EditItemDialog, PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT,
 )
 from pasteflow.ui.image_preview import ImagePreviewPopup
+from pasteflow.ui.image_annotator import _EditorMixin
 from pasteflow.ui.text_preview import TextPreviewPopup
 from pasteflow.ui.tray import TrayIcon
 from pasteflow.ui.paste_hud import PasteHud
@@ -685,6 +686,14 @@ class PasteFlowApp:
         # 코어 모듈
         db_path = _resolve_db_path()
         self.db = Database(db_path)
+        # 주석 편집기 마지막 값(두께·글자·번호 크기)을 DB에서 복원 + 변경 시 저장 콜백 등록
+        # (재시작 후에도 유지 — 클래스 변수라 세션 중 이미지 간 공유는 그대로).
+        _EditorMixin.load_last_values(
+            self.db.get_setting("annot_last_width", ""),
+            self.db.get_setting("annot_last_font_size", ""),
+            self.db.get_setting("annot_last_badge_size", ""),
+        )
+        _EditorMixin._persist_cb = self._save_annot_last_values
         self.queue = PasteQueue()
         self.monitor = ClipboardMonitor(
             on_new_item=self._on_new_clipboard_item,
@@ -1934,6 +1943,13 @@ class PasteFlowApp:
         """시크릿 키(DPAPI 암호화 저장) 복호화 읽기 헬퍼."""
         from pasteflow.crypto import unprotect
         return unprotect(self.db.get_setting(key, default) or default)
+
+    def _save_annot_last_values(self, width, font, badge):
+        """주석 편집기 마지막 값(두께·글자·번호 크기)을 DB에 저장 — 재시작 후에도 유지.
+        _EditorMixin._persist_cb로 등록돼 값 변경(주석 위 휠) 시 호출된다."""
+        self.db.set_setting("annot_last_width", str(width))
+        self.db.set_setting("annot_last_font_size", str(font))
+        self.db.set_setting("annot_last_badge_size", str(badge))
 
     def _apply_settings_from_db(self):
         """DB에서 설정 로드 → UI/동작에 적용."""
