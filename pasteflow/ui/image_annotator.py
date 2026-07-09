@@ -399,6 +399,28 @@ class _HandleResizeMixin:
         h_scene = max(self._HANDLE_MIN, min(scene_dim * self._HANDLE_FRAC, self._HANDLE_MAX))
         return h_scene / s
 
+    # ---- 잡기 판정(시각 점과 분리) --------------------------------------
+    # 그려지는 점은 작게(_handle_px) 두되, '잡히는' 영역은 화면 고정 px로 넉넉히
+    # — Figma·일러스트레이터식. 얇은 화살표의 bend/끝점 점이 화면상 5~12px라 커서를
+    # 정확히 맞춰야 손가락 커서가 되던 문제를 없앤다(hover·press·shape 모두 이 rect 사용).
+    _HIT_MIN_PX = 24.0   # 화면 px — 핸들 잡기 최소 지름(줌 무관)
+
+    def _hit_pad_local(self) -> float:
+        """잡기 판정 반지름(로컬 단위). 화면 고정 px를 현재 뷰·아이템 배율로 환산."""
+        view_s = 1.0
+        sc = self.scene()
+        if sc is not None and sc.views():
+            view_s = sc.views()[0]._view_scale()
+        total = max(view_s * self._scale_or_1(), 1e-6)
+        return (self._HIT_MIN_PX / total) / 2.0
+
+    def _inflate_to_hit(self, rect: QRectF) -> QRectF:
+        """핸들 시각 rect를 잡기 최소 지름까지 부풀린 판정용 rect(이미 크면 그대로)."""
+        grow = self._hit_pad_local() - rect.width() / 2.0
+        if grow <= 0.0:
+            return rect
+        return rect.adjusted(-grow, -grow, grow, grow)
+
     def _init_resize(self):
         self._resizing = False
         self._rotating = False
@@ -412,8 +434,6 @@ class _HandleResizeMixin:
     # 선·화살표처럼 '2점으로 완전히 결정되는' 도형은 회전+균일스케일 핸들 대신
     # 양끝점 핸들을 쓴다(끝점 2개면 길이·각도가 모두 결정 → 회전/스케일 중복). 기본은 off라
     # 네모·원·번호·텍스트는 기존 회전+스케일 핸들을 그대로 쓴다.
-    _ENDPOINT_TOOLS = (None, "select", "line", "arrow")
-
     def _uses_endpoints(self) -> bool:
         return False
 
@@ -426,9 +446,8 @@ class _HandleResizeMixin:
         pass
 
     def _endpoint_active(self) -> bool:
-        if not self.isSelected():
-            return False
-        return self._owner_tool() in self._ENDPOINT_TOOLS
+        # 선택돼 있으면 어떤 도구에서든 끝점 이동·재스냅 가능(회전·크기조절 핸들과 동일 정책).
+        return self.isSelected()
 
     def _endpoint_rect(self, idx: int) -> QRectF:
         d = self._handle_px()
@@ -531,7 +550,9 @@ class _HandleResizeMixin:
         if self._uses_endpoints():
             r = self._content_rect()
             for i in range(len(self._endpoints())):
-                r = r.united(self._endpoint_rect(i))
+                # 시각 rect가 아니라 '잡기' rect까지 예약해야 넉넉한 hit-shape가
+                # boundingRect 밖으로 나가 Qt에 컬링당하지 않는다.
+                r = r.united(self._inflate_to_hit(self._endpoint_rect(i)))
             return r.adjusted(-pad, -pad, pad, pad)
         return self._content_rect().united(self._rot_handle_rect().adjusted(-pad, -pad, pad, pad))
 
@@ -563,10 +584,8 @@ class _HandleResizeMixin:
     def _handle_active(self) -> bool:
         if not self.isSelected():
             return False
-        # 크기조절 핸들은 선택(V) 도구일 때만 — 그리기 중엔 거슬리므로 숨긴다.
-        tool = self._owner_tool()
-        if tool is not None and tool != "select":
-            return False
+        # 선택돼 있으면 어떤 도구에서든 이동·회전·크기조절을 바로 할 수 있게 핸들을 띄운다
+        # (선택 도구는 러버밴드 다중선택을 계속 담당). 도구 전환 없이 방금 그린 도형을 다듬기 위함.
         if isinstance(self, QGraphicsTextItem) and \
                 self.textInteractionFlags() != Qt.TextInteractionFlag.NoTextInteraction:
             return False
@@ -611,7 +630,7 @@ class _HandleResizeMixin:
             if self._endpoint_active():
                 hp = QPainterPath()
                 for i in range(len(self._endpoints())):
-                    hp.addRect(self._endpoint_rect(i))
+                    hp.addRect(self._inflate_to_hit(self._endpoint_rect(i)))
                 return base.united(hp)
             return base
         if self._handle_active():
@@ -625,7 +644,7 @@ class _HandleResizeMixin:
         if self._uses_endpoints():
             if self._endpoint_active():
                 for i in range(len(self._endpoints())):
-                    if self._endpoint_rect(i).contains(event.pos()):
+                    if self._inflate_to_hit(self._endpoint_rect(i)).contains(event.pos()):
                         self._drag_endpoint = i
                         event.accept()
                         return
@@ -869,6 +888,17 @@ class _PathItem(_HandleResizeMixin, QGraphicsPathItem):
         # 수정하지 변형하지 않는다. 선택 시 획 따라가는 점선만, 이동은 획 잡아 끌기(movable).
         return False
 
+    def _base_shape(self):
+        # 클릭 영역은 '획 위'만 — Qt 기본 QGraphicsPathItem.shape()는 스트로크에 원본 패스를
+        # addPath로 더해, 닫힌(감싸는) 펜 획의 안쪽 면까지 클릭 영역에 포함한다. 그러면 도형을
+        # 빙 둘러 그린 펜이 안쪽 빈 공간의 클릭을 통째로 가로채 안쪽 도형이 선택되지 않는다.
+        # 획만 두껍게 스트로크한 밴드를 반환해(안쪽은 비움) 루프 안 도형이 정상 선택되게 한다.
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(self.pen().widthF(), 10) + 4)   # 잡기 쉬운 폭
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        return stroker.createStroke(self.path())
+
     def boundingRect(self):
         # 선택 외곽선(획+8)이 _content_rect보다 살짝 바깥으로 나가므로 여유를 더 준다.
         pad = 5.0 / self._scale_or_1()
@@ -1079,7 +1109,7 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         if not self._bend_active():
             return 0
         for which in (1, 2):
-            if self._bend_handle_rect(which).contains(local_pos):
+            if self._inflate_to_hit(self._bend_handle_rect(which)).contains(local_pos):
                 return which
         return 0
 
@@ -1099,11 +1129,8 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
                 (27 * target.y() - p1.y() - 6 * c1.y() - 8 * p2.y()) / 12.0)
 
     def _bend_active(self) -> bool:
-        # bend 핸들은 크기조절·회전과 달리 arrow 도구에서도 활성 — 그리기 직후(자동 선택 상태)에
-        # 도구 전환 없이 바로 곡선을 줄 수 있게. 크기조절·회전 핸들은 여전히 select 전용.
-        if not self.isSelected():
-            return False
-        return self._owner_tool() in (None, "select", "arrow")
+        # 선택돼 있으면 어떤 도구에서든 곡선 조절 가능(끝점·회전·크기조절 핸들과 동일 정책).
+        return self.isSelected()
 
     def _tip_and_angle(self):
         """화살촉이 놓이는 tip 점과 그 지점의 진행 방향 각도(paint와 동일 규칙)."""
@@ -1164,9 +1191,9 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         shape = stroker.createStroke(body)
         shape.addPolygon(QPolygonF(self._head_points()))
-        if self._bend_active():   # 초록 bend 핸들도 잡을 수 있게
+        if self._bend_active():   # 초록 bend 핸들도 잡을 수 있게(넉넉한 잡기 영역)
             for which in (1, 2):
-                shape.addEllipse(self._bend_handle_rect(which))
+                shape.addEllipse(self._inflate_to_hit(self._bend_handle_rect(which)))
         return shape
 
     def paint(self, painter, option, widget=None):
@@ -1255,7 +1282,7 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         if self._bend_active():
             hp = QPainterPath()
             for which in (1, 2):
-                hp.addEllipse(self._bend_handle_rect(which))
+                hp.addEllipse(self._inflate_to_hit(self._bend_handle_rect(which)))
             return base.united(hp)
         return base
 
@@ -1266,7 +1293,7 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         r = super().boundingRect()
         if self._bend_active():
             for which in (1, 2):
-                r = r.united(self._bend_handle_rect(which))
+                r = r.united(self._inflate_to_hit(self._bend_handle_rect(which)))
         pad = 4.0 + 4.0 / self._scale_or_1()   # 외곽선 초과분 + 점선 펜 + 안티에일리어싱 여유
         return r.adjusted(-pad, -pad, pad, pad)
 
@@ -1662,9 +1689,10 @@ class _AnnotatorView(QGraphicsView):
 
     def _bend_handle_at(self, view_pos):
         """커서(view 좌표) 아래에 활성 bend 핸들이 있으면 그 화살표, 없으면 None.
-        호버 커서를 몸통(이동)과 구분하는 데 쓴다."""
+        호버 커서를 몸통(이동)과 구분하는 데 쓴다. 선택된 아이템을 직접 순회하므로
+        넉넉한 잡기 영역이 shape 컬링에 걸리지 않는다(끝점 판정과 동일 방식)."""
         scene_pt = self.mapToScene(view_pos)
-        for it in self.items(view_pos):
+        for it in self.scene().selectedItems():
             if isinstance(it, _ArrowItem) and it._bend_active() \
                     and it._bend_handle_index_at(it.mapFromScene(scene_pt)):
                 return it
@@ -1707,7 +1735,7 @@ class _AnnotatorView(QGraphicsView):
             if uses and it._uses_endpoints() and it._endpoint_active():
                 local = it.mapFromScene(scene_pt)
                 for i in range(len(it._endpoints())):
-                    if it._endpoint_rect(i).contains(local):
+                    if it._inflate_to_hit(it._endpoint_rect(i)).contains(local):
                         return it
         return None
 
@@ -1769,8 +1797,13 @@ class _AnnotatorView(QGraphicsView):
         """화살표 도구 유휴 시 커서 근처 테두리 최근접점을 마커로 예고(스냅 발동 가능 표시)."""
         prev = self._snap_preview
         new = None
+        # 커서가 이미 선택된 화살표의 끝점/곡선 핸들 위면(= 이동·재스냅 모드, 손가락 커서)
+        # '새 화살표 시작' 예고 마커를 띄우지 않는다 — 끝점이 도형 테두리에 붙어 있어
+        # 생성-스냅점과 겹칠 때 큰 파란 점이 손가락 커서와 함께 남던 문제 방지.
         if (self._owner.is_edit_mode() and self._owner.current_tool == "arrow"
-                and not self._drawing):
+                and not self._drawing
+                and self._selected_endpoint_item(view_pos) is None
+                and self._bend_handle_at(view_pos) is None):
             snap = self._border_snap_at(view_pos)
             if snap is not None:
                 new = snap[0]
