@@ -75,9 +75,9 @@ _TEXT_BG_OPTIONS = [
 
 # 도구 정의: (key, 한글명, 단축키 라벨)
 _TOOLS = [
-    ("select", "선택", "Alt+1"), ("rect", "네모", "Alt+2"), ("text", "텍스트", "Alt+3"),
-    ("arrow", "화살표", "Alt+4"), ("ellipse", "원", "Alt+5"), ("line", "선", "Alt+6"),
-    ("pen", "펜", "Alt+7"), ("badge", "번호", "Alt+8"),
+    ("select", "선택", "1"), ("rect", "네모", "2"), ("arrow", "화살표", "3"),
+    ("text", "텍스트", "4"), ("ellipse", "원", "5"), ("line", "선", "6"),
+    ("pen", "펜", "7"), ("badge", "번호", "8"),
 ]
 
 
@@ -1628,8 +1628,8 @@ def _nearest_border(item, scene_pt):
 
 class _AnnotatorView(QGraphicsView):
     _SHORTCUTS = {
-        Qt.Key.Key_1: "select", Qt.Key.Key_2: "rect", Qt.Key.Key_3: "text",
-        Qt.Key.Key_4: "arrow", Qt.Key.Key_5: "ellipse", Qt.Key.Key_6: "line",
+        Qt.Key.Key_1: "select", Qt.Key.Key_2: "rect", Qt.Key.Key_3: "arrow",
+        Qt.Key.Key_4: "text", Qt.Key.Key_5: "ellipse", Qt.Key.Key_6: "line",
         Qt.Key.Key_7: "pen", Qt.Key.Key_8: "badge",
     }
 
@@ -1699,8 +1699,8 @@ class _AnnotatorView(QGraphicsView):
                 return True
         return False
 
-    def _over_selected_endpoint(self, view_pos) -> bool:
-        """커서가 '선택된' 선·화살표의 끝점 핸들 안이면 True(끝점 이동 우선 판정용)."""
+    def _selected_endpoint_item(self, view_pos):
+        """커서가 '선택된' 선·화살표의 끝점 핸들 안이면 그 아이템, 아니면 None."""
         scene_pt = self.mapToScene(view_pos)
         for it in self.scene().selectedItems():
             uses = getattr(it, "_uses_endpoints", None)
@@ -1708,8 +1708,12 @@ class _AnnotatorView(QGraphicsView):
                 local = it.mapFromScene(scene_pt)
                 for i in range(len(it._endpoints())):
                     if it._endpoint_rect(i).contains(local):
-                        return True
-        return False
+                        return it
+        return None
+
+    def _over_selected_endpoint(self, view_pos) -> bool:
+        """커서가 '선택된' 선·화살표의 끝점 핸들 안이면 True(hover 커서 판정용)."""
+        return self._selected_endpoint_item(view_pos) is not None
 
     def _snapshot_movable(self):
         """드래그 이동 전 이동 가능 아이템들의 위치를 기록(release에서 변경분만 undo에 커밋)."""
@@ -1894,11 +1898,24 @@ class _AnnotatorView(QGraphicsView):
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
-        # 이미 선택된 화살표/선의 끝점 핸들 위 press면 새 연결 화살표를 만들지 말고 그 끝점을
-        # 이동(도형 테두리에 붙은 화살표 끝을 떼어내기). 연결점보다 끝점 이동을 우선 —
-        # 안 그러면 끝점이 도형 연결점과 겹칠 때 매번 새 화살표가 생긴다.
-        if self._over_selected_endpoint(event.position().toPoint()):
-            return super().mousePressEvent(event)
+        # 이미 선택된 화살표/선의 끝점·곡선(bend) 조절 핸들 위 press는 겹친 도형 테두리보다 우선한다
+        # (선택된 아이템의 핸들이 먼저 작동해야 함). 끝점/핸들은 도형 테두리에 딱 붙는 일이 잦아
+        # Z-order 배달로는 아래 도형이 press를 가로챈다 → 그 아이템을 잠깐 최상단으로 올려 Qt가
+        # 그 아이템에 press를 배달(=grab)하게 한 뒤 Z를 즉시 복원한다(grab은 Z와 무관하게 유지).
+        # 끝점 우선은 "새 연결 화살표 생성"(arrow 도구)보다도 앞서야 겹칠 때 새 화살표가 안 생긴다.
+        vpos = event.position().toPoint()
+        grab = self._selected_endpoint_item(vpos) or self._bend_handle_at(vpos)
+        if grab is not None:
+            if self._snap_preview is not None:
+                # 끝점/핸들 드래그 시작 → 유휴 테두리 스냅 예고 마커를 즉시 제거(드래그 중엔
+                # 버튼 눌림으로 _update_snap_preview가 안 돌아 이전 마커가 도형에 남던 잔상 방지).
+                self._snap_preview = None
+                self.viewport().update()
+            old_z = grab.zValue()
+            grab.setZValue(1e9)
+            super().mousePressEvent(event)
+            grab.setZValue(old_z)
+            return
         tool = self._owner.current_tool
         # 화살표 도구 + 도형 테두리 근처 press → 테두리에 스냅된 곡선 화살표 시작(도형 선택/이동보다 우선).
         if tool == "arrow":
@@ -2020,6 +2037,8 @@ class _AnnotatorView(QGraphicsView):
         edit_text = self._editing_text_hover(view_pos)
         if self._bend_handle_at(view_pos) is not None:
             vp.setCursor(Qt.CursorShape.PointingHandCursor)  # 곡선 조절 손잡이(이동과 구분)
+        elif self._over_selected_endpoint(view_pos):
+            vp.setCursor(Qt.CursorShape.PointingHandCursor)  # 끝점 핸들(이동/재스냅) — 곡선 핸들과 동일
         elif self._rot_handle_at(view_pos):
             vp.setCursor(_rotate_cursor())                   # 회전 점 — 곡선 화살표 커서
         elif self._scale_handle_at(view_pos):
@@ -2184,7 +2203,10 @@ class _AnnotatorView(QGraphicsView):
             if (mods & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_V:
                 self._owner.paste_selection()
                 return
-            if mods == Qt.KeyboardModifier.AltModifier and key in self._SHORTCUTS:
+            if key in self._SHORTCUTS and not (mods & (
+                    Qt.KeyboardModifier.ControlModifier
+                    | Qt.KeyboardModifier.AltModifier
+                    | Qt.KeyboardModifier.ShiftModifier)):
                 self._owner.set_tool(self._SHORTCUTS[key])
                 return
             if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
