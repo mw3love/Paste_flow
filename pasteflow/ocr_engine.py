@@ -31,25 +31,78 @@ def _normalize_base_url(base_url: str) -> str:
             break
     return url
 
-# ── Gemini 모델 화이트리스트 ────────────────────────────────────────────────
-# 코드 작성자가 명시적으로 검증한 모델만 등재한다. ↻ 새로고침으로 받은 게이트웨이
+# ── 검증된 모델 화이트리스트 ──────────────────────────────────────────────────
+# 코드 작성자가 **실제로 호출해 본** 모델만 등재한다. ↻ 새로고침으로 받은 게이트웨이
 # 라인업 정렬과 OCR 실패 시 폴백 후보 선정에 사용. 게이트웨이가 모델 라인업을
 # 바꾸면 이 목록을 갱신하면 된다. 알 수 없는 모델은 콤보에 "(미검증)" 태그로
 # 노출되어 사용자가 명시적으로 선택할 수 있다.
 #
+# 등재 기준: **텍스트 질의와 이미지(비전) 질의 양쪽**을 실호출로 확인한 것만.
+# OCR·이미지 AI 질의가 이미지를 보내므로 텍스트만 되는 모델을 등재하면 안 된다
+# (예: solar-pro2는 이미지 입력에 400 → 미등재).
+#
 # 필드: (name, tier_rank, on_official, on_gateway)
-#   - tier_rank   가격 티어. 0=flash-lite, 1=flash, 2=pro. 낮을수록 저렴.
+#   - tier_rank   **추정** 가격 순위. 낮을수록 저렴. 콤보 정렬 순서에만 쓴다.
+#                 0=최저가(flash-lite급) 1=중저가(flash급) 2=고가(pro급) 3=최상위(opus급)
+#                 ⚠ 실측값이 아니다. 게이트웨이는 chat 단가를 API로도 costs.json으로도
+#                 주지 않는다(2026-07-09 확인). gemini 4종은 구글 공개 문서의 등급을 옮긴
+#                 것이고, 나머지는 계열 통념에 따른 어림값이다. 그래서 이 값을 UI에
+#                 "저렴/고가" 배지로 **표시하지 않는다** — 정렬 힌트로만 쓴다.
 #   - on_official 공식 Google AI Studio API에서 사용 가능 (확인된 것만 True)
 #   - on_gateway  factchat-cloud 게이트웨이에서 사용 가능 (확인된 것만 True)
+#
+# 비-gemini 항목은 게이트웨이 전용(on_official=False) — 공식 API는 gemini만 서빙한다.
+# 새 항목은 **끝에 덧붙인다**: select_fallback_model이 _FALLBACK_DEFAULT 부재 시
+# compatible[0](= 튜플 순서 첫 항목)을 고르므로, 앞에 비싼 모델을 끼우면 폴백이 비싸진다.
 _VERIFIED_MODELS: tuple[tuple[str, int, bool, bool], ...] = (
     ("gemini-3.1-flash-lite", 0, False, True),   # 게이트웨이 확인 2026-05-27
     ("gemini-2.5-flash",      1, True,  True),   # 공식+게이트웨이 모두 검증
     ("gemini-3.5-flash",      1, False, True),   # 게이트웨이 확인 2026-05-27
     ("gemini-2.5-pro",        2, True,  True),   # 공식+게이트웨이 모두 검증
+    # 아래 3종: 텍스트+이미지 실호출 확인 2026-07-09 (게이트웨이)
+    ("gpt-5-mini",            1, False, True),
+    ("grok-4-1-fast",         1, False, True),
+    ("claude-opus-4-8",       3, False, True),
 )
 
 # 어느 backend에서든 호출되리라 신뢰하는 최종 안전망 폴백 모델
 _FALLBACK_DEFAULT = "gemini-2.5-flash"
+
+# ── 비전(이미지 입력) 미지원 모델 ─────────────────────────────────────────────
+# 2026-07-09 게이트웨이 chat 42종 전수 실호출 스윕 결과(빨간/파란 단색 PNG로 색 판별).
+# 이 4종만 이미지 첨부 시 400 invalid_request_error로 거부했고 나머지 35종은 통과했다.
+# OCR·이미지 AI 질의는 이미지를 보내므로 OCR 모델 목록에서 제외한다.
+# 텍스트 질의는 정상이므로 AI 질의 모델 목록에는 그대로 남긴다.
+_NO_VISION_MODELS: frozenset = frozenset({
+    "accounts/fireworks/models/gpt-oss-120b",
+    "LGAI-EXAONE/K-EXAONE-236B-A23B",
+    "solar-pro2",
+    "solar-pro3",
+})
+
+# ── 유령 모델 (게이트웨이가 /models로 광고하지만 호출하면 404) ────────────────
+# 같은 2026-07-09 스윕에서 확인. 사용자가 고르면 _call_with_fallback이 model_not_found로
+# 판정해 조용히 _FALLBACK_DEFAULT로 폴백하므로 "고른 모델이 아닌 답"이 돌아온다.
+# 애초에 못 고르게 목록 단계에서 제거한다. 게이트웨이가 실제 서빙을 시작하면 여기서 빼면 된다.
+_PHANTOM_MODELS: frozenset = frozenset({
+    "gpt-5.1-codex-max",
+    "gpt-5.2-codex",
+    "gpt-5.3-codex",
+})
+
+
+def is_vision_capable(name: str) -> bool:
+    """이 모델이 이미지 입력을 받는지(2026-07-09 실측 기준). 미측정 모델은 True로 본다."""
+    return name not in _NO_VISION_MODELS
+
+
+def vision_capable_models(candidates: list[str]) -> list[str]:
+    """이미지 입력이 가능한 모델만 남긴다 — OCR·이미지 질의 모델 목록용.
+
+    미측정 모델은 통과시킨다(보수적 차단보다 노출 후 실패가 낫다 — 새 모델이
+    추가돼도 목록에서 사라지지 않게). 확실히 안 되는 것만 _NO_VISION_MODELS로 막는다.
+    """
+    return [m for m in candidates if m not in _NO_VISION_MODELS]
 
 
 def _backend_compat(entry: tuple, backend: str) -> bool:
@@ -70,11 +123,15 @@ def sort_models_with_whitelist(
     -------
     (verified, unverified)
         verified   — 화이트리스트 ∩ candidates, tier_rank 오름차순 (저렴한 것 먼저).
-        unverified — candidates − 화이트리스트, 알파벳순.
+        unverified — candidates − 화이트리스트, 대소문자 무시 알파벳순.
+
+    unverified 정렬이 대소문자 무시인 이유: 게이트웨이 필터 해제 후 `LGAI-EXAONE/...`
+    같은 대문자 ID가 섞이는데, 기본 sorted()는 ASCII 순서라 대문자가 전부 소문자 앞으로
+    가서 계열 묶임(claude-*, gemini-*, gpt-*)이 깨진다.
     """
     wl = {e[0]: e[1] for e in _VERIFIED_MODELS if _backend_compat(e, backend)}
     verified = sorted((n for n in candidates if n in wl), key=lambda n: (wl[n], n))
-    unverified = sorted(n for n in candidates if n not in wl)
+    unverified = sorted((n for n in candidates if n not in wl), key=str.lower)
     return verified, unverified
 
 
@@ -286,12 +343,21 @@ class OcrEngine:
 
     @staticmethod
     def list_gemini_models(api_key: str, base_url: str = "") -> list[str]:
-        """API에서 사용 가능한 Gemini 모델 ID 목록을 조회한다.
+        """API에서 사용 가능한 모델 ID 목록을 조회한다.
 
         - base_url 있음: OpenAI 호환 게이트웨이의 `/v1/models` 엔드포인트 사용
-          (Mindlogic/사내 프록시 등). 응답 중 'gemini'가 포함된 모델 ID만 추출.
+          (Mindlogic/사내 프록시 등). **모델 계열 필터 없이 전부 반환** — 게이트웨이
+          호출 경로(`_recognize_openai_compat`/`_ask_openai_compat`)는 평범한 OpenAI 호환
+          chat.completions라 claude·gpt·grok 등 gemini가 아닌 모델도 그대로 동작한다.
+          옛 `"gemini" in id` 필터는 게이트웨이가 제공하는 42종 중 6종만 노출시켜
+          사용자가 다른 모델을 고를 수 없게 만들던 제약이라 제거했다. 검증 여부는
+          `sort_models_with_whitelist`가 verified/unverified로 갈라 UI에 알린다.
         - base_url 없음: `google.generativeai.list_models()` 사용. generateContent를
-          지원하는 gemini-* 모델만 추출.
+          지원하는 gemini-* 모델만 추출(공식 Google AI Studio API는 태생적으로 gemini 전용).
+
+        주의: 게이트웨이 모델 중엔 이미지 입력을 못 받는 텍스트 전용 모델도 있다.
+        OCR·이미지 AI 질의는 이미지를 보내므로 그런 모델을 고르면 호출이 실패한다
+        (설정창이 미검증 항목 툴팁으로 고지). 메서드 이름은 하위 호환을 위해 유지.
 
         실패 시 RuntimeError. UI 블로킹 방지를 위해 호출자가 워커 스레드에서 실행해야 한다.
         """
@@ -306,7 +372,9 @@ class OcrEngine:
             try:
                 client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
                 resp = client.models.list()
-                models = [m.id for m in resp.data if "gemini" in m.id.lower()]
+                # 계열 필터 없음 — 게이트웨이가 광고하는 모든 chat 모델을 노출한다.
+                # 단 호출 시 404가 확인된 유령 모델은 제외(조용한 폴백으로 이어짐).
+                models = [m.id for m in resp.data if m.id not in _PHANTOM_MODELS]
             except Exception as e:
                 raise RuntimeError(f"게이트웨이 모델 조회 실패: {e}") from e
         else:

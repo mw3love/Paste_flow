@@ -618,6 +618,27 @@ def _migrate_split_gemini_keys(db):
     print(f"[Migrate] ocr_gemini 키 분리 완료: backend={backend}")
 
 
+def _migrate_split_ocr_ai_model(db):
+    """1회 마이그레이션: OCR 모델 슬롯(`ocr_model_*`)을 기존 AI 모델값으로 초기화.
+
+    v1.39.0에서 OCR과 AI 질의가 모델 설정을 나눠 가지게 됐다. 기존 사용자는 모델 하나만
+    갖고 있으므로 그 값을 OCR 슬롯에도 복사해 **동작 변화 0에서 시작**한다(둘 다 예전 모델).
+    이후 사용자가 설정창에서 OCR 모델만 싼 것으로 바꾸면 그때부터 갈린다.
+
+    옛 키(`ocr_gemini_model_*`)는 AI 질의가 계속 쓰므로 삭제하지 않는다.
+    새 키가 이미 있으면 건드리지 않아 idempotent.
+    """
+    copied = []
+    for backend in ("official", "gateway"):
+        src = db.get_setting(f"ocr_gemini_model_{backend}", "") or ""
+        dst_key = f"ocr_model_{backend}"
+        if src and not db.get_setting(dst_key, ""):
+            db.set_setting(dst_key, src)
+            copied.append(f"{backend}={src}")
+    if copied:
+        print(f"[Migrate] OCR 모델 슬롯 초기화: {', '.join(copied)}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -752,6 +773,10 @@ class PasteFlowApp:
         # 이미지→경로(Ctrl+Shift+P) 임시 PNG 캐시: (item_id, saved_path) 또는 None.
         # 같은 최신 이미지에 반복 실행 시 디스크 재저장을 피하기 위함.
         self._img_to_path_cache = None
+
+        # 직전 이미지→경로(Ctrl+Shift+P·Ctrl+Shift+[)로 클립보드에 올린 임시 PNG 경로.
+        # Alt+F3 핀이 이 경로가 클립보드에 남아 있으면 경로 문자열이 아니라 원본 이미지를 핀한다.
+        self._last_pasted_image_path: str | None = None
 
         # DB에서 설정 로드 및 적용
         self._apply_settings_from_db()
@@ -953,28 +978,40 @@ class PasteFlowApp:
         else:
             ToastNotification("캡처를 클립보드에 복사했습니다", icon="📷")
 
-    def _resolve_gemini_cfg(self) -> tuple[str, str, str]:
+    def _resolve_gemini_cfg(self, purpose: str = "ai") -> tuple[str, str, str]:
         """게이트웨이/공식 백엔드 설정을 해석해 (api_key, base_url, model) 반환.
 
-        OCR 워커와 AI 질의 워커가 공유. backend 명시값 우선, 미설정 시 base_url 유무로
-        추론(레거시 호환). 공식 API는 base_url을 무시하므로 ""로 강제한다.
+        OCR 워커와 AI 질의 워커가 공유하되 **모델만 용도별로 갈린다**(v1.39.0):
+        - purpose="ocr" → `ocr_model_{backend}`   (비전 가능 모델만 고를 수 있는 슬롯)
+        - purpose="ai"  → `ocr_gemini_model_{backend}` (전 모델. 기존 키 승계)
+
+        분리 이유: 두 용도가 한 모델을 공유하면 AI 답변용으로 고른 비싼 모델(claude-opus 등)이
+        OCR에도 그대로 쓰여 텍스트 추출 한 번에 과금이 커지고, 반대로 텍스트 전용 모델
+        (solar-pro2 등)을 AI용으로 고르면 OCR이 400으로 깨진다.
+
+        api_key·base_url·backend는 두 용도가 계속 공유한다(같은 계정/엔드포인트).
+        backend 명시값 우선, 미설정 시 base_url 유무로 추론(레거시 호환).
+        공식 API는 base_url을 무시하므로 ""로 강제한다.
         DB 접근은 _lock으로 직렬화되어 워커 스레드에서 호출해도 안전.
         """
         backend = self.db.get_setting("ocr_gemini_backend", "")
         base_url_saved = self.db.get_setting("ocr_gemini_base_url", "")
         if backend not in ("official", "gateway"):
             backend = "gateway" if (base_url_saved or "").strip() else "official"
-        if backend == "gateway":
-            return (
-                self._get_secret("ocr_gemini_api_key_gateway"),
-                base_url_saved,
-                self.db.get_setting("ocr_gemini_model_gateway", ""),
-            )
-        return (
-            self._get_secret("ocr_gemini_api_key_official"),
-            "",
-            self.db.get_setting("ocr_gemini_model_official", ""),
+
+        model_key = (
+            f"ocr_model_{backend}" if purpose == "ocr"
+            else f"ocr_gemini_model_{backend}"
         )
+        model = self.db.get_setting(model_key, "")
+        if purpose == "ocr" and not model:
+            # OCR 슬롯이 아직 비었으면(마이그레이션 전/초기화됨) AI 모델을 그대로 쓴다.
+            # 빈 문자열이면 OcrEngine이 backend별 기본 모델로 폴백하므로 여기서 강제하지 않는다.
+            model = self.db.get_setting(f"ocr_gemini_model_{backend}", "")
+
+        if backend == "gateway":
+            return (self._get_secret("ocr_gemini_api_key_gateway"), base_url_saved, model)
+        return (self._get_secret("ocr_gemini_api_key_official"), "", model)
 
     def _start_ai_worker(self, question: str, context_text: str, image_png: bytes | None = None):
         """AI 질의(첫 턴) — 질문+컨텍스트로 대화 히스토리를 시작해 워커에 넘긴다.
@@ -1107,7 +1144,7 @@ class PasteFlowApp:
                 from pasteflow.ocr_engine import OcrEngine
                 # OCR은 별도 엔진 선택 없이 항상 AI(Gemini 공식 / Mindlogic 게이트웨이) API로 처리.
                 # (WinRT 엔진 제거 — 설정에서 엔진/언어 선택 UI도 삭제됨. AI 답변과 동일 배관 재사용.)
-                api_key, base_url, model = self._resolve_gemini_cfg()
+                api_key, base_url, model = self._resolve_gemini_cfg("ocr")
                 engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url, model=model)
                 text = engine.recognize(pil_img)
                 if engine.last_fallback_from and engine.last_used_model:
@@ -1228,6 +1265,9 @@ class PasteFlowApp:
                 return
             self._img_to_path_cache = (item.id, saved_path)
 
+        # Alt+F3 핀이 "방금 붙여넣은 경로"를 원본 이미지로 되살리기 위해 경로를 기억
+        self._last_pasted_image_path = saved_path
+
         path_item = ClipboardItem(
             content_type="text",
             text_content=saved_path,
@@ -1280,6 +1320,8 @@ class PasteFlowApp:
             except Exception as e:
                 ToastNotification(f"임시 파일 저장 실패 — {e}", icon="🔤")
                 return
+            # Alt+F3 핀이 "방금 붙여넣은 경로"를 원본 이미지로 되살리기 위해 경로를 기억
+            self._last_pasted_image_path = saved_path
             path_item = ClipboardItem(
                 content_type="text",
                 text_content=saved_path,
@@ -1338,11 +1380,21 @@ class PasteFlowApp:
         from pasteflow.ui.toast import ToastNotification
 
         image_bytes = _read_image_from_clipboard()
+        text = self.app.clipboard().text() or ""
+        # Ctrl+Shift+P·Ctrl+Shift+[로 방금 붙여넣은 이미지 경로가 아직 클립보드에 있으면,
+        # 경로 문자열을 렌더하지 않고 그 원본 이미지를 핀한다(사용자 의도 = 이미지).
+        if (not image_bytes and self._last_pasted_image_path
+                and text.strip() == self._last_pasted_image_path
+                and os.path.exists(self._last_pasted_image_path)):
+            try:
+                with open(self._last_pasted_image_path, "rb") as f:
+                    image_bytes = f.read()
+            except Exception:
+                image_bytes = None
         # 방금 캡처한 이미지면(외부 복사로 무효화 안 됨) 캡처 자리에 그대로 덮는다.
         place_rect = self._pin_place_rect if image_bytes else None
         if not image_bytes:
             # 이미지가 없으면 클립보드 텍스트를 흰 배경 이미지로 렌더링해 핀(Snipaste 동작)
-            text = self.app.clipboard().text() or ""
             if text.strip():
                 try:
                     image_bytes = _render_text_to_png(text)
@@ -1956,6 +2008,10 @@ class PasteFlowApp:
         # Gemini 키/모델 분리 마이그레이션 (옛 단일 키 → backend별 분리 키). 1회성·idempotent.
         _migrate_split_gemini_keys(self.db)
 
+        # OCR/AI 모델 분리 마이그레이션 (기존 모델을 OCR 슬롯에 복사). 순서 주의:
+        # 위 backend별 분리가 끝나야 ocr_gemini_model_{backend}가 채워져 있다.
+        _migrate_split_ocr_ai_model(self.db)
+
         # 시크릿 암호화 + 고아 키 purge. Idempotent.
         _migrate_secrets(self.db)
 
@@ -2007,6 +2063,9 @@ class PasteFlowApp:
             "ocr_gemini_model_gateway": self.db.get_setting("ocr_gemini_model_gateway", ""),
             "ocr_gemini_model_cache_official": self.db.get_setting("ocr_gemini_model_cache_official", ""),
             "ocr_gemini_model_cache_gateway": self.db.get_setting("ocr_gemini_model_cache_gateway", ""),
+            # OCR 전용 모델 슬롯 (AI 질의 모델과 분리 — 비전 가능 모델만 고를 수 있다)
+            "ocr_model_official": self.db.get_setting("ocr_model_official", ""),
+            "ocr_model_gateway": self.db.get_setting("ocr_model_gateway", ""),
             "notify_on_copy": self.db.get_setting("notify_on_copy", "1"),
             "queue_idle_reset_sec": self.db.get_setting("queue_idle_reset_sec", "10"),
         }

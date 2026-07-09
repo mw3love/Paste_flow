@@ -7,10 +7,36 @@ from PyQt6.QtWidgets import (
     QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,
     QStyle, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QEvent
-from PyQt6.QtGui import QColor, QFontMetrics
+from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize
+from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPixmap, QPainter, QFont
 
 from pasteflow.ui.theme import COLORS, PEACH_HOVER
+
+
+# 모델 콤보에서 "이 행은 그룹 헤더" 표시용 커스텀 role (모델명 행과 구분)
+_HEADER_ROLE = Qt.ItemDataRole.UserRole + 1
+
+# 이모지 → QIcon 캐시. 콤보 항목 텍스트는 저장되는 모델명 그 자체라 접두사를 붙일 수
+# 없으므로(예: "gemini-2.5-flash 🖼"가 API 모델명으로 저장됨), 배지는 아이콘으로만 단다.
+_ICON_CACHE: dict = {}
+
+
+def _emoji_icon(ch: str, px: int = 16) -> QIcon:
+    """이모지 한 글자를 QIcon으로 렌더한다(콤보 항목 아이콘용)."""
+    icon = _ICON_CACHE.get(ch)
+    if icon is not None:
+        return icon
+    pm = QPixmap(px, px)
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    font = QFont()
+    font.setPixelSize(px - 2)
+    painter.setFont(font)
+    painter.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, ch)
+    painter.end()
+    icon = QIcon(pm)
+    _ICON_CACHE[ch] = icon
+    return icon
 
 
 # ── 옵션창 전용 팔레트 (전역 다크 테마와 분리 — 폼 가독성·정돈 우선) ──────────────
@@ -287,6 +313,10 @@ class SettingsDialog(QDialog):
     KEY_OCR_GEMINI_MODEL_GATEWAY = "ocr_gemini_model_gateway"
     KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL = "ocr_gemini_model_cache_official"
     KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY = "ocr_gemini_model_cache_gateway"
+    # OCR 전용 모델 슬롯 — AI 질의 모델(KEY_OCR_GEMINI_MODEL_*)과 분리(v1.39.0).
+    # OCR은 이미지를 보내므로 비전 가능 모델만 고를 수 있고, 저렴한 모델을 따로 둘 수 있다.
+    KEY_OCR_MODEL_OFFICIAL = "ocr_model_official"
+    KEY_OCR_MODEL_GATEWAY = "ocr_model_gateway"
     KEY_QUEUE_IDLE_RESET = "queue_idle_reset_sec"
 
     # 워커 스레드 → UI 안전 통신용 내부 시그널 (models, error_msg)
@@ -522,22 +552,18 @@ class SettingsDialog(QDialog):
         self._backend_combo.addItem("Mindlogic Gateway", "gateway")
         ai_form.addRow(self._backend_label, self._backend_combo)
 
-        self._api_key_label = QLabel("•  API 키:")
-        self._api_key_edit = QLineEdit()
-        self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._api_key_edit.setPlaceholderText("Google AI Studio 키")
-        ai_form.addRow(self._api_key_label, self._api_key_edit)
-
+        # 행 순서: Base URL → API 키(+↻) → 모델 콤보들.
+        # 새로고침은 URL·키가 모두 있어야 동작하므로 그 둘 아래(키 옆)에 둔다. 옛 위치(모델 콤보 옆)는
+        # 콤보가 둘로 늘어난 뒤로 "어느 콤보를 새로고침하나?"로 읽혀 오해를 샀다(실제론 둘 다 갱신).
         self._base_url_label = QLabel("•  Base URL:")
         self._base_url_edit = QLineEdit()
         self._base_url_edit.setPlaceholderText("예: https://factchat-cloud.mindlogic.ai/v1/gateway")
         ai_form.addRow(self._base_url_label, self._base_url_edit)
 
-        self._model_label = QLabel("•  모델명:")
-        self._model_combo = QComboBox()
-        self._model_combo.setEditable(True)
-        self._model_combo.setStyleSheet(_combo_style)
-        # 콤보 초기 채우기는 _load_values에서 backend가 정해진 뒤 수행한다.
+        self._api_key_label = QLabel("•  API 키:")
+        self._api_key_edit = QLineEdit()
+        self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._api_key_edit.setPlaceholderText("Google AI Studio 키")
 
         self._model_refresh_btn = QPushButton()
         # Qt 내장 표준 아이콘 — 폰트 의존성 없이 모든 환경에서 보장
@@ -545,15 +571,41 @@ class SettingsDialog(QDialog):
             self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
         )
         self._model_refresh_btn.setFixedWidth(34)
-        self._model_refresh_btn.setToolTip("API에서 사용 가능한 Gemini 모델 목록 가져오기")
+        self._model_refresh_btn.setToolTip("API에서 사용 가능한 모델 목록 가져오기 (두 콤보 모두 갱신)")
+        # NoFocus 필수: 이 버튼은 클릭 시 setEnabled(False)로 꺼진다. StrongFocus면 Qt가 포커스를
+        # 다음 위젯(editable 모델 콤보)으로 넘기고, editable 콤보는 포커스를 받으면 텍스트를 전체
+        # 선택한다 → 조회 중에 모델명이 파랗게 반전돼 "선택됐다 사라지는" 것처럼 보였다.
+        self._model_refresh_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._model_refresh_btn.clicked.connect(self._on_refresh_models)
 
-        model_row = QHBoxLayout()
-        model_row.setContentsMargins(0, 0, 0, 0)
-        model_row.setSpacing(4)
-        model_row.addWidget(self._model_combo, 1)
-        model_row.addWidget(self._model_refresh_btn)
-        ai_form.addRow(self._model_label, model_row)
+        key_row = QHBoxLayout()
+        key_row.setContentsMargins(0, 0, 0, 0)
+        key_row.setSpacing(4)
+        key_row.addWidget(self._api_key_edit, 1)
+        key_row.addWidget(self._model_refresh_btn)
+        ai_form.addRow(self._api_key_label, key_row)
+
+        # 모델 콤보 2개 — OCR(이미지 입력 필요)과 AI 질의(전 모델)를 분리한다.
+        # 같은 모델을 공유하면 답변용 고가 모델이 OCR에도 쓰이거나(과금), 텍스트 전용
+        # 모델을 고르면 OCR이 400으로 깨진다. ↻ 새로고침 1회로 두 콤보를 함께 채운다.
+        self._model_label = QLabel("•  AI 질의 모델:")
+        self._model_combo = QComboBox()
+        self._model_combo.setEditable(True)
+        self._model_combo.setStyleSheet(_combo_style)
+        self._model_combo.setToolTip("AI 질문·답변에 쓰는 모델 (게이트웨이 전 모델)")
+        # 콤보 초기 채우기는 _load_values에서 backend가 정해진 뒤 수행한다.
+
+        self._ocr_model_label = QLabel("•  AI OCR 모델:")
+        self._ocr_model_combo = QComboBox()
+        self._ocr_model_combo.setEditable(True)
+        self._ocr_model_combo.setStyleSheet(_combo_style)
+        self._ocr_model_combo.setToolTip(
+            "이미지에서 텍스트를 추출할 때 쓰는 모델.\n"
+            "이미지 입력이 가능한 모델만 표시됩니다. 저렴한 모델을 권장합니다."
+        )
+
+        ai_form.addRow(self._model_label, self._model_combo)
+        ai_form.addRow(self._ocr_model_label, self._ocr_model_combo)
 
         # API 연결 테스트 — 모델명 바로 아래에 배치(설명 힌트보다 위). 힌트를 그룹 맨 아래로
         # 내려 워드랩 공간을 넉넉히 확보한다.
@@ -669,9 +721,8 @@ class SettingsDialog(QDialog):
 
     def _on_test_done(self, ok: bool, msg: str):
         self._test_btn.setEnabled(True)
-        color = COLORS['green'] if ok else COLORS['red']
-        self._test_status.setStyleSheet(f"color: {color}; font-size: 11px;")
-        self._test_status.setText(("✓ " if ok else "✗ ") + msg)
+        # 연결 테스트와 모델 새로고침이 같은 상태 줄을 공유한다(_set_status).
+        self._set_status(("✓ " if ok else "✗ ") + msg, ok=ok)
 
     def _on_backend_changed(self, _idx: int):
         """API 백엔드 콤보 전환 — 해당 백엔드의 키/URL/모델/캐시로 입력란 스왑.
@@ -686,10 +737,12 @@ class SettingsDialog(QDialog):
         if prev_backend == "official":
             self._settings[self.KEY_OCR_GEMINI_API_KEY_OFFICIAL] = self._api_key_edit.text()
             self._settings[self.KEY_OCR_GEMINI_MODEL_OFFICIAL] = self._model_combo.currentText()
+            self._settings[self.KEY_OCR_MODEL_OFFICIAL] = self._ocr_model_combo.currentText()
         elif prev_backend == "gateway":
             self._settings[self.KEY_OCR_GEMINI_API_KEY_GATEWAY] = self._api_key_edit.text()
             self._settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
             self._settings[self.KEY_OCR_GEMINI_MODEL_GATEWAY] = self._model_combo.currentText()
+            self._settings[self.KEY_OCR_MODEL_GATEWAY] = self._ocr_model_combo.currentText()
 
         # 2) 새 backend 값으로 입력란 채우기
         if backend == "gateway":
@@ -710,11 +763,21 @@ class SettingsDialog(QDialog):
         saved_model = self._current_saved_model_for(backend)
         if saved_model:
             self._model_combo.setCurrentText(saved_model)
+        # OCR 슬롯이 아직 비었으면(분리 이전 사용자) AI 모델을 그대로 보여준다 —
+        # main._resolve_gemini_cfg("ocr")의 폴백과 같은 규칙이라 화면과 실동작이 일치한다.
+        saved_ocr = self._current_saved_ocr_model_for(backend) or saved_model
+        if saved_ocr:
+            self._ocr_model_combo.setCurrentText(saved_ocr)
 
     def _current_saved_model_for(self, backend: str) -> str:
         if backend == "gateway":
             return self._settings.get(self.KEY_OCR_GEMINI_MODEL_GATEWAY, "")
         return self._settings.get(self.KEY_OCR_GEMINI_MODEL_OFFICIAL, "")
+
+    def _current_saved_ocr_model_for(self, backend: str) -> str:
+        if backend == "gateway":
+            return self._settings.get(self.KEY_OCR_MODEL_GATEWAY, "")
+        return self._settings.get(self.KEY_OCR_MODEL_OFFICIAL, "")
 
     def _pick_capture_folder(self):
         """캡처 저장 폴더 선택 다이얼로그"""
@@ -789,29 +852,93 @@ class SettingsDialog(QDialog):
                 if backend == "gateway"
                 else self.KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL)
 
-    def _fill_model_combo(self, verified: list[str], unverified: list[str]):
-        """콤보를 검증 모델(상단) + 구분선 + 미검증 모델(하단, 회색)로 채운다."""
-        self._model_combo.clear()
-        for name in verified:
-            self._model_combo.addItem(name)
-            # 모든 항목에 전체 이름 툴팁 — 팝업이 화면 폭을 넘어 잘릴 때의 안전망
-            idx = self._model_combo.count() - 1
-            self._model_combo.setItemData(idx, name, Qt.ItemDataRole.ToolTipRole)
-        if verified and unverified:
-            self._model_combo.insertSeparator(self._model_combo.count())
-        gray = QColor(COLORS['subtext0'])
-        for name in unverified:
-            self._model_combo.addItem(name)
-            idx = self._model_combo.count() - 1
-            self._model_combo.setItemData(idx, gray, Qt.ItemDataRole.ForegroundRole)
-            self._model_combo.setItemData(
-                idx,
-                "PasteFlow가 검증하지 않은 모델 — 게이트웨이가 광고하지만 호출 실패 가능",
-                Qt.ItemDataRole.ToolTipRole,
-            )
-        self._adjust_model_popup_width()
+    def _add_group_header(self, combo: QComboBox, text: str):
+        """선택 불가능한 그룹 헤더 행을 추가한다.
 
-    def _adjust_model_popup_width(self):
+        헤더를 **비활성 항목**으로 넣는 이유: 이 콤보는 editable이라 표시 텍스트가 곧
+        저장되는 모델명이다(`_on_save`가 `currentText()`를 그대로 쓴다). 헤더를 고를 수
+        있으면 "⭐ 추천 — 실호출 검증됨" 같은 문자열이 모델명으로 저장돼 API 호출이 깨진다.
+        비활성 항목은 마우스·키보드로 선택할 수 없다.
+        """
+        combo.addItem(text)
+        idx = combo.count() - 1
+        item = combo.model().item(idx)
+        item.setEnabled(False)
+        f = item.font()
+        f.setBold(True)
+        item.setFont(f)
+        item.setForeground(QColor(COLORS['subtext0']))
+        # 헤더는 모델명이 아니므로 검색·폭 계산에서 구분할 수 있게 표시해 둔다.
+        combo.setItemData(idx, True, _HEADER_ROLE)
+
+    def _fill_model_combo(self, combo: QComboBox, verified: list[str], unverified: list[str]):
+        """콤보를 그룹 헤더 + 항목 아이콘으로 채운다.
+
+        아이콘은 **항목당 하나**로, 그 항목에 대해 가장 중요한 사실을 보여준다:
+          ⭐ = 추천(`_VERIFIED_MODELS` 화이트리스트, 텍스트·이미지 실호출 확인)
+          🖼 = 추천 밖이지만 이미지 입력 가능
+          📝 = 텍스트 전용 (이미지 질의 실패) — AI 질의 콤보에만 등장
+        추천 모델은 전부 비전 가능이므로 ⭐가 🖼을 덮어도 정보 손실이 없다.
+        OCR 콤보는 비전 가능 모델만 담으므로 추천 밖 항목엔 아이콘을 달지 않는다.
+
+        헤더에는 그룹별 개수를 함께 적는다("추천 — 실호출 검증됨 (7종)").
+
+        가격(저렴/고가) 배지는 **의도적으로 없다** — 게이트웨이가 chat 단가를 노출하지
+        않아 `tier_rank`가 어림값이기 때문이다(정렬 순서로만 쓴다). 추측을 사실처럼
+        표시하지 않는다.
+        """
+        from pasteflow.ocr_engine import is_vision_capable
+
+        combo.clear()
+        # OCR 콤보는 이미 비전 가능 모델만 담고 있으므로 이미지 관련 표시를 생략한다.
+        show_vision = combo is not self._ocr_model_combo
+        gray = QColor(COLORS['subtext0'])
+
+        def _add(name: str, recommended: bool, tip: str):
+            combo.addItem(name)
+            idx = combo.count() - 1
+            if recommended:
+                combo.setItemData(idx, _emoji_icon("⭐"), Qt.ItemDataRole.DecorationRole)
+            elif show_vision:
+                vision = is_vision_capable(name)
+                combo.setItemData(idx, _emoji_icon("🖼" if vision else "📝"),
+                                  Qt.ItemDataRole.DecorationRole)
+                if not vision:
+                    tip += "\n\n📝 텍스트 전용 — 이미지를 첨부하는 질의는 실패합니다."
+            if not recommended:
+                combo.setItemData(idx, gray, Qt.ItemDataRole.ForegroundRole)
+            combo.setItemData(idx, tip, Qt.ItemDataRole.ToolTipRole)
+
+        if verified:
+            self._add_group_header(combo, f"추천 — 실호출 검증됨 ({len(verified)}종)")
+            for name in verified:
+                _add(name, recommended=True,
+                     tip=f"⭐ {name}\n\nPasteFlow가 텍스트·이미지 양쪽을 실제로 호출해 확인한 모델입니다.")
+        if unverified:
+            self._add_group_header(combo, f"그 외 모델 ({len(unverified)}종)")
+            for name in unverified:
+                _add(name, recommended=False,
+                     tip=f"{name}\n\n추천 목록 밖 — 게이트웨이가 제공하며 호출은 확인됐지만,\n"
+                         "PasteFlow가 품질을 보증하지는 않습니다.")
+
+        self._select_first_enabled(combo)
+        self._adjust_model_popup_width(combo)
+
+    def _select_first_enabled(self, combo: QComboBox):
+        """현재 선택이 비활성 헤더에 걸려 있으면 첫 번째 실제 모델로 옮긴다.
+
+        `clear()` 직후 첫 addItem이 헤더면 Qt가 currentIndex=0으로 잡아 헤더 문자열이
+        `currentText()`(= 저장되는 모델명)가 된다. 호출부가 이후 선택을 복원하지만,
+        복원할 값이 없는 경우(첫 실행 등)를 대비한 안전망.
+        """
+        idx = combo.currentIndex()
+        if idx >= 0 and not combo.model().item(idx).isEnabled():
+            for i in range(combo.count()):
+                if combo.model().item(i).isEnabled():
+                    combo.setCurrentIndex(i)
+                    return
+
+    def _adjust_model_popup_width(self, combo: QComboBox):
         """드롭다운 팝업만 최장 모델명에 맞춰 넓힌다 — 콤보 본체/설정창 폭은 불변.
 
         QComboBox 팝업은 기본적으로 콤보 위젯 폭에 묶여 긴 이름의 가운데가
@@ -819,20 +946,19 @@ class SettingsDialog(QDialog):
         공유하므로 가운데 생략은 구분을 망가뜨린다. 팝업 view의 최소 폭을
         실제 텍스트 폭에 맞춰 늘려 잘림 자체를 없앤다.
         """
-        fm = QFontMetrics(self._model_combo.view().font())
+        fm = QFontMetrics(combo.view().font())
         widest = 0
-        for i in range(self._model_combo.count()):
-            text = self._model_combo.itemText(i)
+        for i in range(combo.count()):
+            text = combo.itemText(i)
             if text:
                 widest = max(widest, fm.horizontalAdvance(text))
         if widest:
             # 스크롤바·여백 여유분 가산
-            self._model_combo.view().setMinimumWidth(widest + 40)
+            combo.view().setMinimumWidth(widest + 40)
 
     def _populate_model_combo(self):
-        """현재 backend의 캐시로 모델 콤보 구성. 캐시 없으면 화이트리스트 기본값."""
+        """현재 backend의 캐시로 두 모델 콤보를 구성. 캐시 없으면 화이트리스트 기본값."""
         import json
-        from pasteflow.ocr_engine import sort_models_with_whitelist, whitelist_model_names
 
         backend = self._current_backend()
         cache_str = self._settings.get(self._cache_key_for(backend), "")
@@ -844,21 +970,42 @@ class SettingsDialog(QDialog):
                     cached = [str(m) for m in parsed if m]
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass
+        self._fill_both_combos(cached, backend)
 
-        if cached:
-            verified, unverified = sort_models_with_whitelist(cached, backend)
+    def _fill_both_combos(self, candidates: list[str], backend: str):
+        """후보 목록 하나로 AI 질의 콤보(전 모델)와 AI OCR 콤보(비전 가능만)를 채운다.
+
+        candidates가 비면(캐시 없는 첫 실행) 화이트리스트 기본값으로 대체한다.
+        _populate_model_combo(캐시 로드)와 _on_models_fetched(↻ 새로고침)가 공유.
+        """
+        from pasteflow.ocr_engine import (
+            sort_models_with_whitelist, whitelist_model_names, vision_capable_models,
+        )
+        if candidates:
+            ai_verified, ai_unverified = sort_models_with_whitelist(candidates, backend)
+            ocr_verified, ocr_unverified = sort_models_with_whitelist(
+                vision_capable_models(candidates), backend)
         else:
-            verified = whitelist_model_names(backend)
-            unverified = []
-        self._fill_model_combo(verified, unverified)
+            # 현 화이트리스트는 전원 비전 확인된 모델이지만, 나중에 텍스트 전용 모델이
+            # 등재돼도 OCR 콤보로 새지 않도록 방어적으로 같은 필터를 통과시킨다.
+            ai_verified = whitelist_model_names(backend)
+            ocr_verified = vision_capable_models(ai_verified)
+            ai_unverified = ocr_unverified = []
+        self._fill_model_combo(self._model_combo, ai_verified, ai_unverified)
+        self._fill_model_combo(self._ocr_model_combo, ocr_verified, ocr_unverified)
+
+    def _set_status(self, message: str, ok: bool | None = None):
+        """연결 테스트 / 모델 새로고침이 공유하는 상태 줄. ok=None이면 중립 색."""
+        color = COLORS['subtext0'] if ok is None else (
+            COLORS['green'] if ok else COLORS['red'])
+        self._test_status.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self._test_status.setText(message)
 
     def _on_refresh_models(self):
         """🔄 버튼 — 현재 backend에 맞는 API에서 모델 목록 조회 (워커 스레드)."""
         api_key = self._api_key_edit.text().strip()
         if not api_key:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "API 키 필요",
-                                "먼저 API 키를 입력하세요.")
+            self._set_status("✗ 먼저 API 키를 입력하세요.", ok=False)
             return
         backend = self._current_backend()
         base_url = self._base_url_edit.text().strip() if backend == "gateway" else ""
@@ -866,6 +1013,7 @@ class SettingsDialog(QDialog):
         self._model_refresh_btn.setEnabled(False)
         # 로딩 중: 아이콘 제거 + "..." 텍스트 (단순/명확)
         self._model_refresh_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserStop))
+        self._set_status("모델 목록 조회 중…")
 
         import threading
         def _worker():
@@ -885,28 +1033,48 @@ class SettingsDialog(QDialog):
         )
 
         if err:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "모델 조회 실패",
-                                f"모델 목록을 가져오지 못했습니다.\n\n{err}")
+            self._set_status(f"✗ 모델 조회 실패 — {err}", ok=False)
             return
         if not models:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.information(self, "결과 없음",
-                                    "API 응답에 Gemini 모델이 없습니다.\n게이트웨이 설정을 확인하세요.")
+            self._set_status("✗ 응답에 사용 가능한 모델이 없습니다. 설정을 확인하세요.", ok=False)
             return
 
-        from pasteflow.ocr_engine import sort_models_with_whitelist
         backend = self._current_backend()
         unique = sorted(set(models))
-        verified, unverified = sort_models_with_whitelist(unique, backend)
 
-        current = self._model_combo.currentText()
-        self._fill_model_combo(verified, unverified)
-        idx = self._model_combo.findText(current)
-        if idx >= 0:
-            self._model_combo.setCurrentIndex(idx)
-        elif current:
-            self._model_combo.setCurrentText(current)
+        # 재구성 전 두 콤보의 현재 선택을 보존했다가 복원.
+        # setUpdatesEnabled: 39개 항목을 지웠다 다시 넣는 동안의 중간 상태 repaint를 한 프레임으로 묶는다.
+        # (조회 중 모델명이 파랗게 반전되던 문제는 여기가 아니라 새로고침 버튼의 포커스 이동이
+        #  원인이었다 → _model_refresh_btn.setFocusPolicy(NoFocus)로 해결. 아래 deselect는 안전망.)
+        current_ai = self._model_combo.currentText()
+        current_ocr = self._ocr_model_combo.currentText()
+        for combo in (self._model_combo, self._ocr_model_combo):
+            combo.setUpdatesEnabled(False)
+        try:
+            self._fill_both_combos(unique, backend)
+            for combo, current in ((self._model_combo, current_ai),
+                                   (self._ocr_model_combo, current_ocr)):
+                idx = combo.findText(current)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                elif current:
+                    # 목록에 없어도 사용자가 직접 입력한 값은 지우지 않는다(editable 콤보).
+                    combo.setCurrentText(current)
+                # Qt가 프로그램적 텍스트 설정 시 전체 선택 상태로 두는 것을 해제 —
+                # 새로고침 직후 모델명이 파랗게 반전돼 보이던 잔상 제거.
+                le = combo.lineEdit()
+                if le is not None:
+                    le.deselect()
+                    le.setCursorPosition(0)
+        finally:
+            for combo in (self._model_combo, self._ocr_model_combo):
+                combo.setUpdatesEnabled(True)
+
+        n_ai = sum(1 for i in range(self._model_combo.count())
+                   if not self._model_combo.itemData(i, _HEADER_ROLE))
+        n_ocr = sum(1 for i in range(self._ocr_model_combo.count())
+                    if not self._ocr_model_combo.itemData(i, _HEADER_ROLE))
+        self._set_status(f"✓ 새로고침 완료 — 질의 {n_ai}종 · OCR {n_ocr}종", ok=True)
 
         import json
         # 캐시도 backend별로 분리 저장 — 공식/게이트웨이 모델 라인업이 달라 섞이면 안 됨
@@ -947,9 +1115,11 @@ class SettingsDialog(QDialog):
             self._settings[self.KEY_OCR_GEMINI_API_KEY_GATEWAY] = self._api_key_edit.text()
             self._settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
             self._settings[self.KEY_OCR_GEMINI_MODEL_GATEWAY] = self._model_combo.currentText()
+            self._settings[self.KEY_OCR_MODEL_GATEWAY] = self._ocr_model_combo.currentText()
         else:
             self._settings[self.KEY_OCR_GEMINI_API_KEY_OFFICIAL] = self._api_key_edit.text()
             self._settings[self.KEY_OCR_GEMINI_MODEL_OFFICIAL] = self._model_combo.currentText()
+            self._settings[self.KEY_OCR_MODEL_OFFICIAL] = self._ocr_model_combo.currentText()
 
         # 양쪽 backend의 키/모델/캐시를 모두 같이 전달 — 일부만 보내면 다른 쪽이 사라질 위험
         for k in (
@@ -958,6 +1128,8 @@ class SettingsDialog(QDialog):
             self.KEY_OCR_GEMINI_BASE_URL,
             self.KEY_OCR_GEMINI_MODEL_OFFICIAL,
             self.KEY_OCR_GEMINI_MODEL_GATEWAY,
+            self.KEY_OCR_MODEL_OFFICIAL,
+            self.KEY_OCR_MODEL_GATEWAY,
             self.KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL,
             self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY,
         ):
