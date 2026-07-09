@@ -1684,6 +1684,21 @@ class _AnnotatorView(QGraphicsView):
                 return True
         return False
 
+    def _scale_handle_at(self, view_pos) -> bool:
+        """커서가 '선택된' 도형의 크기조절(우하단 파란 사각) 핸들 안이면 True — hover 리사이즈
+        커서 판정용. press 처리는 리사이즈로 받는데 커서만 이동으로 뜨던 불일치를 없앤다."""
+        scene_pt = self.mapToScene(view_pos)
+        for it in self.scene().selectedItems():
+            hr = getattr(it, "_handle_local_rect", None)
+            active = getattr(it, "_handle_active", None)
+            if hr is None or active is None or not active():
+                continue
+            if it._uses_endpoints():   # 선·화살표는 크기조절 사각 없음(끝점 핸들 사용)
+                continue
+            if hr().contains(it.mapFromScene(scene_pt)):
+                return True
+        return False
+
     def _over_selected_endpoint(self, view_pos) -> bool:
         """커서가 '선택된' 선·화살표의 끝점 핸들 안이면 True(끝점 이동 우선 판정용)."""
         scene_pt = self.mapToScene(view_pos)
@@ -2007,6 +2022,8 @@ class _AnnotatorView(QGraphicsView):
             vp.setCursor(Qt.CursorShape.PointingHandCursor)  # 곡선 조절 손잡이(이동과 구분)
         elif self._rot_handle_at(view_pos):
             vp.setCursor(_rotate_cursor())                   # 회전 점 — 곡선 화살표 커서
+        elif self._scale_handle_at(view_pos):
+            vp.setCursor(Qt.CursorShape.SizeFDiagCursor)     # 크기조절 점(우하단) — 대각 리사이즈(↖↘)
         elif edit_text == "text":
             vp.setCursor(Qt.CursorShape.IBeamCursor)         # 편집 중 텍스트 내부 — 캐럿
         elif edit_text == "move":

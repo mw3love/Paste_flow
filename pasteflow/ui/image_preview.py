@@ -322,34 +322,48 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
             self._layout_edit_close()
             self._update_arrow_dir_btn()  # 줌으로 화살표 위치가 바뀌면 방향 버튼도 따라가게
 
-    def _layout_chrome(self):
-        """편집 모드에서 chrome(툴바)을 하단 예약 strip에 배치한다(이미지 아래, Snipaste식).
-        툴바가 이미지보다 넓으면 창 '폭만' 오른쪽으로 늘려 잘리지 않게 한다 — top-left를
-        고정하고 높이는 그대로라, 이미지는 가로/세로 어느 쪽으로도 움직이지 않는다(잔상 없음).
-        이미지가 툴바보다 넓은 일반적인 경우엔 창 크기 변화가 아예 없다."""
-        win_w = max(self._view.width(), self._chrome.sizeHint().width())
-        if self.width() != win_w:
-            self.resize(win_w, self.height())  # 폭만, top-left 고정
-        # 기본은 이미지 아래 예약 strip. 단 전체화면 캡처를 핀하면 창이 화면보다 커
-        # 그 strip이 화면 밖(아래)으로 밀려 툴바가 안 보인다 → 화면 가시영역 안으로
-        # 끌어올려 이미지 하단에 겹쳐 배치(Snipaste식). 평소엔 위치 변화 없음.
-        y = self.height() - self._chrome_h
+    def _visible_global_rect(self, width: int) -> QRect:
+        """창(=이미지) 전역 사각형(폭 width)과 이 창이 놓인 화면 가용영역(작업표시줄 제외)의
+        교집합 = 실제로 보이는 부분(전역 좌표). 교집합이 비면(창이 화면 밖) 창 전체로 폴백."""
+        win_global = QRect(self.x(), self.y(), width, self.height())
         screen = self.screen() or QApplication.primaryScreen()
         if screen is not None:
-            # 창 로컬 좌표로 환산한 화면 하단(작업표시줄 제외, 여유 8px) 위로 클램프.
-            max_y_local = screen.availableGeometry().bottom() - self.y() - self._chrome_h - 8
-            if y > max_y_local:
-                y = max(0, max_y_local)
-        self._chrome.setGeometry(0, y, win_w, self._chrome_h)
+            inter = win_global.intersected(screen.availableGeometry())
+            if not inter.isEmpty():
+                return inter
+        return win_global
+
+    def _layout_chrome(self):
+        """편집 모드에서 chrome(툴바)을 배치한다. chrome은 창의 자식이라 창 영역
+        [이미지 top ~ 하단 strip] 밖(이미지 위 빈 공간)으로는 못 나가고 클리핑된다 → 그 안에서만
+        배치한다. 이미지가 화면에 다 들어오면 이미지 아래 예약 strip(=따라가기), 이미지가 화면을
+        넘쳐 그 strip이 화면 밖으로 밀리면 '이미지 ∩ 화면(보이는 영역)'의 바닥으로 끌어와 이미지
+        하단에 겹쳐 띄운다(항상 화면 안=조작 가능). 가로는 pill 우측을 이미지 우측에 맞추되 화면
+        밖으로 안 나가게 클램프. 툴바가 이미지보다 넓으면 창 '폭만' 늘린다(top-left 고정=잔상 없음).
+        NOTE: Snipaste식 '이미지 밖 위쪽 빈 공간에 띄우기'는 자식 위젯이라 불가(별도 top-level 창 필요)."""
+        pill_w = self._chrome.sizeHint().width()
+        win_w = max(self._view.width(), pill_w)
+        if self.width() != win_w:
+            self.resize(win_w, self.height())  # 폭만, top-left 고정
+        ch = self._chrome_h
+        vis = self._visible_global_rect(win_w)          # 이미지 ∩ 화면(전역)
+        # 세로: 기본은 이미지 아래(strip=창 하단). 그 strip이 화면 밖이면 보이는 영역 바닥으로 클램프.
+        cy_g = min(self.y() + self.height(), vis.bottom() + 1) - ch
+        # 가로: pill 우측을 이미지 우측에 맞추되 화면 밖으로 안 나가게.
+        right_g = min(self.x() + win_w, vis.right() + 1)
+        self._chrome.setGeometry(right_g - self.x() - win_w, cy_g - self.y(), win_w, ch)
         self._chrome.raise_()
 
     def _layout_edit_close(self):
-        """닫기 ✕를 이미지(뷰) 우상단 안쪽에 배치. 이미지는 창 좌상단(0,0)에서 시작하므로
-        뷰 폭 기준으로 위치를 잡는다(툴바가 더 넓어 창이 늘어도 이미지 우상단에 고정)."""
+        """닫기 ✕를 '보이는 영역(이미지∩화면)'의 우상단 안쪽에 배치. 이미지가 화면 위로
+        넘쳐도(핀 오버플로) ✕가 화면 밖으로 올라가 안 눌리는 것을 막는다. 이미지가 다 보이면
+        이미지 우상단(기존과 동일)."""
         btn = getattr(self, "_edit_close_btn", None)
         if btn is None:
             return
-        btn.move(self._view.width() - btn.width() - 8, 8)
+        vis = self._visible_global_rect(self._view.width())
+        btn.move(vis.right() - self.x() - btn.width() - 8,
+                 vis.top() - self.y() + 8)
         btn.raise_()
 
     def _on_wheel_zoom(self, delta: int):
@@ -402,10 +416,22 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
 
     def _win_drag_move(self, global_pt: QPoint):
         if self._win_drag is not None:
+            # 첫 실제 이동에서 툴바를 숨긴다 — 자식이라 창과 함께 딸려가 화면 밖으로 나갈 수
+            # 있으므로(단순 클릭엔 이동이 없어 숨기지 않음 → 깜빡임 방지). 놓을 때 재배치·표시.
+            if self._edit_mode and self._chrome.isVisible():
+                self._chrome.hide()
+                self._edit_close_btn.hide()
             self.move(global_pt - self._win_drag)
 
     def _win_drag_end(self):
         self._win_drag = None
+        # 놓은 위치 기준으로 빈 공간을 다시 찾아 배치한 뒤 표시(Snipaste식 — 이동 중엔 숨어 있다
+        # 놓을 때 제 위치를 찾아간다). 클릭만이라 숨긴 적 없으면 show/layout은 무해(idempotent).
+        if self._edit_mode:
+            self._layout_chrome()
+            self._layout_edit_close()
+            self._chrome.show()
+            self._edit_close_btn.show()
 
     # ------------------------------------------------------------------
     # 주석 반영 (비파괴) — 씬에 주석이 있으면 평탄화본을, 없으면 원본을 대상으로.
