@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,
     QStyle, QStyledItemDelegate, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
+    QPlainTextEdit,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize
 from PyQt6.QtGui import QColor, QFontMetrics
@@ -327,6 +328,8 @@ class SettingsDialog(QDialog):
     # OCR은 이미지를 보내므로 비전 가능 모델만 고를 수 있고, 저렴한 모델을 따로 둘 수 있다.
     KEY_OCR_MODEL_OFFICIAL = "ocr_model_official"
     KEY_OCR_MODEL_GATEWAY = "ocr_model_gateway"
+    # AI 질의 시스템 프롬프트(멘토 페르소나). 빈 값이면 ocr_engine.AI_SYSTEM_PROMPT로 폴백.
+    KEY_AI_SYSTEM_PROMPT = "ai_system_prompt"
     KEY_QUEUE_IDLE_RESET = "queue_idle_reset_sec"
 
     # 워커 스레드 → UI 안전 통신용 내부 시그널 (models, error_msg)
@@ -665,6 +668,39 @@ class SettingsDialog(QDialog):
         test_row.addWidget(self._test_status, 1)
         ai_form.addRow("", test_row)
 
+        # ── AI 시스템 프롬프트(멘토 페르소나) 편집 ──
+        # AI 질문·답변의 답변 톤·구조를 정하는 시스템 프롬프트. 비워 두면 기본값
+        # (ocr_engine.AI_SYSTEM_PROMPT)으로 폴백한다. OCR(글자 추출)에는 영향 없음.
+        prompt_header = QHBoxLayout()
+        prompt_header.setContentsMargins(0, 0, 0, 0)
+        prompt_header.setSpacing(8)
+        prompt_label = QLabel("AI 시스템 프롬프트")
+        prompt_label.setStyleSheet(f"color: {_TITLE}; font-weight: 600;")
+        self._reset_ai_prompt_btn = QPushButton("기본값으로 되돌리기")
+        self._reset_ai_prompt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reset_ai_prompt_btn.setToolTip("입력칸을 PasteFlow 기본 멘토 프롬프트로 되돌립니다.")
+        self._reset_ai_prompt_btn.clicked.connect(self._on_reset_ai_prompt)
+        prompt_header.addWidget(prompt_label)
+        prompt_header.addStretch(1)
+        prompt_header.addWidget(self._reset_ai_prompt_btn)
+        ai_form.addRow(prompt_header)
+
+        self._ai_prompt_edit = QPlainTextEdit()
+        self._ai_prompt_edit.setMinimumHeight(120)
+        self._ai_prompt_edit.setMaximumHeight(180)
+        # DIALOG_STYLE은 QLineEdit/QSpinBox만 스타일하므로 QPlainTextEdit엔 입력칸 스타일을
+        # 명시 적용(밝은 글자 + inset 배경) — 안 하면 다크 배경에 검은 글자로 안 보인다.
+        self._ai_prompt_edit.setStyleSheet(
+            f"QPlainTextEdit {{ background-color: {_INSET}; color: {_TXT}; "
+            f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
+            f"QPlainTextEdit:focus {{ border-color: {COLORS['peach']}; }}"
+        )
+        self._ai_prompt_edit.setToolTip(
+            "AI 질문·답변의 답변 방식(멘토 페르소나·답변 구조·형식)을 정합니다.\n"
+            "OCR(글자 추출)에는 영향이 없습니다. 비워 두면 기본값이 적용됩니다."
+        )
+        ai_form.addRow(self._ai_prompt_edit)
+
         self._backend_combo.currentIndexChanged.connect(self._on_backend_changed)
 
         layout.addWidget(ai_group)
@@ -933,6 +969,19 @@ class SettingsDialog(QDialog):
         self._notify_copy_check.setChecked(
             self._settings.get(self.KEY_NOTIFY_ON_COPY, "1") == "1"
         )
+        # AI 시스템 프롬프트 — 저장값이 비었으면 기본 멘토 프롬프트를 보여준다(비워 두면
+        # 엔진이 기본값으로 폴백하므로, 화면엔 '실제로 쓰이는 프롬프트'를 노출).
+        saved_prompt = self._settings.get(self.KEY_AI_SYSTEM_PROMPT, "")
+        self._ai_prompt_edit.setPlainText(saved_prompt or self._default_ai_prompt())
+
+    def _default_ai_prompt(self) -> str:
+        """기본 AI 시스템 프롬프트(멘토 페르소나) — ocr_engine 모듈 상수."""
+        from pasteflow.ocr_engine import AI_SYSTEM_PROMPT
+        return AI_SYSTEM_PROMPT
+
+    def _on_reset_ai_prompt(self):
+        """'기본값으로 되돌리기' — 입력칸을 기본 멘토 프롬프트로 채운다."""
+        self._ai_prompt_edit.setPlainText(self._default_ai_prompt())
 
     def _current_backend(self) -> str:
         """현재 backend 콤보 선택값 — 'official' 또는 'gateway'."""
@@ -1200,6 +1249,8 @@ class SettingsDialog(QDialog):
             self.KEY_QUEUE_IDLE_RESET: str(self._queue_idle_spin.value()),
             self.KEY_AUTO_START: "1" if auto_start else "0",
             self.KEY_NOTIFY_ON_COPY: "1" if self._notify_copy_check.isChecked() else "0",
+            # AI 시스템 프롬프트 — 비우면 엔진이 기본값으로 폴백(빈 문자열 그대로 저장).
+            self.KEY_AI_SYSTEM_PROMPT: self._ai_prompt_edit.toPlainText().strip(),
         }
         # AI(Gemini) 설정은 OCR 엔진과 무관하게 항상 저장 — AI 답변이 늘 사용하므로
         # WinRT OCR이어도 키/모델이 보존돼야 한다.

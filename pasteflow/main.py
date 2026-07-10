@@ -1032,7 +1032,9 @@ class PasteFlowApp:
             try:
                 from pasteflow.ocr_engine import OcrEngine
                 api_key, base_url, model = self._resolve_gemini_cfg()
-                engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url, model=model)
+                system_prompt = self.db.get_setting("ai_system_prompt", "")
+                engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url,
+                                   model=model, system_prompt=system_prompt)
                 answer = engine.ask_messages(messages, image_png=image_png)
                 if engine.last_fallback_from and engine.last_used_model:
                     self._bridge.ocr_fallback.emit(engine.last_fallback_from, engine.last_used_model)
@@ -2088,6 +2090,7 @@ class PasteFlowApp:
             # OCR 전용 모델 슬롯 (AI 질의 모델과 분리 — 비전 가능 모델만 고를 수 있다)
             "ocr_model_official": self.db.get_setting("ocr_model_official", ""),
             "ocr_model_gateway": self.db.get_setting("ocr_model_gateway", ""),
+            "ai_system_prompt": self.db.get_setting("ai_system_prompt", ""),
             "notify_on_copy": self.db.get_setting("notify_on_copy", "1"),
             "queue_idle_reset_sec": self.db.get_setting("queue_idle_reset_sec", "10"),
         }

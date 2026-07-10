@@ -178,10 +178,12 @@ def _ocr_prompt(language: str) -> str:
     )
 
 
-# AI 질의(ask) 전용 시스템 프롬프트 — 멘토 페르소나/정직/비유/구조/형식.
+# AI 질의(ask) 전용 시스템 프롬프트 — 범용 도우미 페르소나/정직/비유/구조/형식.
+# 이 앱의 AI 질의는 자유질문·항목 질문 등 도메인 무관한 범용 창구라 특정 분야(개발 등)로
+# 못 박지 않는다. 설정창에서 사용자가 커스터마이즈 가능하며, 비우면 이 기본값으로 폴백한다.
 # OCR(recognize) 경로에는 적용하지 않는다(텍스트 추출에 페르소나가 끼면 안 됨).
 # 게이트웨이는 messages의 system 역할로, 공식 API는 GenerativeModel(system_instruction)로 주입.
-AI_SYSTEM_PROMPT = """당신은 Claude Code로 "바이브 코딩(Vibe Coding — AI에게 자연어로 지시해 코딩하는 방식)"을 배우는 완전 초보자의 개발 멘토입니다. 항상 초보자가 듣는다고 가정하고 설명의 깊이와 용어 수준을 거기에 맞춥니다.
+AI_SYSTEM_PROMPT = """당신은 사용자의 질문에 친절하고 명확하게 답하는 AI 도우미입니다. 상대가 그 분야의 전문가가 아닐 수 있다고 가정하고, 설명의 깊이와 용어 수준을 눈높이에 맞춥니다.
 
 [원칙]
 - 정직: 모르면 솔직히 "모른다"고 말합니다. 추측을 사실처럼 말하지 않고, 확실하지 않은 부분은 "확인 필요"로 표시합니다. 학습 시점 이후 바뀌었을 수 있는 최신 정보는 그 한계를 밝히고 사용자에게 확인을 권합니다.
@@ -191,7 +193,7 @@ AI_SYSTEM_PROMPT = """당신은 Claude Code로 "바이브 코딩(Vibe Coding —
 1. 사용자의 질문 의도를 한 줄로 재구성해 확인합니다.
 2. 핵심 요약·결론을 먼저 제시합니다.
 3. 기술 용어는 일상 비유로 설명합니다.
-4. 이어서 자세한 설명, 실제 사용 사례, 명확한 코드 예시를 덧붙입니다.
+4. 이어서 자세한 설명, 실제 사용 사례, 예시를 덧붙입니다.
 5. 대화를 이어갈 수 있도록 후속 질문이나 다음 단계를 제안하며 마칩니다.
 
 [조언 태도]
@@ -243,12 +245,17 @@ class OcrEngine:
         base_url: str = "",
         language: str = "ko",
         model: str = "",
+        system_prompt: str = "",
     ):
         self.kind: EngineKind = kind
         self.api_key = api_key
         self.base_url = base_url
         self.language = language
         self.model = model
+        # AI 질의(ask*) 전용 시스템 프롬프트. 빈 문자열이면 모듈 상수 AI_SYSTEM_PROMPT로
+        # 폴백한다(설정창에서 사용자가 커스터마이즈 가능, 비우면 기본 멘토 페르소나 유지).
+        # OCR(recognize) 경로는 이 값을 쓰지 않는다.
+        self.system_prompt = system_prompt
         # OCR 호출이 끝났을 때 main이 토스트로 안내할 수 있도록 남기는 상태:
         # last_used_model    — 실제 응답을 만든 모델 (폴백 발생 시 폴백 모델)
         # last_fallback_from — 원래 시도했다가 실패한 모델 (폴백 없으면 None)
@@ -582,7 +589,7 @@ class OcrEngine:
             raise RuntimeError("openai 패키지 미설치: pip install openai")
         client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
 
-        out = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
+        out = [{"role": "system", "content": self.system_prompt or AI_SYSTEM_PROMPT}]
         first_user_done = False
         for m in messages:
             role, content = m["role"], m["content"]
@@ -615,7 +622,7 @@ class OcrEngine:
         """
         from google.genai import types
         config = types.GenerateContentConfig(
-            system_instruction=AI_SYSTEM_PROMPT,
+            system_instruction=self.system_prompt or AI_SYSTEM_PROMPT,
             tools=[types.Tool(google_search=types.GoogleSearch())],
             max_output_tokens=16384,
         )
