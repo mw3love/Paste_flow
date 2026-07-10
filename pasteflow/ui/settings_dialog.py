@@ -5,47 +5,48 @@
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,
-    QStyle, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
+    QStyle, QStyledItemDelegate, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize
-from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPixmap, QPainter, QFont
+from PyQt6.QtGui import QColor, QFontMetrics
 
 from pasteflow.ui.theme import COLORS, PEACH_HOVER
 
 
-# 모델 콤보에서 "이 행은 그룹 헤더" 표시용 커스텀 role (모델명 행과 구분)
+# 모델 콤보에서 "이 행은 계열 헤더" 표시용 커스텀 role. 들여쓰기 델리게이트가 읽는다.
 _HEADER_ROLE = Qt.ItemDataRole.UserRole + 1
 
-# 이모지 → QIcon 캐시. 콤보 항목 텍스트는 저장되는 모델명 그 자체라 접두사를 붙일 수
-# 없으므로(예: "gemini-2.5-flash 🖼"가 API 모델명으로 저장됨), 배지는 아이콘으로만 단다.
-_ICON_CACHE: dict = {}
+# 헤더 아래 모델명을 들여쓸 픽셀. 계열(상위)과 모델(하위)의 상하 관계를 눈에 보이게.
+_MODEL_INDENT_PX = 16
 
 
-def _emoji_icon(ch: str, px: int = 16) -> QIcon:
-    """이모지 한 글자를 QIcon으로 렌더한다(콤보 항목 아이콘용)."""
-    icon = _ICON_CACHE.get(ch)
-    if icon is not None:
-        return icon
-    pm = QPixmap(px, px)
-    pm.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pm)
-    font = QFont()
-    font.setPixelSize(px - 2)
-    painter.setFont(font)
-    painter.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, ch)
-    painter.end()
-    icon = QIcon(pm)
-    _ICON_CACHE[ch] = icon
-    return icon
+class _ModelIndentDelegate(QStyledItemDelegate):
+    """모델 행만 오른쪽으로 들여쓴다 (헤더는 제자리).
 
+    **텍스트에 공백·불릿을 넣어 들여쓰면 안 된다** — 이 콤보는 `setEditable(True)`라
+    표시 텍스트가 곧 저장되는 모델명이고(`_on_save`가 `currentText()`를 그대로 씀),
+    앞에 붙인 공백이 API 모델명을 오염시킨다. 그래서 *그리기*만 옮긴다.
 
-def _status_icon(ch: str) -> QIcon:
-    """상태 아이콘. 빈 문자열이면 **투명 아이콘**을 준다.
-
-    아이콘이 없는 항목은 Qt가 들여쓰기를 주지 않아 아이콘 있는 항목과 텍스트 시작
-    위치가 어긋난다 — 정상 모델이 대다수라 그 어긋남이 목록 전체를 흔든다.
+    아이콘(투명 16px)으로 들여쓰는 대안도 있으나, 그러면 **닫힌 콤보의 현재 모델명 앞에도**
+    빈 아이콘 자리가 생겨 텍스트가 밀린다(팝업 view에만 거는 델리게이트는 그렇지 않다).
     """
-    return _emoji_icon(ch) if ch else _emoji_icon(" ")
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        if not index.data(_HEADER_ROLE):
+            option.rect.setLeft(option.rect.left() + _MODEL_INDENT_PX)
+
+
+# 프로브 상태 → 상태 줄에 쓸 (말머리, 색). `retry`(429·503)는 판정 불가라 경고색이며,
+# `fail`(빨강)과 절대 같은 색을 쓰지 않는다 — 섞으면 멀쩡한 모델을 나쁜 모델로 오해한다.
+_PROBE_STYLE = {
+    "ok":    ("✓", COLORS['green']),
+    "weak":  ("⚠", COLORS['peach']),
+    "fail":  ("✗", COLORS['red']),
+    "retry": ("⏳", COLORS['peach']),
+    "run":   ("", COLORS['subtext0']),
+    "skip":  ("—", COLORS['subtext0']),
+}
 
 
 # ── 옵션창 전용 팔레트 (전역 다크 테마와 분리 — 폼 가독성·정돈 우선) ──────────────
@@ -330,17 +331,23 @@ class SettingsDialog(QDialog):
 
     # 워커 스레드 → UI 안전 통신용 내부 시그널 (models, error_msg)
     _models_fetched = pyqtSignal(list, str)
-    _test_done = pyqtSignal(bool, str)  # API 연결 테스트 결과 (ok, message)
+    # 연결 테스트 단계별 결과 (run_id, slot, status, detail).
+    # slot: "conn" | "chat" | "ocr" | "__end__"(버튼 복구 신호)
+    # status: ProbeResult.status + "run"(진행 중) / "skip"(앞 단계 실패로 건너뜀)
+    # run_id: 이 결과를 만든 테스트 회차. 최신 회차가 아니면 UI가 버린다(아래 _on_probe_done).
+    _probe_done = pyqtSignal(int, str, str, str)
 
     def __init__(self, current_settings: dict, parent=None):
         super().__init__(parent)
         self._settings = dict(current_settings)
+        # _setup_ui가 콤보에 거는 currentTextChanged 핸들러가 곧바로 읽으므로 먼저 초기화.
+        self._probe_run_id = 0
         self._setup_window()
         self._setup_ui()
         self._load_values()
         self._finalize_size()
         self._models_fetched.connect(self._on_models_fetched)
-        self._test_done.connect(self._on_test_done)
+        self._probe_done.connect(self._on_probe_done)
 
     def _setup_window(self):
         self.setWindowTitle("PasteFlow 설정")
@@ -601,8 +608,7 @@ class SettingsDialog(QDialog):
         self._model_combo = QComboBox()
         self._model_combo.setEditable(True)
         self._model_combo.setStyleSheet(_combo_style)
-        self._model_combo.setToolTip("AI 질문·답변에 쓰는 모델 (게이트웨이 전 모델)")
-        # 콤보 초기 채우기는 _load_values에서 backend가 정해진 뒤 수행한다.
+        self._model_combo.setToolTip("AI 질문·답변에 쓰는 모델")
 
         self._ocr_model_label = QLabel("•  AI OCR 모델:")
         self._ocr_model_combo = QComboBox()
@@ -610,17 +616,44 @@ class SettingsDialog(QDialog):
         self._ocr_model_combo.setStyleSheet(_combo_style)
         self._ocr_model_combo.setToolTip(
             "이미지에서 텍스트를 추출할 때 쓰는 모델.\n"
-            "이미지 입력이 가능한 모델만 표시됩니다. 저렴한 모델을 권장합니다."
+            "이미지 입력을 받는 모델이어야 합니다 — [연결 테스트]로 확인하세요."
         )
 
-        ai_form.addRow(self._model_label, self._model_combo)
-        ai_form.addRow(self._ocr_model_label, self._ocr_model_combo)
+        # 콤보 초기 채우기는 _load_values에서 backend가 정해진 뒤 수행한다. 캐시가 없으면
+        # 빈 콤보라, 무엇을 해야 할지 placeholder로 안내한다(빈 값은 엔진 기본 모델로 폴백).
+        for combo in (self._model_combo, self._ocr_model_combo):
+            le = combo.lineEdit()
+            if le is not None:
+                le.setPlaceholderText("↻를 눌러 모델 목록을 불러오세요")
+            # 계열 헤더 아래 모델명을 들여써 상하위를 구분(팝업 view 한정 — 닫힌 콤보는 불변).
+            # 델리게이트는 combo를 부모로 둬야 GC로 사라지지 않는다.
+            combo.view().setItemDelegate(_ModelIndentDelegate(combo))
+
+        # 모델별 프로브 결과 줄 — 연결 테스트가 각 모델을 실호출해 여기에 개별로 쓴다.
+        # 상태 줄 하나에 뭉치면 "뭐가 성공했다는 거지?"가 되므로 콤보마다 따로 둔다.
+        self._model_probe_status = self._make_probe_label()
+        self._ocr_model_probe_status = self._make_probe_label()
+
+        # 모델을 바꾸면 직전 결과는 다른 모델 이야기다 — 낡은 ✓를 남기면 그게 거짓말이 된다.
+        # 진행 중인 테스트가 있다면 그 결과도 무효화한다(도착해도 화면의 모델과 다른 모델 얘기).
+        for combo, probe_label in ((self._model_combo, self._model_probe_status),
+                                   (self._ocr_model_combo, self._ocr_model_probe_status)):
+            combo.currentTextChanged.connect(
+                lambda _t, lbl=probe_label: self._on_model_text_changed(lbl))
+
+        ai_form.addRow(self._model_label, self._stack(self._model_combo,
+                                                      self._model_probe_status))
+        ai_form.addRow(self._ocr_model_label, self._stack(self._ocr_model_combo,
+                                                          self._ocr_model_probe_status))
 
         # API 연결 테스트 — 모델명 바로 아래에 배치(설명 힌트보다 위). 힌트를 그룹 맨 아래로
         # 내려 워드랩 공간을 넉넉히 확보한다.
         self._test_btn = QPushButton("연결 테스트")
         self._test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._test_btn.setToolTip("입력한 API 키·URL로 실제 연결해 키가 유효한지 확인합니다.")
+        self._test_btn.setToolTip(
+            "키·연결을 확인하고, 위에서 고른 두 모델을 실제로 한 번씩 호출해 봅니다.\n"
+            "(질의 모델은 텍스트 질문 1회, OCR 모델은 작은 테스트 이미지 1회)"
+        )
         self._test_btn.clicked.connect(self._on_test_api)
         self._test_status = QLabel("")
         self._test_status.setWordWrap(True)
@@ -699,39 +732,88 @@ class SettingsDialog(QDialog):
         outer.addWidget(self._btn_bar)
 
     def _on_test_api(self):
-        """연결 테스트 — 현재 backend/키/URL로 모델 목록을 받아 키·연결 유효성을 확인(워커 스레드).
+        """연결 테스트 — 키·연결 + **선택된 두 모델**을 실호출해 3줄로 개별 보고(워커 스레드).
 
-        모델 조회(list_gemini_models)는 인증·엔드포인트가 맞아야 성공하므로 가벼운 연결 테스트로
-        재사용한다. 결과는 _test_done 시그널로 UI 스레드에 전달."""
+        옛 버전은 모델 목록 조회 하나만 하고 "연결 성공 — API 키가 유효합니다"를 띄웠다.
+        모델 콤보가 둘인 화면에서 그 문구는 "고른 모델이 된다"로 읽히지만, 실제로는 **어느
+        모델도 호출하지 않았다** — 특히 OCR 모델의 이미지 입력 지원 여부는 목록 조회로
+        절대 알 수 없어, 텍스트 전용 모델을 골라도 ✓가 떴다가 캡처할 때 400이 났다.
+
+        이제 세 단계를 순서대로 돌리고 각 결과를 제 자리(연결=상태 줄, 모델=콤보 아래)에
+        따로 쓴다. 앞 단계가 실패하면 뒤 단계는 'skip'으로 남겨 원인을 흐리지 않는다.
+        """
         api_key = self._api_key_edit.text().strip()
         if not api_key:
-            self._test_status.setText("먼저 API 키를 입력하세요.")
-            self._test_status.setStyleSheet(f"color: {COLORS['peach']}; font-size: 11px;")
+            self._set_probe_status(self._test_status, "fail", "먼저 API 키를 입력하세요.")
             return
         backend = self._current_backend()
         base_url = self._base_url_edit.text().strip() if backend == "gateway" else ""
+        # 콤보 값은 UI 스레드에서만 읽는다 (워커에서 위젯 접근 금지).
+        chat_model = self._model_combo.currentText().strip()
+        ocr_model = self._ocr_model_combo.currentText().strip()
+
+        # 회차 번호. 테스트 도중 사용자가 모델을 바꾸거나 다시 누르면 이 값이 올라가고,
+        # 뒤늦게 도착한 옛 회차의 결과는 버려진다 — 안 그러면 A 모델의 ✓가 화면에 떠 있는
+        # B 모델 아래에 찍힌다.
+        self._probe_run_id += 1
+        run_id = self._probe_run_id
+
         self._test_btn.setEnabled(False)
-        self._test_status.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
-        self._test_status.setText("연결 확인 중…")
+        self._set_probe_status(self._test_status, "run", "연결 확인 중…")
+        self._set_probe_status(self._model_probe_status, "run", "대기 중…")
+        self._set_probe_status(self._ocr_model_probe_status, "run", "대기 중…")
+
         import threading
+
         def _worker():
             try:
-                from pasteflow.ocr_engine import OcrEngine
-                models = OcrEngine.list_gemini_models(api_key, base_url)
-                if models:
-                    # 개수는 API가 보고한 전체 gemini 모델 수라 드롭다운(화이트리스트) 목록과 다름 →
-                    # 혼란 방지 위해 개수 대신 '키 유효' 신호만 표시.
-                    self._test_done.emit(True, "연결 성공 — API 키가 유효합니다.")
-                else:
-                    self._test_done.emit(False, "응답은 왔으나 사용 가능한 모델이 없습니다. 설정을 확인하세요.")
+                from pasteflow.ocr_engine import (
+                    probe_chat_model, probe_connection, probe_ocr_model,
+                )
+                conn = probe_connection(api_key, base_url)
+                self._probe_done.emit(run_id, "conn", conn.status, conn.detail)
+                if conn.status != "ok":
+                    for slot in ("chat", "ocr"):
+                        self._probe_done.emit(run_id, slot, "skip", "연결이 안 돼 건너뛰었습니다.")
+                    return
+
+                for slot, model, probe in (("chat", chat_model, probe_chat_model),
+                                           ("ocr", ocr_model, probe_ocr_model)):
+                    if not model:
+                        self._probe_done.emit(
+                            run_id, slot, "skip", "모델이 비어 있습니다 — ↻로 목록을 불러오세요.")
+                        continue
+                    self._probe_done.emit(run_id, slot, "run", f"{model} 호출 중…")
+                    result = probe(api_key, base_url, model)
+                    self._probe_done.emit(run_id, slot, result.status, result.detail)
             except Exception as e:
-                self._test_done.emit(False, f"실패: {e}")
+                # 프로브 함수 밖의 예상 못 한 오류(패키지 미설치 등)
+                self._probe_done.emit(run_id, "conn", "fail", f"테스트 실행 실패: {e}")
+            finally:
+                self._probe_done.emit(run_id, "__end__", "", "")
+
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_test_done(self, ok: bool, msg: str):
+    def _on_model_text_changed(self, probe_label: QLabel):
+        """모델명이 바뀌면 그 콤보의 결과 줄을 지우고 진행 중인 회차를 무효화한다."""
+        self._set_probe_status(probe_label, "run", "")
+        self._probe_run_id += 1
+        # 무효화로 워커의 __end__가 버려지므로 버튼은 여기서 되살린다.
         self._test_btn.setEnabled(True)
-        # 연결 테스트와 모델 새로고침이 같은 상태 줄을 공유한다(_set_status).
-        self._set_status(("✓ " if ok else "✗ ") + msg, ok=ok)
+
+    def _on_probe_done(self, run_id: int, slot: str, status: str, detail: str):
+        """워커의 단계별 결과를 해당 줄에 반영 (Qt 메인 스레드). 옛 회차 결과는 버린다."""
+        if run_id != self._probe_run_id:
+            return
+        if slot == "__end__":
+            self._test_btn.setEnabled(True)
+            return
+        label = {
+            "conn": self._test_status,
+            "chat": self._model_probe_status,
+            "ocr": self._ocr_model_probe_status,
+        }[slot]
+        self._set_probe_status(label, status, detail)
 
     def _on_backend_changed(self, _idx: int):
         """API 백엔드 콤보 전환 — 해당 백엔드의 키/URL/모델/캐시로 입력란 스왑.
@@ -877,73 +959,33 @@ class SettingsDialog(QDialog):
         f.setBold(True)
         item.setFont(f)
         item.setForeground(QColor(COLORS['subtext0']))
-        # 헤더는 모델명이 아니므로 검색·폭 계산에서 구분할 수 있게 표시해 둔다.
+        # 델리게이트가 이 표시를 보고 헤더는 들여쓰지 않는다.
         combo.setItemData(idx, True, _HEADER_ROLE)
 
-    def _fill_model_combo(self, combo: QComboBox, candidates: list[str], backend: str,
-                          *, for_ocr: bool):
-        """콤보를 **계열 헤더 + 상태 아이콘**으로 채운다.
+    def _fill_model_combo(self, combo: QComboBox, candidates: list[str]):
+        """콤보를 계열 헤더 + 모델명으로 채운다.
 
-        상태는 `model_matrix.json`(실호출 스윕 산출물)에서 온다. 아이콘은 항목당 하나:
-          🚫 = 사용 불가 — 회색·**선택 불가**. 품질 판단이 아니라 API가 실제로 에러를
-               내는 객관적 사실이다(유령 404 / 이미지 첨부 400 / TTS 모델).
-          ⚠  = OCR 부정확 — 큰 글씨는 읽지만 12px 다크 UI 텍스트에서 무너진다. 고를 수는 있다.
-          📝 = 텍스트 전용 — AI 질의 콤보에만. 텍스트 질문은 되지만 **이미지를 첨부하는
-               질의**(이미지 항목 우클릭 "AI에게 질문")는 400으로 실패한다. 막지는 않는다.
-          ❓ = 미측정 — 스윕 때 429·503으로 못 재봤다. 막지 않는다.
-          (없음) = 정상. 투명 아이콘을 넣어 나머지 항목과 텍스트 시작 위치를 맞춘다.
+        **상태 배지는 달지 않는다.** 옛 버전은 `model_matrix.json`(빌드타임 전수 스윕)을
+        읽어 🚫/⚠/📝/❓ 아이콘을 달고 🚫는 선택까지 막았는데, 그 판정은 스윕 시점
+        스냅샷이라 게이트웨이가 라인업을 바꾸면 낡았다. 낡은 🚫는 **멀쩡한 모델을 영구히
+        못 고르게 만들고** 사용자에겐 우회 수단이 없었다(데이터가 exe에 번들됨).
 
-        아이콘으로 표시하는 이유: 텍스트 접미사를 붙이면 **모델명이 오염된다**(이 콤보는
-        editable이라 `currentText()`가 그대로 저장·호출된다). 툴팁은 사용자가 잘 안 보므로
-        상태는 반드시 아이콘으로 드러낸다(툴팁은 상세 이유를 보조로 담을 뿐).
-
-        ⭐(추천) 배지는 **의도적으로 없다** — 스윕 결과 45종 중 42종이 질의 가능이라
-        "검증됨" 배지에 정보가 없었고, 가격 배지는 게이트웨이가 단가를 노출하지 않아
-        추측이 된다. 활성/회색 이진과 계열 묶음이 실제 선택에 필요한 전부다.
+        어떤 모델이 실제로 되는지는 이제 `연결 테스트` 버튼이 **선택된 두 모델을 그 자리에서
+        실호출**해 알려준다(`_on_test_api`) — 항상 최신이고, 판정 근거가 방금 온 응답이다.
         """
-        from pasteflow.ocr_engine import (
-            chat_capable, group_models, is_measured, model_status, ocr_capable, ocr_is_weak,
-        )
+        from pasteflow.ocr_engine import group_models
 
-        usable = (lambda n: ocr_capable(n, backend)) if for_ocr else (lambda n: chat_capable(n, backend))
         combo.clear()
-        gray = QColor(COLORS['subtext0'])
-
-        for family, names in group_models(candidates, usable):
+        for family, names in group_models(candidates):
             self._add_group_header(combo, f"{family} ({len(names)})")
             for name in names:
-                st = model_status(name, backend)
-                ok = usable(name)
-                weak = for_ocr and ok and ocr_is_weak(name, backend)
-
-                # AI 질의 콤보에서도 비전 미지원은 알려야 한다 — 이미지 항목 우클릭
-                # "AI에게 질문"은 이 모델로 이미지를 멀티모달 전송하므로 400으로 실패한다.
-                text_only = (not for_ocr) and ok and st.get("ocr") == "fail"
-
                 combo.addItem(name)
-                idx = combo.count() - 1
-                if not ok:
-                    icon, tip = "🚫", f"사용 불가 — {st.get('why') or '호출 실패'}"
-                elif weak:
-                    icon, tip = "⚠", f"OCR 부정확 — {st.get('why') or '작은 글씨에서 오독'}"
-                elif text_only:
-                    icon, tip = "📝", "텍스트 전용 — 이미지를 첨부하는 질의는 실패합니다."
-                elif not is_measured(name, backend):
-                    icon, tip = "❓", "미측정 — 스윕 때 호출 한도로 확인하지 못했습니다."
-                else:
-                    icon, tip = "", "실호출로 확인됨"
-
-                combo.setItemData(idx, _status_icon(icon), Qt.ItemDataRole.DecorationRole)
-                combo.setItemData(idx, f"{name}\n\n{tip}", Qt.ItemDataRole.ToolTipRole)
-                if not ok:
-                    combo.model().item(idx).setEnabled(False)
-                    combo.setItemData(idx, gray, Qt.ItemDataRole.ForegroundRole)
 
         self._select_first_enabled(combo)
         self._adjust_model_popup_width(combo)
 
     def _select_first_enabled(self, combo: QComboBox):
-        """현재 선택이 비활성 헤더에 걸려 있으면 쓸 만한 모델로 옮긴다.
+        """현재 선택이 비활성 헤더에 걸려 있으면 실제 모델로 옮긴다.
 
         `clear()` 직후 첫 addItem이 헤더면 Qt가 currentIndex=0으로 잡아 헤더 문자열이
         `currentText()`(= 저장되는 모델명)가 된다. 호출부가 이후 저장된 선택을 복원하지만,
@@ -979,14 +1021,17 @@ class SettingsDialog(QDialog):
         widest = 0
         for i in range(combo.count()):
             text = combo.itemText(i)
-            if text:
-                widest = max(widest, fm.horizontalAdvance(text))
+            if not text:
+                continue
+            # 모델 행은 델리게이트가 들여쓰므로 그만큼 더 필요하다(헤더는 제자리).
+            pad = 0 if combo.itemData(i, _HEADER_ROLE) else _MODEL_INDENT_PX
+            widest = max(widest, fm.horizontalAdvance(text) + pad)
         if widest:
             # 스크롤바·여백 여유분 가산
             combo.view().setMinimumWidth(widest + 40)
 
     def _populate_model_combo(self):
-        """현재 backend의 캐시로 두 모델 콤보를 구성. 캐시 없으면 매트릭스가 아는 모델."""
+        """현재 backend의 캐시로 두 모델 콤보를 구성. 캐시가 없으면 빈 콤보."""
         import json
 
         backend = self._current_backend()
@@ -999,30 +1044,59 @@ class SettingsDialog(QDialog):
                     cached = [str(m) for m in parsed if m]
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass
-        self._fill_both_combos(cached, backend)
+        self._fill_both_combos(cached)
 
-    def _fill_both_combos(self, candidates: list[str], backend: str):
-        """후보 목록 하나로 AI 질의 콤보와 AI OCR 콤보를 채운다.
+    def _fill_both_combos(self, candidates: list[str]):
+        """후보 목록 하나로 AI 질의 콤보와 AI OCR 콤보를 함께 채운다.
 
-        **두 콤보 모두 같은 모델 집합을 담는다.** 옛날엔 OCR 콤보에서 비전 미지원 모델을
-        아예 빼버려 "왜 solar-pro2가 없지?"가 됐는데, 이제는 회색·비활성 + 🚫로 이유까지
-        보여준다(사용자 요청: 안 되는 것도 보이되 못 고르게).
+        **두 콤보는 같은 모델 집합을 담는다.** 어느 모델이 OCR에 쓸 수 있는지 미리 걸러
+        내지 않는다 — 그 판정은 `연결 테스트`가 실호출로 한다.
 
-        candidates가 비면(캐시 없는 첫 실행) 매트릭스가 아는 모델로 채운다.
-        _populate_model_combo(캐시 로드)와 _on_models_fetched(↻ 새로고침)가 공유.
+        candidates가 비면(캐시 없는 첫 실행) 콤보를 비운 채 둔다. 옛날엔 매트릭스가 아는
+        모델 이름으로 채웠지만, 그 목록 자체가 낡을 수 있어 placeholder로 ↻를 안내한다.
+        빈 값이 저장돼도 엔진이 backend별 기본 모델로 폴백하므로 안전하다.
         """
-        from pasteflow.ocr_engine import matrix_model_names
-
-        names = candidates or matrix_model_names(backend)
-        self._fill_model_combo(self._model_combo, names, backend, for_ocr=False)
-        self._fill_model_combo(self._ocr_model_combo, names, backend, for_ocr=True)
+        self._fill_model_combo(self._model_combo, candidates)
+        self._fill_model_combo(self._ocr_model_combo, candidates)
 
     def _set_status(self, message: str, ok: bool | None = None):
-        """연결 테스트 / 모델 새로고침이 공유하는 상태 줄. ok=None이면 중립 색."""
+        """모델 새로고침(↻)이 쓰는 상태 줄. ok=None이면 중립 색.
+
+        연결 테스트도 같은 라벨(`_test_status`)에 쓰지만 그쪽은 `_set_probe_status`를 탄다.
+        """
         color = COLORS['subtext0'] if ok is None else (
             COLORS['green'] if ok else COLORS['red'])
         self._test_status.setStyleSheet(f"color: {color}; font-size: 11px;")
         self._test_status.setText(message)
+        self._test_status.setVisible(True)
+
+    def _make_probe_label(self) -> QLabel:
+        """콤보 아래에 붙는 프로브 결과 줄. 결과가 있을 때만 보인다."""
+        label = QLabel("")
+        label.setWordWrap(True)
+        label.setVisible(False)
+        label.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
+        return label
+
+    def _stack(self, *widgets) -> QVBoxLayout:
+        """폼 한 칸에 위젯을 세로로 쌓는다(콤보 + 그 아래 결과 줄)."""
+        box = QVBoxLayout()
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(2)
+        for w in widgets:
+            box.addWidget(w)
+        return box
+
+    def _set_probe_status(self, label: QLabel, status: str, detail: str):
+        """모델별 프로브 결과 한 줄. 빈 detail이면 라벨을 비우고 숨긴다."""
+        if not detail:
+            label.clear()
+            label.setVisible(False)
+            return
+        mark, color = _PROBE_STYLE.get(status, _PROBE_STYLE["run"])
+        label.setStyleSheet(f"color: {color}; font-size: 11px;")
+        label.setText(f"{mark} {detail}".strip())
+        label.setVisible(True)
 
     def _on_refresh_models(self):
         """🔄 버튼 — 현재 backend에 맞는 API에서 모델 목록 조회 (워커 스레드)."""
@@ -1074,7 +1148,7 @@ class SettingsDialog(QDialog):
         for combo in (self._model_combo, self._ocr_model_combo):
             combo.setUpdatesEnabled(False)
         try:
-            self._fill_both_combos(unique, backend)
+            self._fill_both_combos(unique)
             for combo, current in ((self._model_combo, current_ai),
                                    (self._ocr_model_combo, current_ocr)):
                 idx = combo.findText(current)
@@ -1093,15 +1167,10 @@ class SettingsDialog(QDialog):
             for combo in (self._model_combo, self._ocr_model_combo):
                 combo.setUpdatesEnabled(True)
 
-        # 두 콤보가 같은 모델 집합을 담으므로 '개수'가 아니라 '고를 수 있는 수'를 알린다.
-        def _usable(combo) -> int:
-            return sum(1 for i in range(combo.count())
-                       if not combo.itemData(i, _HEADER_ROLE)
-                       and combo.model().item(i).isEnabled())
-
+        # ↻는 '어떤 모델이 있는지'만 안다. '되는지'는 연결 테스트가 실호출로 답한다.
         self._set_status(
-            f"✓ 새로고침 완료 — {len(unique)}종 중 질의 가능 {_usable(self._model_combo)} · "
-            f"OCR 가능 {_usable(self._ocr_model_combo)}", ok=True)
+            f"✓ 모델 {len(unique)}종을 불러왔습니다. 고른 모델이 실제로 되는지는 "
+            f"[연결 테스트]로 확인하세요.", ok=True)
 
         import json
         # 캐시도 backend별로 분리 저장 — 공식/게이트웨이 모델 라인업이 달라 섞이면 안 됨

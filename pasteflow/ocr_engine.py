@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal, NamedTuple, Optional
 
 from PIL import Image
 
@@ -31,31 +31,20 @@ def _normalize_base_url(base_url: str) -> str:
             break
     return url
 
-# ── 모델 능력 매트릭스 ────────────────────────────────────────────────────────
-# `tools/sweep_models.py`가 전 모델을 실호출해 만든 `model_matrix.json`을 읽는다.
-# 옛 손관리 상수 3종(_VERIFIED_MODELS / _NO_VISION_MODELS / _PHANTOM_MODELS)을 대체 —
-# 사람이 고른 목록이라 "왜 이건 되고 저건 안 되나"에 답할 수 없었고, 게이트웨이가
-# 라인업을 바꾸면 즉시 낡았다.
+# ── 폴백 안전망 ──────────────────────────────────────────────────────────────
+# 호출이 `model_not_found`로 깨졌을 때 조용히 갈아탈 모델 사슬. 앞에서부터 실패
+# 모델이 아닌 첫 항목을 쓴다.
 #
-# 상태값
-#   chat: "ok" | "fail" | "unknown"
-#   ocr : "L3" | "L2" | "L1" | "fail" | "unknown"
+# 옛 `model_matrix.json`(전 모델 능력표)은 폐기했다. 스윕 시점 스냅샷이라 게이트웨이가
+# 라인업을 바꾸면 즉시 낡는데, 그 낡은 판정으로 설정창이 모델 **선택을 차단**했다 —
+# 빌드에 번들되는 데이터라 사용자가 고칠 수도 없었다. 모델이 되는지는 이제 설정창의
+# `연결 테스트`가 **그 자리에서 실호출**해 확인한다(`probe_*` 함수들).
 #
-# `fail`은 **모델이 실제로 못 하는 것**이다(404 유령 / 이미지 첨부 400). `unknown`은
-# 서버 사정(429·503)으로 **못 재본 것**이라 막지 않는다 — 둘을 섞으면 멀쩡한 모델이
-# UI에서 회색 처리된다(2026-07-10 1차 스윕에서 공식 API 21종이 429로 fail 처리됐었다).
-# L1은 "큰 글씨는 읽지만 12px 다크 UI는 부정확"이라는 뜻으로, 차단하지 않고 경고
-# 아이콘만 붙인다 — 품질은 사용자가 자기 캡처 대상으로 판단하는 게 정확하다.
-#
-# ⚠ 옛 `tier_rank`(추정 가격 순위)는 제거했다. 게이트웨이가 chat 단가를 API로도
-# costs.json으로도 주지 않아 어림값이었고, 계열 그룹핑을 도입하면서 쓸 곳이 없어졌다.
-#
-# 어느 backend에서든 호출되리라 신뢰하는 최종 안전망 폴백 모델
+# 이 사슬만 상수로 남기는 이유: 폴백은 사용자가 볼 수 없는 자리에서 일어나므로 후보를
+# 실호출로 정할 기회가 없다. gemini flash 계열은 official·gateway 양쪽에 모두 있어
+# backend를 나눌 필요가 없다.
 _FALLBACK_DEFAULT = "gemini-2.5-flash"
-
-_MATRIX_FILENAME = "model_matrix.json"
-_matrix_cache: Optional[dict] = None
-_BACKENDS = ("gateway", "official")
+_FALLBACK_CHAIN = (_FALLBACK_DEFAULT, "gemini-2.0-flash")
 
 # 계열 표시 순서. 각 항목은 (표시명, 모델 ID 접두사들).
 # 매칭은 `/`로 구분된 경로의 **마지막 조각**을 소문자화해 접두사 비교한다
@@ -74,81 +63,6 @@ _FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
 _FAMILY_OTHER = "기타"
 
 
-def load_model_matrix() -> dict:
-    """`model_matrix.json`을 1회 로드해 캐시. 없거나 깨졌으면 빈 dict.
-
-    파일이 없으면 모든 모델이 `unknown`으로 취급돼 전부 선택 가능해진다 —
-    기능이 죽는 대신 안전하게 열화된다(빌드에서 데이터 파일이 빠진 경우 대비).
-    """
-    global _matrix_cache
-    if _matrix_cache is not None:
-        return _matrix_cache
-    import json
-    import os
-    import sys
-
-    # PyInstaller onefile은 데이터 파일을 sys._MEIPASS 아래로 풀어 놓는다. 소스 실행과
-    # 빌드 실행 양쪽에서 찾도록 후보를 순서대로 시도한다.
-    candidates = [os.path.join(os.path.dirname(__file__), _MATRIX_FILENAME)]
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        candidates.append(os.path.join(meipass, "pasteflow", _MATRIX_FILENAME))
-        candidates.append(os.path.join(meipass, _MATRIX_FILENAME))
-
-    for path in candidates:
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            _matrix_cache = data if isinstance(data, dict) else {}
-            return _matrix_cache
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError) as e:  # json.JSONDecodeError는 ValueError 하위
-            print(f"[ocr_engine] {path} 로드 실패: {e}")
-            break
-
-    print(f"[ocr_engine] {_MATRIX_FILENAME} 없음 — 전 모델을 미측정으로 취급합니다.")
-    _matrix_cache = {}
-    return _matrix_cache
-
-
-def _check_backend(backend: str) -> None:
-    """오타가 조용히 '전부 미측정'으로 흘러가지 않게 명시적으로 막는다."""
-    if backend not in _BACKENDS:
-        raise ValueError(f"Unknown backend: {backend!r}")
-
-
-def model_status(name: str, backend: str) -> dict:
-    """{chat, ocr, why} 상태 dict. 매트릭스에 없는 모델은 전부 unknown."""
-    _check_backend(backend)
-    entry = load_model_matrix().get(backend, {}).get(name)
-    if not isinstance(entry, dict):
-        return {"chat": "unknown", "ocr": "unknown", "why": ""}
-    return entry
-
-
-def chat_capable(name: str, backend: str) -> bool:
-    """AI 질의 콤보에서 고를 수 있는가. 미측정(unknown)은 허용한다."""
-    return model_status(name, backend).get("chat") != "fail"
-
-
-def ocr_capable(name: str, backend: str) -> bool:
-    """AI OCR 콤보에서 고를 수 있는가 — 호출이 되고 이미지를 받아야 한다."""
-    st = model_status(name, backend)
-    return st.get("chat") != "fail" and st.get("ocr") != "fail"
-
-
-def ocr_is_weak(name: str, backend: str) -> bool:
-    """큰 글씨는 읽지만 12px 다크 UI 텍스트는 부정확(L1까지만 통과)."""
-    return model_status(name, backend).get("ocr") == "L1"
-
-
-def is_measured(name: str, backend: str) -> bool:
-    """스윕이 실제로 재본 모델인가. unknown이 하나라도 있으면 미측정 취급."""
-    st = model_status(name, backend)
-    return "unknown" not in (st.get("chat"), st.get("ocr"))
-
-
 def family_of(name: str) -> str:
     """모델 ID에서 계열 표시명. 어디에도 안 걸리면 '기타'."""
     base = name.rsplit("/", 1)[-1].lower()
@@ -159,15 +73,15 @@ def family_of(name: str) -> str:
     return _FAMILY_OTHER
 
 
-def group_models(candidates: list[str], usable) -> list[tuple[str, list[str]]]:
+def group_models(candidates: list[str]) -> list[tuple[str, list[str]]]:
     """계열별로 묶어 `[(계열명, [모델…]), …]` 반환. 빈 계열은 생략.
 
-    계열 순서는 `_FAMILIES` 고정 순서(마지막이 '기타'). 계열 안에서는 **쓸 수 있는
-    것을 먼저**, 그다음 대소문자 무시 알파벳순 — 비활성 항목이 계열 위쪽에 끼어
-    눈을 끄는 것을 막는다. 대소문자 무시 정렬은 `LGAI-EXAONE/...` 같은 대문자 ID가
-    ASCII 순서로 소문자 앞에 튀어나오는 것을 막는다.
+    계열 순서는 `_FAMILIES` 고정 순서(마지막이 '기타'). 계열 안에서는 대소문자 무시
+    알파벳순 — `LGAI-EXAONE/...` 같은 대문자 ID가 ASCII 순서로 소문자 앞에 튀어나오는
+    것을 막는다.
 
-    `usable`은 `(name) -> bool` 콜러블 — 콤보마다 다르다(chat_capable / ocr_capable).
+    (옛 `usable` 인자는 매트릭스와 함께 제거됐다. 어떤 모델이 되는지는 이 목록을
+    정렬할 때가 아니라 설정창 `연결 테스트`가 실호출로 판정한다.)
     """
     buckets: dict[str, list[str]] = {}
     for name in candidates:
@@ -178,18 +92,9 @@ def group_models(candidates: list[str], usable) -> list[tuple[str, list[str]]]:
         names = buckets.get(label)
         if not names:
             continue
-        names.sort(key=lambda n: (not usable(n), n.lower()))
+        names.sort(key=str.lower)
         out.append((label, names))
     return out
-
-
-def matrix_model_names(backend: str) -> list[str]:
-    """매트릭스가 아는 backend의 모델 이름 전부.
-
-    캐시가 비어 있는 첫 실행에서 콤보 초기값으로 쓴다(옛 whitelist_model_names 대체).
-    """
-    _check_backend(backend)
-    return sorted(load_model_matrix().get(backend, {}).keys(), key=str.lower)
 
 
 def _is_model_not_found(exc: Exception) -> bool:
@@ -221,33 +126,16 @@ def _is_quota_error(exc: Exception) -> bool:
     return "429" in msg or "resource_exhausted" in msg or "quota" in msg
 
 
-def select_fallback_model(failed_model: str, backend: str) -> Optional[str]:
-    """호출이 실패한 모델에 대해 backend 호환 폴백 후보 1개. 없으면 None.
+def select_fallback_model(failed_model: str) -> Optional[str]:
+    """호출이 실패한 모델을 대신할 폴백 후보 1개. 남은 후보가 없으면 None.
 
-    선정 규칙: _FALLBACK_DEFAULT 우선. 실패 모델이 마침 그것이면 같은 backend에서 고른다.
-      1순위 — chat·OCR 둘 다 **실측 통과**한 모델 (폴백은 조용히 일어나므로, 또 실패하면
-              사용자가 원인을 짚을 수 없다).
-      2순위 — 1순위가 없으면 **못 한다고 확인되지 않은** 모델(unknown 포함). 공식 API처럼
-              스윕이 429로 막혀 실측이 없는 backend에서 폴백이 통째로 사라지는 것을 막는다.
+    `_FALLBACK_CHAIN`에서 실패 모델이 아닌 첫 항목. backend를 구분하지 않는다 —
+    사슬의 gemini flash 계열은 공식 API와 게이트웨이 양쪽에 모두 존재한다.
     """
-    _check_backend(backend)
-    matrix = load_model_matrix().get(backend, {})
-    # 매트릭스가 비면(데이터 파일 유실) 옛 동작대로 안전망 모델을 그대로 쓴다.
-    if failed_model != _FALLBACK_DEFAULT and (not matrix or _FALLBACK_DEFAULT in matrix):
-        return _FALLBACK_DEFAULT
-
-    others = {n: st for n, st in matrix.items() if n != failed_model}
-    proven = sorted(n for n, st in others.items()
-                    if st.get("chat") == "ok" and st.get("ocr") in ("L2", "L3"))
-    if proven:
-        return proven[0]
-    # 같은 '미확인' 안에서도 chat이 확인된 모델을 먼저 — 완전 미측정보다는 낫다.
-    plausible = sorted(
-        (n for n, st in others.items()
-         if st.get("chat") != "fail" and st.get("ocr") != "fail"),
-        key=lambda n: (others[n].get("chat") != "ok", n),
-    )
-    return plausible[0] if plausible else None
+    for candidate in _FALLBACK_CHAIN:
+        if candidate != failed_model:
+            return candidate
+    return None
 
 
 # WinRT OcrEngine.MaxImageDimension (4096px 초과 이미지는 에러)
@@ -409,9 +297,9 @@ class OcrEngine:
         - base_url 없음: `google.generativeai.list_models()` 사용. generateContent를
           지원하는 gemini-* 모델만 추출(공식 Google AI Studio API는 태생적으로 gemini 전용).
 
-        **여기서 아무것도 걸러내지 않는다.** 못 쓰는 모델(유령 404·이미지 400·TTS)은
-        설정창 콤보가 `model_matrix.json`을 보고 회색·비활성 + 🚫로 이유까지 표시한다.
-        옛날처럼 목록에서 조용히 지우면 사용자는 "왜 이 모델이 없지?"를 알 수 없다.
+        **여기서 아무것도 걸러내지 않는다.** 못 쓰는 모델(유령 404·이미지 400·TTS)을
+        목록에서 조용히 지우면 사용자는 "왜 이 모델이 없지?"를 알 수 없다. 어떤 모델이
+        실제로 되는지는 설정창 `연결 테스트`가 그 모델을 실호출해(`probe_*`) 알려준다.
         메서드 이름은 하위 호환을 위해 유지(gemini 전용이 아니다).
 
         실패 시 RuntimeError. UI 블로킹 방지를 위해 호출자가 워커 스레드에서 실행해야 한다.
@@ -428,8 +316,7 @@ class OcrEngine:
                 client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
                 resp = client.models.list()
                 # 필터 없음 — 게이트웨이가 광고하는 모든 모델을 그대로 넘긴다.
-                # 유령(404)·비전 미지원(400) 모델은 설정창 콤보가 매트릭스를 보고
-                # 회색·비활성으로 표시한다(옛날엔 여기서 조용히 지워 "왜 없지?"가 됐다).
+                # (옛날엔 여기서 조용히 지워 "왜 없지?"가 됐다.)
                 models = [m.id for m in resp.data]
             except Exception as e:
                 raise RuntimeError(f"게이트웨이 모델 조회 실패: {e}") from e
@@ -531,7 +418,6 @@ class OcrEngine:
             model_name = self.model or "gemini-3.1-flash-lite"
             return self._call_with_fallback(
                 model_name,
-                backend="gateway",
                 call=lambda m: self._openai_compat_call(pil_image, api_key, self.base_url, m),
             )
 
@@ -544,21 +430,20 @@ class OcrEngine:
         model_name = self.model or "gemini-2.5-flash"
         return self._call_with_fallback(
             model_name,
-            backend="official",
             call=lambda m: self._google_genai_call(genai, pil_image, m),
         )
 
     # ── 폴백 공통 래퍼 ──
 
-    def _call_with_fallback(self, model: str, backend: str, call) -> str:
-        """1차 호출 실패가 model_not_found 류면 화이트리스트의 다음 안전 모델로 1회 재시도."""
+    def _call_with_fallback(self, model: str, call) -> str:
+        """1차 호출 실패가 model_not_found 류면 `_FALLBACK_CHAIN`의 안전 모델로 1회 재시도."""
         self.last_used_model = model
         try:
             return call(model)
         except Exception as exc:
             if not _is_model_not_found(exc):
                 raise
-            fallback = select_fallback_model(model, backend)
+            fallback = select_fallback_model(model)
             if not fallback or fallback == model:
                 raise
             # 폴백 진행 — main이 토스트로 표시
@@ -587,7 +472,6 @@ class OcrEngine:
         self.last_fallback_from = None
         return self._call_with_fallback(
             model,
-            backend="gateway",
             call=lambda m: self._openai_compat_call(pil_image, api_key, base_url, m),
         )
 
@@ -655,7 +539,6 @@ class OcrEngine:
             model_name = self.model or "gemini-3.1-flash-lite"
             return self._call_with_fallback(
                 model_name,
-                backend="gateway",
                 call=lambda m: self._ask_openai_compat(messages, api_key, self.base_url, m, image_png),
             )
 
@@ -668,7 +551,7 @@ class OcrEngine:
         model_name = self.model or "gemini-2.5-flash"
         call = lambda m: self._ask_google_genai(client, messages, m, image_png)
         try:
-            return self._call_with_fallback(model_name, backend="official", call=call)
+            return self._call_with_fallback(model_name, call=call)
         except Exception as exc:
             # grounding(웹 검색) 할당량 막힘(429): flash-lite 등 일부 모델은 검색 도구에
             # 무료 할당량이 없어 grounding 호출이 429난다. AI 답변은 항상 검색을 붙이므로
@@ -751,6 +634,208 @@ class OcrEngine:
         resp = client.models.generate_content(
             model=model_name, contents=contents, config=config)
         return (resp.text or "").strip()
+
+
+# ── 연결·모델 라이브 프로브 ──────────────────────────────────────────────────
+# 설정창 `연결 테스트` 버튼이 쓰는 온디맨드 검사. 옛 `model_matrix.json`(빌드타임 전수
+# 스윕)을 대체한다 — 같은 일을 하되 **지금 선택된 두 모델에 대해서만, 누른 순간에** 한다.
+# 그래서 게이트웨이가 라인업을 바꿔도 결과가 낡지 않는다.
+#
+# ⚠ 프로브는 `_call_with_fallback`을 **거치지 않는다**. 폴백이 끼면 망가진 모델이 조용히
+# gemini-2.5-flash로 갈아타 ✓로 보고되어, 테스트가 존재 이유를 잃는다.
+
+ProbeStatus = Literal["ok", "weak", "fail", "retry"]
+
+_PROBE_TEXT = "42"
+# AI 질의 프로브 프롬프트. 이미지가 함께 실리면 모델이 그림을 무시하지 않도록 짧게 묻는다.
+_CHAT_PROBE_PROMPT = "이미지에 보이는 숫자만 답하세요. 이미지가 없으면 1+1의 답만 쓰세요."
+
+
+class ProbeResult(NamedTuple):
+    """`status`는 UI 색을, `detail`은 사용자에게 보여줄 한 줄 설명을 정한다.
+
+    - ok    : 호출 성공.
+    - weak  : 호출은 됐지만 결과가 미덥지 않다(OCR이 이미지는 받았으나 글자를 못 읽음).
+    - fail  : 이 모델·키로는 안 된다(404 / 이미지 미지원 400 / 인증 실패).
+    - retry : 서버 사정(429·503)으로 **판정 불가**. `fail`과 절대 섞지 말 것 —
+              멀쩡한 모델을 나쁜 모델로 오해하게 만든다.
+    """
+    status: ProbeStatus
+    detail: str
+
+
+def _short_error(exc: Exception, limit: int = 140) -> str:
+    msg = " ".join(str(exc).split())
+    return msg if len(msg) <= limit else msg[: limit - 1] + "…"
+
+
+def _is_server_busy(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "503" in msg or "unavailable" in msg or "overloaded" in msg
+
+
+def _is_image_rejected(exc: Exception) -> bool:
+    """이미지 입력을 못 받는 모델의 400 응답인지 (텍스트 전용 모델)."""
+    msg = str(exc).lower()
+    if "400" not in msg and "invalid_request" not in msg:
+        return False
+    return any(k in msg for k in ("image", "vision", "multimodal", "image_url"))
+
+
+def _classify_probe_error(exc: Exception, *, with_image: bool = False) -> ProbeResult:
+    if _is_quota_error(exc):
+        return ProbeResult("retry", "일시적 한도 초과(429) — 잠시 후 다시 시도하세요.")
+    if _is_server_busy(exc):
+        return ProbeResult("retry", "서버 일시 장애(503) — 잠시 후 다시 시도하세요.")
+    if _is_model_not_found(exc):
+        return ProbeResult("fail", "이 이름의 모델이 없습니다(404).")
+    if with_image and _is_image_rejected(exc):
+        return ProbeResult("fail", "이미지 입력을 지원하지 않는 모델입니다(400) — OCR에 쓸 수 없습니다.")
+    return ProbeResult("fail", _short_error(exc))
+
+
+def _probe_image_png() -> bytes:
+    """OCR 프로브용 이미지 — 흰 바탕에 큰 검은 글씨로 `_PROBE_TEXT`."""
+    import io
+    from PIL import ImageDraw, ImageFont
+
+    img = Image.new("RGB", (160, 80), "white")
+    draw = ImageDraw.Draw(img)
+    font = None
+    for name in ("arial.ttf", "malgun.ttf"):
+        try:
+            font = ImageFont.truetype(name, 48)
+            break
+        except OSError:
+            continue
+    # 트루타입이 없으면 PIL 기본 비트맵 폰트(작음). 읽히면 좋고, 못 읽어도 'weak'일 뿐
+    # 이미지 수락 여부(진짜 알고 싶은 것)는 그대로 판정된다.
+    draw.text((30, 12), _PROBE_TEXT, fill="black", font=font)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def probe_connection(api_key: str, base_url: str = "") -> ProbeResult:
+    """키·엔드포인트가 살아 있는지. 모델 목록 조회로 확인(어떤 모델도 호출하지 않음)."""
+    try:
+        models = OcrEngine.list_gemini_models(api_key, base_url)
+    except Exception as exc:
+        return _classify_probe_error(exc)
+    if not models:
+        return ProbeResult("fail", "응답은 왔으나 모델 목록이 비어 있습니다.")
+    return ProbeResult("ok", f"키 유효 — 모델 {len(models)}종 조회됨")
+
+
+def _chat_probe_call(api_key: str, base_url: str, model: str, image_png: Optional[bytes]) -> str:
+    """AI 질의 프로브의 단일 호출. `image_png`가 있으면 멀티모달로 함께 보낸다."""
+    if base_url:
+        import openai
+        client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
+        content: object = _CHAT_PROBE_PROMPT
+        if image_png:
+            import base64
+            b64 = base64.standard_b64encode(image_png).decode()
+            content = [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                {"type": "text", "text": _CHAT_PROBE_PROMPT},
+            ]
+        resp = client.chat.completions.create(
+            model=model, max_tokens=16384,
+            messages=[{"role": "user", "content": content}],
+        )
+        return (resp.choices[0].message.content or "").strip()
+
+    from google import genai
+    from google.genai import types
+    client = genai.Client(api_key=api_key)
+    parts = []
+    if image_png:
+        parts.append(types.Part.from_bytes(data=image_png, mime_type="image/png"))
+    parts.append(types.Part(text=_CHAT_PROBE_PROMPT))
+    resp = client.models.generate_content(
+        model=model, contents=[types.Content(role="user", parts=parts)])
+    return (resp.text or "").strip()
+
+
+def probe_chat_model(api_key: str, base_url: str, model: str) -> ProbeResult:
+    """이 모델이 AI 질의에 응답하는지 실호출로 확인 — **이미지 첨부까지 함께 본다.**
+
+    이미지를 같이 보내는 이유: 이미지 항목 우클릭 "AI에게 질문"은 OCR 모델이 아니라 **이
+    AI 질의 모델**로 이미지를 멀티모달 전송한다(main `_ai_query_for_item` → `_start_ai_worker`
+    → `_resolve_gemini_cfg("ai")`). 텍스트만 찔러보면 `solar-pro2` 같은 텍스트 전용 모델이
+    ✓로 통과했다가 이미지 질의에서 400이 난다(옛 `📝` 배지가 경고하던 바로 그 케이스).
+
+    이미지 호출이 실패하면 **텍스트만으로 한 번 더** 던져 원인을 가른다 — 텍스트가 되면
+    `weak`(질의는 되나 이미지 첨부 불가), 텍스트도 안 되면 그 에러가 진짜 원인이다.
+    에러 메시지 문구에 기대지 않으므로 게이트웨이가 뭐라고 답하든 판정이 흔들리지 않는다.
+
+    **웹 검색(grounding) 도구는 붙이지 않는다.** 붙이면 검색 무료 할당량이 없는 모델
+    (flash-lite 등)이 429를 내는데, 실제 AI 질의에서는 `ask_messages`가 안전망 모델로
+    자동 재시도해 정상 동작한다 — 여기서 ✗를 띄우면 멀쩡한 모델을 버리게 된다.
+
+    성공 판정은 **예외가 안 나는 것**뿐이다. thinking 계열은 본문이 비어 올 수 있는데
+    (max_tokens 예산을 사고에 다 씀) 그것도 '호출은 된다'는 뜻이라 ok로 본다.
+    """
+    if not model:
+        return ProbeResult("fail", "모델이 비어 있습니다.")
+
+    try:
+        image_png: Optional[bytes] = _probe_image_png()
+    except Exception:
+        image_png = None  # 이미지를 못 만들면 텍스트 질의만이라도 확인한다
+
+    try:
+        _chat_probe_call(api_key, base_url, model, image_png)
+    except Exception as exc_img:
+        if not image_png:
+            return _classify_probe_error(exc_img)
+        # 이미지 탓인지 모델 탓인지 가른다 (메시지 문구에 의존하지 않는 판별).
+        try:
+            _chat_probe_call(api_key, base_url, model, None)
+        except Exception as exc_txt:
+            return _classify_probe_error(exc_txt)
+        if _is_quota_error(exc_img) or _is_server_busy(exc_img):
+            return ProbeResult(
+                "retry", "텍스트 질의는 확인했지만 이미지 첨부는 서버 사정으로 판정하지 못했습니다.")
+        return ProbeResult(
+            "weak", "텍스트 질의는 되지만 이미지 첨부는 실패합니다 — "
+                    "이미지 우클릭 'AI에게 질문'이 안 됩니다.")
+
+    if image_png:
+        return ProbeResult("ok", "호출 성공 — 텍스트·이미지 질의 모두 확인")
+    return ProbeResult("ok", "호출 성공 — 텍스트 질의 확인")
+
+
+def probe_ocr_model(api_key: str, base_url: str, model: str, language: str = "ko") -> ProbeResult:
+    """이 모델이 **이미지를 받아** 글자를 읽는지 실호출로 확인.
+
+    실제 OCR과 같은 경로(`_openai_compat_call` / `_google_genai_call`)를 폴백 없이 탄다.
+    `_PROBE_TEXT`가 응답에 있으면 ok, 이미지는 받았는데 못 읽으면 weak(고를 수는 있으나
+    작은 글씨에서 무너질 신호), 이미지 자체를 거부하면 fail.
+    """
+    if not model:
+        return ProbeResult("fail", "모델이 비어 있습니다.")
+    import io
+    try:
+        engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url,
+                           language=language, model=model)
+        pil = Image.open(io.BytesIO(_probe_image_png()))
+        if base_url:
+            text = engine._openai_compat_call(pil, api_key, base_url, model)
+        else:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            text = engine._google_genai_call(genai, pil, model)
+    except Exception as exc:
+        # 이미지 생성 실패도 여기서 잡힌다 — OCR 줄에 표시돼야 원인을 짚을 수 있다.
+        return _classify_probe_error(exc, with_image=True)
+
+    if _PROBE_TEXT in text:
+        return ProbeResult("ok", f'이미지 인식 확인 — "{_PROBE_TEXT}" 읽음')
+    if not text.strip():
+        return ProbeResult("ok", "이미지 수락 — 응답 본문은 비어 있음")
+    return ProbeResult("weak", "이미지는 받지만 글자를 못 읽었습니다 — OCR 품질이 낮을 수 있습니다.")
 
 
 # ── 단독 실행 검증 ────────────────────────────────────────────────────────

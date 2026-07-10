@@ -148,116 +148,161 @@ class TestFamilyOf:
 class TestGroupModels:
     def test_families_in_fixed_order_and_empty_ones_dropped(self):
         from pasteflow.ocr_engine import group_models
-        groups = group_models(["gpt-5", "gemini-2.5-flash", "claude-opus-4-8"],
-                              usable=lambda _n: True)
+        groups = group_models(["gpt-5", "gemini-2.5-flash", "claude-opus-4-8"])
         assert [label for label, _ in groups] == ["Gemini", "Claude", "GPT"]
-
-    def test_unusable_sink_to_bottom_of_their_family(self):
-        from pasteflow.ocr_engine import group_models
-        groups = group_models(["gpt-5.2-codex", "gpt-5", "gpt-5-mini"],
-                              usable=lambda n: n != "gpt-5.2-codex")
-        _label, names = groups[0]
-        assert names[-1] == "gpt-5.2-codex"
 
     def test_uppercase_ids_do_not_break_alphabetical_order(self):
         from pasteflow.ocr_engine import group_models
-        groups = group_models(["gemini-z", "gemini-A"], usable=lambda _n: True)
+        groups = group_models(["gemini-z", "gemini-A"])
         assert groups[0][1] == ["gemini-A", "gemini-z"]
 
-
-class TestModelMatrix:
-    """실제로 배포되는 model_matrix.json이 스윕 결과와 일치하는지 (회귀 방지)."""
-
-    def test_matrix_loads_and_has_both_backends(self):
-        from pasteflow.ocr_engine import load_model_matrix
-        m = load_model_matrix()
-        assert "gateway" in m and "official" in m
-
-    def test_no_vision_models_are_blocked_for_ocr_only(self):
-        """이미지 400을 내는 모델: 질의는 되고 OCR만 막혀야 한다."""
-        from pasteflow.ocr_engine import chat_capable, ocr_capable
-        for name in ("solar-pro2", "solar-pro3",
-                     "accounts/fireworks/models/gpt-oss-120b",
-                     "LGAI-EXAONE/K-EXAONE-236B-A23B"):
-            assert chat_capable(name, "gateway"), name
-            assert not ocr_capable(name, "gateway"), name
-
-    def test_no_vision_models_stay_distinguishable_for_ai_combo(self):
-        """AI 질의 콤보는 이들을 막지 않지만 '텍스트 전용'임을 알 수 있어야 한다.
-
-        이미지 항목 우클릭 "AI에게 질문"이 AI 모델로 이미지를 멀티모달 전송하므로,
-        비전 미지원 모델을 고르면 조용히 400이 난다(설정창이 📝로 고지).
-        """
-        from pasteflow.ocr_engine import chat_capable, model_status
-        st = model_status("solar-pro2", "gateway")
-        assert chat_capable("solar-pro2", "gateway")
-        assert st["ocr"] == "fail"
-
-    def test_endpoint_unsupported_models_blocked_everywhere(self):
-        from pasteflow.ocr_engine import chat_capable, ocr_capable
-        for name in ("gpt-5.1-codex-max", "gpt-5.2-codex", "gpt-5.3-codex"):
-            assert not chat_capable(name, "gateway"), name
-            assert not ocr_capable(name, "gateway"), name
-
-    def test_weak_ocr_models_are_selectable_but_flagged(self):
-        from pasteflow.ocr_engine import ocr_capable, ocr_is_weak
-        assert ocr_capable("claude-haiku-4-5-20251001", "gateway")
-        assert ocr_is_weak("claude-haiku-4-5-20251001", "gateway")
-        assert not ocr_is_weak("gemini-2.5-flash", "gateway")
-
-    def test_unknown_models_are_not_blocked(self):
-        """스윕이 못 재본 모델(429)은 막지 않는다 — fail과 unknown은 다르다."""
-        from pasteflow.ocr_engine import chat_capable, is_measured, ocr_capable
-        name = "gemini-2.5-pro"  # official에서 429로 미측정
-        assert chat_capable(name, "official")
-        assert ocr_capable(name, "official")
-        assert not is_measured(name, "official")
-
-    def test_unlisted_model_defaults_to_unknown_and_usable(self):
-        from pasteflow.ocr_engine import chat_capable, is_measured, ocr_capable
-        assert chat_capable("brand-new-model-9", "gateway")
-        assert ocr_capable("brand-new-model-9", "gateway")
-        assert not is_measured("brand-new-model-9", "gateway")
-
-    def test_invalid_backend_raises(self):
-        from pasteflow.ocr_engine import model_status
-        with pytest.raises(ValueError):
-            model_status("gemini-2.5-flash", "???")
+    def test_no_model_is_dropped(self):
+        """콤보가 모든 모델을 보여야 한다 — 되는지 여부는 연결 테스트가 판정한다."""
+        from pasteflow.ocr_engine import group_models
+        names = ["solar-pro2", "gpt-5.2-codex", "gemini-2.5-flash", "brand-new-9"]
+        flat = [n for _label, group in group_models(names) for n in group]
+        assert sorted(flat) == sorted(names)
 
 
 class TestSelectFallbackModel:
     def test_returns_default_safety_net(self):
         from pasteflow.ocr_engine import select_fallback_model
-        assert select_fallback_model("gemini-anything", "gateway") == "gemini-2.5-flash"
+        assert select_fallback_model("gemini-anything") == "gemini-2.5-flash"
 
     def test_skips_failed_model_when_it_is_default(self):
         from pasteflow.ocr_engine import select_fallback_model
-        result = select_fallback_model("gemini-2.5-flash", "gateway")
+        result = select_fallback_model("gemini-2.5-flash")
         assert result is not None
         assert result != "gemini-2.5-flash"
 
-    def test_invalid_backend_raises(self):
-        from pasteflow.ocr_engine import select_fallback_model
-        with pytest.raises(ValueError):
-            select_fallback_model("gemini-anything", "???")
+    def test_never_returns_the_failed_model(self):
+        from pasteflow.ocr_engine import _FALLBACK_CHAIN, select_fallback_model
+        for failed in _FALLBACK_CHAIN + ("some-other-model",):
+            assert select_fallback_model(failed) != failed
 
-    def test_official_has_a_fallback_despite_unmeasured_matrix(self):
-        """공식 백엔드는 스윕이 429로 막혀 실측 통과 모델이 0개다.
 
-        '실측 통과'만 후보로 삼으면 폴백이 통째로 None이 되어 안전망이 사라진다.
-        (회귀 방지 — 매트릭스 도입 때 실제로 None을 반환했다.)
-        """
-        from pasteflow.ocr_engine import select_fallback_model
-        result = select_fallback_model("gemini-2.5-flash", "official")
-        assert result is not None
-        assert result != "gemini-2.5-flash"
+class TestProbeErrorClassification:
+    """`retry`(서버 사정)와 `fail`(모델이 못 함)을 섞지 않는지 — 섞으면 멀쩡한 모델을
+    나쁜 모델로 표시하게 된다(옛 매트릭스 1차 스윕에서 실제로 벌어진 사고)."""
 
-    def test_fallback_never_picks_a_known_bad_model(self):
-        from pasteflow.ocr_engine import select_fallback_model
-        bad = {"gpt-5.1-codex-max", "gpt-5.2-codex", "gpt-5.3-codex",
-               "solar-pro2", "solar-pro3"}
-        for failed in ("gemini-2.5-flash", "claude-opus-4-8"):
-            assert select_fallback_model(failed, "gateway") not in bad
+    def test_quota_is_retry_not_fail(self):
+        from pasteflow.ocr_engine import _classify_probe_error
+        assert _classify_probe_error(Exception("429 RESOURCE_EXHAUSTED")).status == "retry"
+
+    def test_server_busy_is_retry(self):
+        from pasteflow.ocr_engine import _classify_probe_error
+        assert _classify_probe_error(Exception("503 Service Unavailable")).status == "retry"
+        assert _classify_probe_error(Exception("model is overloaded")).status == "retry"
+
+    def test_model_not_found_is_fail(self):
+        from pasteflow.ocr_engine import _classify_probe_error
+        r = _classify_probe_error(Exception("Error code: 404 - Model 'x' not found"))
+        assert r.status == "fail"
+        assert "404" in r.detail
+
+    def test_image_rejection_only_classified_when_image_was_sent(self):
+        from pasteflow.ocr_engine import _classify_probe_error
+        exc = Exception("Error code: 400 - image input is not supported")
+        assert "이미지" in _classify_probe_error(exc, with_image=True).detail
+        # 텍스트 프로브에서는 같은 400이라도 이미지 탓으로 단정하지 않는다.
+        assert "이미지" not in _classify_probe_error(exc, with_image=False).detail
+
+    def test_unknown_error_is_fail_with_truncated_detail(self):
+        from pasteflow.ocr_engine import _classify_probe_error
+        r = _classify_probe_error(Exception("x" * 400))
+        assert r.status == "fail"
+        assert len(r.detail) <= 140
+
+
+class TestProbeImage:
+    def test_probe_image_is_a_readable_png(self):
+        import io
+        from PIL import Image
+        from pasteflow.ocr_engine import _probe_image_png
+        img = Image.open(io.BytesIO(_probe_image_png()))
+        assert img.format == "PNG"
+        assert img.size == (160, 80)
+
+    def test_probe_image_actually_has_dark_glyphs(self):
+        """흰 캔버스만 보내면 OCR 프로브가 항상 weak로 뜬다 — 글자가 실제로 그려져야."""
+        import io
+        from PIL import Image
+        from pasteflow.ocr_engine import _probe_image_png
+        img = Image.open(io.BytesIO(_probe_image_png())).convert("L")
+        assert sum(img.histogram()[:100]) > 50  # 어두운 픽셀 = 그려진 글자
+
+
+class TestProbeChatModel:
+    """AI 질의 프로브는 **이미지 첨부까지** 본다 — 이미지 항목 우클릭 'AI에게 질문'이
+    OCR 모델이 아니라 이 모델로 이미지를 멀티모달 전송하기 때문이다.
+
+    판별은 에러 메시지 문구가 아니라 '텍스트만으로 재시도'로 한다(게이트웨이가 뭐라고
+    답하든 흔들리지 않게). 이 분기가 깨지면 텍스트 전용 모델이 조용히 ✓로 통과한다.
+    """
+
+    def _patch(self, monkeypatch, behavior):
+        """(_chat_probe_call 대체) behavior(image_png) → 반환값 or raise."""
+        import pasteflow.ocr_engine as oe
+        calls = []
+
+        def fake(api_key, base_url, model, image_png):
+            calls.append(image_png is not None)
+            return behavior(image_png)
+
+        monkeypatch.setattr(oe, "_chat_probe_call", fake)
+        return calls
+
+    def test_ok_when_image_call_succeeds(self, monkeypatch):
+        from pasteflow.ocr_engine import probe_chat_model
+        calls = self._patch(monkeypatch, lambda img: "42")
+        r = probe_chat_model("k", "", "gemini-2.5-flash")
+        assert r.status == "ok"
+        assert calls == [True], "이미지를 실은 호출 한 번으로 끝나야(비용)"
+
+    def test_weak_when_only_the_image_call_fails(self, monkeypatch):
+        """텍스트 전용 모델(solar-pro2 등) — 옛 📝 배지가 잡던 케이스."""
+        from pasteflow.ocr_engine import probe_chat_model
+
+        def behavior(img):
+            if img is not None:
+                raise RuntimeError("Error code: 400 - 뭐라고 하든 상관없음")
+            return "2"
+
+        calls = self._patch(monkeypatch, behavior)
+        r = probe_chat_model("k", "https://gw", "solar-pro2")
+        assert r.status == "weak"
+        assert "이미지 첨부" in r.detail
+        assert calls == [True, False], "이미지 실패 후 텍스트만으로 재시도해야"
+
+    def test_fail_when_text_call_also_fails(self, monkeypatch):
+        from pasteflow.ocr_engine import probe_chat_model
+
+        def behavior(img):
+            raise RuntimeError("Error code: 404 - Model 'x' not found")
+
+        self._patch(monkeypatch, behavior)
+        r = probe_chat_model("k", "", "ghost-model")
+        assert r.status == "fail"
+        assert "404" in r.detail
+
+    def test_quota_on_image_call_is_retry_not_weak(self, monkeypatch):
+        """429는 '못 재본 것'이지 '못 하는 것'이 아니다 — weak/fail로 굳히면 안 된다."""
+        from pasteflow.ocr_engine import probe_chat_model
+
+        def behavior(img):
+            if img is not None:
+                raise RuntimeError("429 RESOURCE_EXHAUSTED")
+            return "2"
+
+        self._patch(monkeypatch, behavior)
+        r = probe_chat_model("k", "", "gemini-3.1-flash-lite")
+        assert r.status == "retry"
+
+    def test_empty_model_is_fail_without_calling(self, monkeypatch):
+        from pasteflow.ocr_engine import probe_chat_model
+        calls = self._patch(monkeypatch, lambda img: "42")
+        assert probe_chat_model("k", "", "").status == "fail"
+        assert calls == []
 
 
 class TestModelNotFoundDetection:
@@ -288,7 +333,7 @@ class TestCallWithFallback:
         from pasteflow.ocr_engine import OcrEngine
         engine = OcrEngine(kind="gemini")
         result = engine._call_with_fallback(
-            "gemini-2.5-flash", "gateway",
+            "gemini-2.5-flash",
             call=lambda m: f"text-from-{m}",
         )
         assert result == "text-from-gemini-2.5-flash"
@@ -308,7 +353,7 @@ class TestCallWithFallback:
                 )
             return f"text-from-{m}"
 
-        result = engine._call_with_fallback("gemini-foo-preview", "gateway", call=_call)
+        result = engine._call_with_fallback("gemini-foo-preview", call=_call)
         assert result == "text-from-gemini-2.5-flash"
         assert engine.last_fallback_from == "gemini-foo-preview"
         assert engine.last_used_model == "gemini-2.5-flash"
@@ -322,6 +367,6 @@ class TestCallWithFallback:
             raise RuntimeError("rate limit exceeded")
 
         with pytest.raises(RuntimeError, match="rate limit"):
-            engine._call_with_fallback("gemini-2.5-flash", "gateway", call=_call)
+            engine._call_with_fallback("gemini-2.5-flash", call=_call)
         assert engine.last_fallback_from is None
 
