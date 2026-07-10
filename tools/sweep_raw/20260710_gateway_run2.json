@@ -1,0 +1,1281 @@
+{
+  "gateway": {
+    "accounts/fireworks/models/gpt-oss-120b": {
+      "levels": {
+        "L1": {
+          "error": "no_vision: Error code: 400 - {'detail': {'code': 400, 'message': \"invalid_request_error - [400] Error code: 400 - {'error': {'object': 'error', 'type': 'invalid_request_error', 'code': 'invalid_request_error', 'message': 'Unsupported ChatMessageContent type: image_url'}}\"}}"
+        }
+      },
+      "served_as": {
+        "chat": "accounts/fireworks/models/gpt-oss-120b"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "LGAI-EXAONE/K-EXAONE-236B-A23B": {
+      "levels": {
+        "L1": {
+          "error": "no_vision: Error code: 400 - {'detail': {'code': 400, 'message': \"invalid_request_error - Error code: 422 - {'message': 'This model does not support image/video inputs.'}\"}}"
+        }
+      },
+      "served_as": {
+        "chat": "LGAI-EXAONE/K-EXAONE-236B-A23B"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "claude-haiku-4-5-20251001": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.7647,
+          "tokens": "2/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빅도 와로 — 소유 [2:43초\n[10:24:12] 기댓 BA9E 배포 대기중에 뭐 가김\n[10:25:03] 사용자 거술나무 님이 저세에 접속했습니다\n[10:25:41] 공고 전장 FB84 제시는 3회 후 종된",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "claude-haiku-4-5-20251001",
+        "L1": "claude-haiku-4-5-20251001",
+        "L2": "claude-haiku-4-5-20251001"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "claude-opus-4-5-20251101": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9902,
+          "tokens": "2/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기 열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB04 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):         # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "claude-opus-4-5-20251101",
+        "L1": "claude-opus-4-5-20251101",
+        "L2": "claude-opus-4-5-20251101",
+        "L3": "claude-opus-4-5-20251101"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "claude-opus-4-7": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "```\ndef retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |\n```",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "claude-opus-4-7",
+        "L1": "claude-opus-4-7",
+        "L2": "claude-opus-4-7",
+        "L3": "claude-opus-4-7"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "claude-opus-4-6": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):        # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "claude-opus-4-6",
+        "L1": "claude-opus-4-6",
+        "L2": "claude-opus-4-6",
+        "L3": "claude-opus-4-6"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "claude-fable-5": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "```\ndef retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |\n```",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "claude-fable-5",
+        "L1": "claude-fable-5",
+        "L2": "claude-fable-5",
+        "L3": "claude-fable-5"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "claude-opus-4-8": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "```\ndef retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |\n```",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "claude-opus-4-8",
+        "L1": "claude-opus-4-8",
+        "L2": "claude-opus-4-8",
+        "L3": "claude-opus-4-8"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "claude-sonnet-5": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "```\ndef retry(task):              # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |\n```",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "claude-sonnet-5",
+        "L1": "claude-sonnet-5",
+        "L2": "claude-sonnet-5",
+        "L3": "claude-sonnet-5"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "claude-sonnet-4-5-20250929": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.8627,
+          "tokens": "1/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기 / 할머 가 가입\n[10:25:03] 사용자 거울나무 님이 재난에 전속했습니다\n[10:25:41] 전고 전압 F884 게시도 3회 후 중단",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "claude-sonnet-4-5-20250929",
+        "L1": "claude-sonnet-4-5-20250929",
+        "L2": "claude-sonnet-4-5-20250929"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "claude-sonnet-4-6": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "2/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB884 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "claude-sonnet-4-6",
+        "L1": "claude-sonnet-4-6",
+        "L2": "claude-sonnet-4-6",
+        "L3": "claude-sonnet-4-6"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gemini-2.5-flash": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task): # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task | status | code |\n|----------|----------|--------|\n| deploy | done | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gemini-2.5-flash",
+        "L1": "gemini-2.5-flash",
+        "L2": "gemini-2.5-flash",
+        "L3": "gemini-2.5-flash"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gemini-3.1-flash-lite": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):                 # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status  | code   |\n|---------|---------|--------|\n| deploy  | done    | 26AE   |\n| reindex | queued  | 9998   |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gemini-3.1-flash-lite",
+        "L1": "gemini-3.1-flash-lite",
+        "L2": "gemini-3.1-flash-lite",
+        "L3": "gemini-3.1-flash-lite"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gemini-3.5-flash": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task     | status | code |\n|----------|--------|------|\n| deploy   | done   | 26AE |\n| reindex  | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gemini-3.5-flash",
+        "L1": "gemini-3.5-flash",
+        "L2": "gemini-3.5-flash",
+        "L3": "gemini-3.5-flash"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gemini-2.5-pro": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9902,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 ― 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9925,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):    # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task   | status | code |\n|--------|--------|------|\n| deploy | done   | 26AE |\n| reindex| queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gemini-2.5-pro",
+        "L1": "gemini-2.5-pro",
+        "L2": "gemini-2.5-pro",
+        "L3": "gemini-2.5-pro"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "google/gemma-3-27b-it": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기 열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9776,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task): # id=A2AF\n  return task.run() * 3 # ref=3524\n| task | status | code |\n|------|--------|------|\n| deploy | done | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "google/gemma-3-27b-it",
+        "L1": "google/gemma-3-27b-it",
+        "L2": "google/gemma-3-27b-it",
+        "L3": "google/gemma-3-27b-it"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gemini-3-flash-preview": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task     | status | code |\n|----------|--------|------|\n| deploy   | done   | 26AE |\n| reindex  | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gemini-3-flash-preview",
+        "L1": "gemini-3-flash-preview",
+        "L2": "gemini-3-flash-preview",
+        "L3": "gemini-3-flash-preview"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5-chat-latest": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C  \n수령인: 새벽별  \n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9902,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초  \n[10:24:12] 거밋 BA9E 배포 대기열에 추가됨  \n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다  \n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):         # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5-chat-latest",
+        "L1": "gpt-5-chat-latest",
+        "L2": "gpt-5-chat-latest",
+        "L3": "gpt-5-chat-latest"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "google/gemma-4-31B-it": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9925,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):\t # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task | status | code |\n|--------|--------|------|\n| deploy | done | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "google/gemma-4-31B-it",
+        "L1": "google/gemma-4-31B-it",
+        "L2": "google/gemma-4-31B-it",
+        "L3": "google/gemma-4-31B-it"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5.1": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9804,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 거믓 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9925,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):             # id=A2AF\n\n    return task.run() * 3 # ref=3524\n\n\n\n| task    | status | code |\n|--------|--------|------|\n| deploy | done   | 26AE |\n| reindex| queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5.1-2025-11-13",
+        "L1": "gpt-5.1-2025-11-13",
+        "L2": "gpt-5.1-2025-11-13",
+        "L3": "gpt-5.1-2025-11-13"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5.1-chat-latest": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9804,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 거믓 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9925,
+          "tokens": "3/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):             # id=42AF\n\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5.1-chat-latest",
+        "L1": "gpt-5.1-chat-latest",
+        "L2": "gpt-5.1-chat-latest",
+        "L3": "gpt-5.1-chat-latest"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5.1-codex-max": {
+      "levels": {},
+      "served_as": {},
+      "chat_error": "not_found: Error code: 400 - {'detail': {'code': 400, 'message': \"invalid_request_error - Error code: 404 - {'error': {'message': 'This model is not supported in the v1/chat/completions endpoint. Use the v1/responses endpoint instead.', 'type': 'invalid_request_error', 'param': 'model', 'code': None"
+    },
+    "gpt-5-mini": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9925,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):  # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task | status | code |\n|--------|---------|------|\n| deploy | done | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5-mini-2025-08-07",
+        "L1": "gpt-5-mini-2025-08-07",
+        "L2": "gpt-5-mini-2025-08-07",
+        "L3": "gpt-5-mini-2025-08-07"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5.2": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9804,
+          "tokens": "1/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BAGE 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FBB4 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9925,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):        # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task   | status | code |\n|--------|--------|------|\n| deploy | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5.2-2025-12-11",
+        "L1": "gpt-5.2-2025-12-11",
+        "L2": "gpt-5.2-2025-12-11",
+        "L3": "gpt-5.2-2025-12-11"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5.2-codex": {
+      "levels": {},
+      "served_as": {},
+      "chat_error": "not_found: Error code: 400 - {'detail': {'code': 400, 'message': \"invalid_request_error - Error code: 404 - {'error': {'message': 'This model is not supported in the v1/chat/completions endpoint. Use the v1/responses endpoint instead.', 'type': 'invalid_request_error', 'param': 'model', 'code': None"
+    },
+    "gpt-5.3-chat-latest": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9804,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 서버에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9925,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):        # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task   | status | code |\n|--------|--------|------|\n| deploy | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5.3-chat-latest",
+        "L1": "gpt-5.3-chat-latest",
+        "L2": "gpt-5.3-chat-latest",
+        "L3": "gpt-5.3-chat-latest"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5.3-codex": {
+      "levels": {},
+      "served_as": {},
+      "chat_error": "not_found: Error code: 400 - {'detail': {'code': 400, 'message': \"invalid_request_error - Error code: 404 - {'error': {'message': 'This model is not supported in the v1/chat/completions endpoint. Use the v1/responses endpoint instead.', 'type': 'invalid_request_error', 'param': 'model', 'code': None"
+    },
+    "gpt-5.2-chat-latest": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9608,
+          "tokens": "2/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 B4E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 서버에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):        # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5.2-chat-latest",
+        "L1": "gpt-5.2-chat-latest",
+        "L2": "gpt-5.2-chat-latest",
+        "L3": "gpt-5.2-chat-latest"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5.4": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9925,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):        # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task   | status | code |\n|--------|--------|------|\n| deploy | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5.4-2026-03-05",
+        "L1": "gpt-5.4-2026-03-05",
+        "L2": "gpt-5.4-2026-03-05",
+        "L3": "gpt-5.4-2026-03-05"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):            # id=A2AF\n\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5-2025-08-07",
+        "L1": "gpt-5-2025-08-07",
+        "L2": "gpt-5-2025-08-07",
+        "L3": "gpt-5-2025-08-07"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5.4-mini": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9902,
+          "tokens": "2/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BBAE 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9925,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):        # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task   | status | code |\n|--------|--------|------|\n| deploy | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5.4-mini-2026-03-17",
+        "L1": "gpt-5.4-mini-2026-03-17",
+        "L2": "gpt-5.4-mini-2026-03-17",
+        "L3": "gpt-5.4-mini-2026-03-17"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5.4-nano": {
+      "levels": {
+        "L1": {
+          "recall": 0.9583,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수량인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.902,
+          "tokens": "1/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 B9AE 배포 대기열에 추가됨\n[10:25:03] 사용자 김나님 님이 서버에 접속했습니다\n[10:25:41] 경고: 장벽 FB84 재시도 3회 후 종료",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5.4-nano-2026-03-17",
+        "L1": "gpt-5.4-nano-2026-03-17",
+        "L2": "gpt-5.4-nano-2026-03-17"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5.6-luna": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9412,
+          "tokens": "1/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 - 소요 12.4초\n[10:24:12] 커밋 BAGE 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 새벽에 접속했습니다\n[10:25:41] 경고: 작업 F8F8 재시도 3회 후 중단",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5.6-luna",
+        "L1": "gpt-5.6-luna",
+        "L2": "gpt-5.6-luna"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5.5": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9902,
+          "tokens": "2/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BASE 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):        # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5.5-2026-04-23",
+        "L1": "gpt-5.5-2026-04-23",
+        "L2": "gpt-5.5-2026-04-23",
+        "L3": "gpt-5.5-2026-04-23"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5.6-terra": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9804,
+          "tokens": "1/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BAE 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB8 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5.6-terra",
+        "L1": "gpt-5.6-terra",
+        "L2": "gpt-5.6-terra",
+        "L3": "gpt-5.6-terra"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gpt-5.6-sol": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9804,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 새벽에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gpt-5.6-sol",
+        "L1": "gpt-5.6-sol",
+        "L2": "gpt-5.6-sol",
+        "L3": "gpt-5.6-sol"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "grok-3-mini": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9804,
+          "tokens": "2/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌트 완료 — 소요 12.4 초\n[10:24:12] 커밋 BASE 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9925,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):     # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task   | status | code |\n|--------|--------|------|\n| deploy | done   | 26AE |\n| reindex| queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "grok-4.3",
+        "L1": "grok-4.3",
+        "L2": "grok-4.3",
+        "L3": "grok-4.3"
+      },
+      "chat_text": "391\n\\confidence{100}",
+      "chat_finish": "stop"
+    },
+    "grok-4": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9804,
+          "tokens": "2/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌트 완료 — 소요 12.4 초\n[10:24:12] 커밋 BASE 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9925,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):     # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task   | status | code |\n|--------|--------|------|\n| deploy | done   | 26AE |\n| reindex| queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "grok-4.3",
+        "L1": "grok-4.3",
+        "L2": "grok-4.3",
+        "L3": "grok-4.3"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "solar-pro2": {
+      "levels": {
+        "L1": {
+          "error": "no_vision: Error code: 400 - {'detail': {'code': 400, 'message': \"invalid_request_error - [400] Error code: 400 - {'error': {'message': 'Image input is not allowed for this model', 'type': 'invalid_request_error', 'param': None, 'code': None}}\"}}"
+        }
+      },
+      "served_as": {
+        "chat": "solar-pro2-251215"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "solar-pro3": {
+      "levels": {
+        "L1": {
+          "error": "no_vision: Error code: 400 - {'detail': {'code': 400, 'message': \"invalid_request_error - [400] Error code: 400 - {'error': {'message': 'Image input is not allowed for this model', 'type': 'invalid_request_error', 'param': None, 'code': None}}\"}}"
+        }
+      },
+      "served_as": {
+        "chat": "solar-pro3-260323"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "grok-4-1-fast": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9412,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24.07] 빌트 완료 — 소요 12.3 초\n[10:24.12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25.03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25.41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "grok-4.3",
+        "L1": "grok-4.3",
+        "L2": "grok-4.3"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9902,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 | 2.4초  \n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨  \n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다  \n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "```python\ndef retry(task):        # id=A2AF\n    return task.run() * 3 # ref=3524\n```\n\n| task    | status | code  |\n|---------|--------|-------|\n| deploy  | done   | 26AE  |\n| reindex | queued | 9998  |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+        "L1": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+        "L2": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+        "L3": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "sonar-pro": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C  \n수령인: 새벽별  \n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 0.9902,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초  \n[10:24:12] 거밋 BA9E 배포 대기열에 추가됨  \n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다  \n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9925,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):        # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task   | status | code |\n|--------|--------|------|\n| deploy | done   | 26AE |\n| reindex| queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "sonar-pro",
+        "L1": "sonar-pro",
+        "L2": "sonar-pro",
+        "L3": "sonar-pro"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "gemini-3.1-pro-preview": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 1.0,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "gemini-3.1-pro-preview",
+        "L1": "gemini-3.1-pro-preview",
+        "L2": "gemini-3.1-pro-preview",
+        "L3": "gemini-3.1-pro-preview"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    },
+    "sonar-reasoning-pro": {
+      "levels": {
+        "L1": {
+          "recall": 1.0,
+          "tokens": "2/2",
+          "truth": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "text": "주문 번호: D77C\n수령인: 새벽별\n배송 상태: 준비중",
+          "finish": "stop"
+        },
+        "L2": {
+          "recall": 1.0,
+          "tokens": "3/3",
+          "truth": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "text": "[10:24:07] 빌드 완료 — 소요 12.4초\n[10:24:12] 커밋 BA9E 배포 대기열에 추가됨\n[10:25:03] 사용자 겨울나무 님이 채널에 접속했습니다\n[10:25:41] 경고: 작업 FB84 재시도 3회 후 중단",
+          "finish": "stop"
+        },
+        "L3": {
+          "recall": 0.9925,
+          "tokens": "4/4",
+          "truth": "def retry(task):          # id=A2AF\n    return task.run() * 3 # ref=3524\n| task    | status | code |\n|---------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "text": "def retry(task):        # id=A2AF\n    return task.run() * 3 # ref=3524\n\n| task    | status | code |\n|--------|--------|------|\n| deploy  | done   | 26AE |\n| reindex | queued | 9998 |",
+          "finish": "stop"
+        }
+      },
+      "served_as": {
+        "chat": "sonar-reasoning-pro",
+        "L1": "sonar-reasoning-pro",
+        "L2": "sonar-reasoning-pro",
+        "L3": "sonar-reasoning-pro"
+      },
+      "chat_text": "391",
+      "chat_finish": "stop"
+    }
+  }
+}

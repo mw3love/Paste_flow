@@ -31,121 +31,165 @@ def _normalize_base_url(base_url: str) -> str:
             break
     return url
 
-# ── 검증된 모델 화이트리스트 ──────────────────────────────────────────────────
-# 코드 작성자가 **실제로 호출해 본** 모델만 등재한다. ↻ 새로고침으로 받은 게이트웨이
-# 라인업 정렬과 OCR 실패 시 폴백 후보 선정에 사용. 게이트웨이가 모델 라인업을
-# 바꾸면 이 목록을 갱신하면 된다. 알 수 없는 모델은 콤보에 "(미검증)" 태그로
-# 노출되어 사용자가 명시적으로 선택할 수 있다.
+# ── 모델 능력 매트릭스 ────────────────────────────────────────────────────────
+# `tools/sweep_models.py`가 전 모델을 실호출해 만든 `model_matrix.json`을 읽는다.
+# 옛 손관리 상수 3종(_VERIFIED_MODELS / _NO_VISION_MODELS / _PHANTOM_MODELS)을 대체 —
+# 사람이 고른 목록이라 "왜 이건 되고 저건 안 되나"에 답할 수 없었고, 게이트웨이가
+# 라인업을 바꾸면 즉시 낡았다.
 #
-# 등재 기준: **텍스트 질의와 이미지(비전) 질의 양쪽**을 실호출로 확인한 것만.
-# OCR·이미지 AI 질의가 이미지를 보내므로 텍스트만 되는 모델을 등재하면 안 된다
-# (예: solar-pro2는 이미지 입력에 400 → 미등재).
+# 상태값
+#   chat: "ok" | "fail" | "unknown"
+#   ocr : "L3" | "L2" | "L1" | "fail" | "unknown"
 #
-# 필드: (name, tier_rank, on_official, on_gateway)
-#   - tier_rank   **추정** 가격 순위. 낮을수록 저렴. 콤보 정렬 순서에만 쓴다.
-#                 0=최저가(flash-lite급) 1=중저가(flash급) 2=고가(pro급) 3=최상위(opus급)
-#                 ⚠ 실측값이 아니다. 게이트웨이는 chat 단가를 API로도 costs.json으로도
-#                 주지 않는다(2026-07-09 확인). gemini 4종은 구글 공개 문서의 등급을 옮긴
-#                 것이고, 나머지는 계열 통념에 따른 어림값이다. 그래서 이 값을 UI에
-#                 "저렴/고가" 배지로 **표시하지 않는다** — 정렬 힌트로만 쓴다.
-#   - on_official 공식 Google AI Studio API에서 사용 가능 (확인된 것만 True)
-#   - on_gateway  factchat-cloud 게이트웨이에서 사용 가능 (확인된 것만 True)
+# `fail`은 **모델이 실제로 못 하는 것**이다(404 유령 / 이미지 첨부 400). `unknown`은
+# 서버 사정(429·503)으로 **못 재본 것**이라 막지 않는다 — 둘을 섞으면 멀쩡한 모델이
+# UI에서 회색 처리된다(2026-07-10 1차 스윕에서 공식 API 21종이 429로 fail 처리됐었다).
+# L1은 "큰 글씨는 읽지만 12px 다크 UI는 부정확"이라는 뜻으로, 차단하지 않고 경고
+# 아이콘만 붙인다 — 품질은 사용자가 자기 캡처 대상으로 판단하는 게 정확하다.
 #
-# 비-gemini 항목은 게이트웨이 전용(on_official=False) — 공식 API는 gemini만 서빙한다.
-# 새 항목은 **끝에 덧붙인다**: select_fallback_model이 _FALLBACK_DEFAULT 부재 시
-# compatible[0](= 튜플 순서 첫 항목)을 고르므로, 앞에 비싼 모델을 끼우면 폴백이 비싸진다.
-_VERIFIED_MODELS: tuple[tuple[str, int, bool, bool], ...] = (
-    ("gemini-3.1-flash-lite", 0, False, True),   # 게이트웨이 확인 2026-05-27
-    ("gemini-2.5-flash",      1, True,  True),   # 공식+게이트웨이 모두 검증
-    ("gemini-3.5-flash",      1, False, True),   # 게이트웨이 확인 2026-05-27
-    ("gemini-2.5-pro",        2, True,  True),   # 공식+게이트웨이 모두 검증
-    # 아래 3종: 텍스트+이미지 실호출 확인 2026-07-09 (게이트웨이)
-    ("gpt-5-mini",            1, False, True),
-    ("grok-4-1-fast",         1, False, True),
-    ("claude-opus-4-8",       3, False, True),
-)
-
+# ⚠ 옛 `tier_rank`(추정 가격 순위)는 제거했다. 게이트웨이가 chat 단가를 API로도
+# costs.json으로도 주지 않아 어림값이었고, 계열 그룹핑을 도입하면서 쓸 곳이 없어졌다.
+#
 # 어느 backend에서든 호출되리라 신뢰하는 최종 안전망 폴백 모델
 _FALLBACK_DEFAULT = "gemini-2.5-flash"
 
-# ── 비전(이미지 입력) 미지원 모델 ─────────────────────────────────────────────
-# 2026-07-09 게이트웨이 chat 42종 전수 실호출 스윕 결과(빨간/파란 단색 PNG로 색 판별).
-# 이 4종만 이미지 첨부 시 400 invalid_request_error로 거부했고 나머지 35종은 통과했다.
-# OCR·이미지 AI 질의는 이미지를 보내므로 OCR 모델 목록에서 제외한다.
-# 텍스트 질의는 정상이므로 AI 질의 모델 목록에는 그대로 남긴다.
-_NO_VISION_MODELS: frozenset = frozenset({
-    "accounts/fireworks/models/gpt-oss-120b",
-    "LGAI-EXAONE/K-EXAONE-236B-A23B",
-    "solar-pro2",
-    "solar-pro3",
-})
+_MATRIX_FILENAME = "model_matrix.json"
+_matrix_cache: Optional[dict] = None
+_BACKENDS = ("gateway", "official")
 
-# ── 유령 모델 (게이트웨이가 /models로 광고하지만 호출하면 404) ────────────────
-# 같은 2026-07-09 스윕에서 확인. 사용자가 고르면 _call_with_fallback이 model_not_found로
-# 판정해 조용히 _FALLBACK_DEFAULT로 폴백하므로 "고른 모델이 아닌 답"이 돌아온다.
-# 애초에 못 고르게 목록 단계에서 제거한다. 게이트웨이가 실제 서빙을 시작하면 여기서 빼면 된다.
-_PHANTOM_MODELS: frozenset = frozenset({
-    "gpt-5.1-codex-max",
-    "gpt-5.2-codex",
-    "gpt-5.3-codex",
-})
+# 계열 표시 순서. 각 항목은 (표시명, 모델 ID 접두사들).
+# 매칭은 `/`로 구분된 경로의 **마지막 조각**을 소문자화해 접두사 비교한다
+# (예: "accounts/fireworks/models/gpt-oss-120b" → "gpt-oss-120b" → GPT).
+_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Gemini", ("gemini",)),
+    ("Claude", ("claude",)),
+    ("GPT", ("gpt", "o1-", "o3-")),
+    ("Grok", ("grok",)),
+    ("Gemma", ("gemma",)),
+    ("Llama", ("llama", "meta-llama")),
+    ("Sonar", ("sonar",)),
+    ("Solar", ("solar",)),
+    ("EXAONE", ("exaone", "k-exaone", "lgai")),
+)
+_FAMILY_OTHER = "기타"
 
 
-def is_vision_capable(name: str) -> bool:
-    """이 모델이 이미지 입력을 받는지(2026-07-09 실측 기준). 미측정 모델은 True로 본다."""
-    return name not in _NO_VISION_MODELS
+def load_model_matrix() -> dict:
+    """`model_matrix.json`을 1회 로드해 캐시. 없거나 깨졌으면 빈 dict.
 
-
-def vision_capable_models(candidates: list[str]) -> list[str]:
-    """이미지 입력이 가능한 모델만 남긴다 — OCR·이미지 질의 모델 목록용.
-
-    미측정 모델은 통과시킨다(보수적 차단보다 노출 후 실패가 낫다 — 새 모델이
-    추가돼도 목록에서 사라지지 않게). 확실히 안 되는 것만 _NO_VISION_MODELS로 막는다.
+    파일이 없으면 모든 모델이 `unknown`으로 취급돼 전부 선택 가능해진다 —
+    기능이 죽는 대신 안전하게 열화된다(빌드에서 데이터 파일이 빠진 경우 대비).
     """
-    return [m for m in candidates if m not in _NO_VISION_MODELS]
+    global _matrix_cache
+    if _matrix_cache is not None:
+        return _matrix_cache
+    import json
+    import os
+    import sys
+
+    # PyInstaller onefile은 데이터 파일을 sys._MEIPASS 아래로 풀어 놓는다. 소스 실행과
+    # 빌드 실행 양쪽에서 찾도록 후보를 순서대로 시도한다.
+    candidates = [os.path.join(os.path.dirname(__file__), _MATRIX_FILENAME)]
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, "pasteflow", _MATRIX_FILENAME))
+        candidates.append(os.path.join(meipass, _MATRIX_FILENAME))
+
+    for path in candidates:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            _matrix_cache = data if isinstance(data, dict) else {}
+            return _matrix_cache
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as e:  # json.JSONDecodeError는 ValueError 하위
+            print(f"[ocr_engine] {path} 로드 실패: {e}")
+            break
+
+    print(f"[ocr_engine] {_MATRIX_FILENAME} 없음 — 전 모델을 미측정으로 취급합니다.")
+    _matrix_cache = {}
+    return _matrix_cache
 
 
-def _backend_compat(entry: tuple, backend: str) -> bool:
-    _name, _tier, on_official, on_gateway = entry
-    if backend == "official":
-        return on_official
-    if backend == "gateway":
-        return on_gateway
-    raise ValueError(f"Unknown backend: {backend!r}")
+def _check_backend(backend: str) -> None:
+    """오타가 조용히 '전부 미측정'으로 흘러가지 않게 명시적으로 막는다."""
+    if backend not in _BACKENDS:
+        raise ValueError(f"Unknown backend: {backend!r}")
 
 
-def sort_models_with_whitelist(
-    candidates: list[str], backend: str
-) -> tuple[list[str], list[str]]:
-    """↻ 새로고침 결과를 화이트리스트와 머지해 분류한다.
+def model_status(name: str, backend: str) -> dict:
+    """{chat, ocr, why} 상태 dict. 매트릭스에 없는 모델은 전부 unknown."""
+    _check_backend(backend)
+    entry = load_model_matrix().get(backend, {}).get(name)
+    if not isinstance(entry, dict):
+        return {"chat": "unknown", "ocr": "unknown", "why": ""}
+    return entry
 
-    Returns
-    -------
-    (verified, unverified)
-        verified   — 화이트리스트 ∩ candidates, tier_rank 오름차순 (저렴한 것 먼저).
-        unverified — candidates − 화이트리스트, 대소문자 무시 알파벳순.
 
-    unverified 정렬이 대소문자 무시인 이유: 게이트웨이 필터 해제 후 `LGAI-EXAONE/...`
-    같은 대문자 ID가 섞이는데, 기본 sorted()는 ASCII 순서라 대문자가 전부 소문자 앞으로
-    가서 계열 묶임(claude-*, gemini-*, gpt-*)이 깨진다.
+def chat_capable(name: str, backend: str) -> bool:
+    """AI 질의 콤보에서 고를 수 있는가. 미측정(unknown)은 허용한다."""
+    return model_status(name, backend).get("chat") != "fail"
+
+
+def ocr_capable(name: str, backend: str) -> bool:
+    """AI OCR 콤보에서 고를 수 있는가 — 호출이 되고 이미지를 받아야 한다."""
+    st = model_status(name, backend)
+    return st.get("chat") != "fail" and st.get("ocr") != "fail"
+
+
+def ocr_is_weak(name: str, backend: str) -> bool:
+    """큰 글씨는 읽지만 12px 다크 UI 텍스트는 부정확(L1까지만 통과)."""
+    return model_status(name, backend).get("ocr") == "L1"
+
+
+def is_measured(name: str, backend: str) -> bool:
+    """스윕이 실제로 재본 모델인가. unknown이 하나라도 있으면 미측정 취급."""
+    st = model_status(name, backend)
+    return "unknown" not in (st.get("chat"), st.get("ocr"))
+
+
+def family_of(name: str) -> str:
+    """모델 ID에서 계열 표시명. 어디에도 안 걸리면 '기타'."""
+    base = name.rsplit("/", 1)[-1].lower()
+    full = name.lower()
+    for label, prefixes in _FAMILIES:
+        if any(base.startswith(p) or full.startswith(p) for p in prefixes):
+            return label
+    return _FAMILY_OTHER
+
+
+def group_models(candidates: list[str], usable) -> list[tuple[str, list[str]]]:
+    """계열별로 묶어 `[(계열명, [모델…]), …]` 반환. 빈 계열은 생략.
+
+    계열 순서는 `_FAMILIES` 고정 순서(마지막이 '기타'). 계열 안에서는 **쓸 수 있는
+    것을 먼저**, 그다음 대소문자 무시 알파벳순 — 비활성 항목이 계열 위쪽에 끼어
+    눈을 끄는 것을 막는다. 대소문자 무시 정렬은 `LGAI-EXAONE/...` 같은 대문자 ID가
+    ASCII 순서로 소문자 앞에 튀어나오는 것을 막는다.
+
+    `usable`은 `(name) -> bool` 콜러블 — 콤보마다 다르다(chat_capable / ocr_capable).
     """
-    wl = {e[0]: e[1] for e in _VERIFIED_MODELS if _backend_compat(e, backend)}
-    verified = sorted((n for n in candidates if n in wl), key=lambda n: (wl[n], n))
-    unverified = sorted((n for n in candidates if n not in wl), key=str.lower)
-    return verified, unverified
+    buckets: dict[str, list[str]] = {}
+    for name in candidates:
+        buckets.setdefault(family_of(name), []).append(name)
+
+    out: list[tuple[str, list[str]]] = []
+    for label in [lbl for lbl, _ in _FAMILIES] + [_FAMILY_OTHER]:
+        names = buckets.get(label)
+        if not names:
+            continue
+        names.sort(key=lambda n: (not usable(n), n.lower()))
+        out.append((label, names))
+    return out
 
 
-def whitelist_model_names(backend: str) -> list[str]:
-    """backend 호환 화이트리스트 모델 이름 목록 (tier_rank 오름차순).
+def matrix_model_names(backend: str) -> list[str]:
+    """매트릭스가 아는 backend의 모델 이름 전부.
 
-    캐시가 비어 있는 첫 실행에서 콤보 초기값으로 사용.
+    캐시가 비어 있는 첫 실행에서 콤보 초기값으로 쓴다(옛 whitelist_model_names 대체).
     """
-    return [
-        e[0] for e in sorted(
-            (e for e in _VERIFIED_MODELS if _backend_compat(e, backend)),
-            key=lambda e: (e[1], e[0]),
-        )
-    ]
+    _check_backend(backend)
+    return sorted(load_model_matrix().get(backend, {}).keys(), key=str.lower)
 
 
 def _is_model_not_found(exc: Exception) -> bool:
@@ -178,21 +222,32 @@ def _is_quota_error(exc: Exception) -> bool:
 
 
 def select_fallback_model(failed_model: str, backend: str) -> Optional[str]:
-    """OCR 호출이 실패한 모델에 대해 backend 호환 폴백 후보 1개.
+    """호출이 실패한 모델에 대해 backend 호환 폴백 후보 1개. 없으면 None.
 
-    선정 규칙: backend 호환 화이트리스트 모델 중 _FALLBACK_DEFAULT 우선,
-    실패 모델이 마침 _FALLBACK_DEFAULT면 같은 backend의 다른 화이트리스트 모델 1개.
-    적합한 후보가 없으면 None.
+    선정 규칙: _FALLBACK_DEFAULT 우선. 실패 모델이 마침 그것이면 같은 backend에서 고른다.
+      1순위 — chat·OCR 둘 다 **실측 통과**한 모델 (폴백은 조용히 일어나므로, 또 실패하면
+              사용자가 원인을 짚을 수 없다).
+      2순위 — 1순위가 없으면 **못 한다고 확인되지 않은** 모델(unknown 포함). 공식 API처럼
+              스윕이 429로 막혀 실측이 없는 backend에서 폴백이 통째로 사라지는 것을 막는다.
     """
-    compatible = [
-        e[0] for e in _VERIFIED_MODELS
-        if _backend_compat(e, backend) and e[0] != failed_model
-    ]
-    if not compatible:
-        return None
-    if _FALLBACK_DEFAULT in compatible:
+    _check_backend(backend)
+    matrix = load_model_matrix().get(backend, {})
+    # 매트릭스가 비면(데이터 파일 유실) 옛 동작대로 안전망 모델을 그대로 쓴다.
+    if failed_model != _FALLBACK_DEFAULT and (not matrix or _FALLBACK_DEFAULT in matrix):
         return _FALLBACK_DEFAULT
-    return compatible[0]
+
+    others = {n: st for n, st in matrix.items() if n != failed_model}
+    proven = sorted(n for n, st in others.items()
+                    if st.get("chat") == "ok" and st.get("ocr") in ("L2", "L3"))
+    if proven:
+        return proven[0]
+    # 같은 '미확인' 안에서도 chat이 확인된 모델을 먼저 — 완전 미측정보다는 낫다.
+    plausible = sorted(
+        (n for n, st in others.items()
+         if st.get("chat") != "fail" and st.get("ocr") != "fail"),
+        key=lambda n: (others[n].get("chat") != "ok", n),
+    )
+    return plausible[0] if plausible else None
 
 
 # WinRT OcrEngine.MaxImageDimension (4096px 초과 이미지는 에러)
@@ -349,15 +404,15 @@ class OcrEngine:
           (Mindlogic/사내 프록시 등). **모델 계열 필터 없이 전부 반환** — 게이트웨이
           호출 경로(`_recognize_openai_compat`/`_ask_openai_compat`)는 평범한 OpenAI 호환
           chat.completions라 claude·gpt·grok 등 gemini가 아닌 모델도 그대로 동작한다.
-          옛 `"gemini" in id` 필터는 게이트웨이가 제공하는 42종 중 6종만 노출시켜
-          사용자가 다른 모델을 고를 수 없게 만들던 제약이라 제거했다. 검증 여부는
-          `sort_models_with_whitelist`가 verified/unverified로 갈라 UI에 알린다.
+          옛 `"gemini" in id` 필터는 게이트웨이가 제공하는 45종 중 6종만 노출시켜
+          사용자가 다른 모델을 고를 수 없게 만들던 제약이라 제거했다.
         - base_url 없음: `google.generativeai.list_models()` 사용. generateContent를
           지원하는 gemini-* 모델만 추출(공식 Google AI Studio API는 태생적으로 gemini 전용).
 
-        주의: 게이트웨이 모델 중엔 이미지 입력을 못 받는 텍스트 전용 모델도 있다.
-        OCR·이미지 AI 질의는 이미지를 보내므로 그런 모델을 고르면 호출이 실패한다
-        (설정창이 미검증 항목 툴팁으로 고지). 메서드 이름은 하위 호환을 위해 유지.
+        **여기서 아무것도 걸러내지 않는다.** 못 쓰는 모델(유령 404·이미지 400·TTS)은
+        설정창 콤보가 `model_matrix.json`을 보고 회색·비활성 + 🚫로 이유까지 표시한다.
+        옛날처럼 목록에서 조용히 지우면 사용자는 "왜 이 모델이 없지?"를 알 수 없다.
+        메서드 이름은 하위 호환을 위해 유지(gemini 전용이 아니다).
 
         실패 시 RuntimeError. UI 블로킹 방지를 위해 호출자가 워커 스레드에서 실행해야 한다.
         """
@@ -372,9 +427,10 @@ class OcrEngine:
             try:
                 client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
                 resp = client.models.list()
-                # 계열 필터 없음 — 게이트웨이가 광고하는 모든 chat 모델을 노출한다.
-                # 단 호출 시 404가 확인된 유령 모델은 제외(조용한 폴백으로 이어짐).
-                models = [m.id for m in resp.data if m.id not in _PHANTOM_MODELS]
+                # 필터 없음 — 게이트웨이가 광고하는 모든 모델을 그대로 넘긴다.
+                # 유령(404)·비전 미지원(400) 모델은 설정창 콤보가 매트릭스를 보고
+                # 회색·비활성으로 표시한다(옛날엔 여기서 조용히 지워 "왜 없지?"가 됐다).
+                models = [m.id for m in resp.data]
             except Exception as e:
                 raise RuntimeError(f"게이트웨이 모델 조회 실패: {e}") from e
         else:

@@ -59,7 +59,10 @@ a = Analysis(
     ['run.pyw'],
     pathex=[],
     binaries=winocr_binaries,
-    datas=winocr_datas,
+    # model_matrix.json: tools/sweep_models.py가 만든 모델 능력표. 설정창 콤보가
+    # 사용 불가·부정확 모델을 표시하는 근거라 반드시 동봉해야 한다(없으면 전 모델이
+    # '미측정'으로 열화되어 유령 모델까지 고를 수 있게 된다).
+    datas=winocr_datas + [('pasteflow/model_matrix.json', 'pasteflow')],
     hiddenimports=[
         # pywin32
         'win32api',

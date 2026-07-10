@@ -39,6 +39,15 @@ def _emoji_icon(ch: str, px: int = 16) -> QIcon:
     return icon
 
 
+def _status_icon(ch: str) -> QIcon:
+    """상태 아이콘. 빈 문자열이면 **투명 아이콘**을 준다.
+
+    아이콘이 없는 항목은 Qt가 들여쓰기를 주지 않아 아이콘 있는 항목과 텍스트 시작
+    위치가 어긋난다 — 정상 모델이 대다수라 그 어긋남이 목록 전체를 흔든다.
+    """
+    return _emoji_icon(ch) if ch else _emoji_icon(" ")
+
+
 # ── 옵션창 전용 팔레트 (전역 다크 테마와 분리 — 폼 가독성·정돈 우선) ──────────────
 # 깊이: 페이지(가장 어두움) → 카드(그룹박스) → 보조버튼. 입력칸은 카드에 '박힌' 느낌으로
 # 페이지색을 써서 카드와 또렷이 구분(흐릿한 동색 회색 3개로 뭉개지지 않게). 강조색은
@@ -853,11 +862,11 @@ class SettingsDialog(QDialog):
                 else self.KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL)
 
     def _add_group_header(self, combo: QComboBox, text: str):
-        """선택 불가능한 그룹 헤더 행을 추가한다.
+        """선택 불가능한 계열 헤더 행을 추가한다 (예: "Gemini (6)").
 
         헤더를 **비활성 항목**으로 넣는 이유: 이 콤보는 editable이라 표시 텍스트가 곧
         저장되는 모델명이다(`_on_save`가 `currentText()`를 그대로 쓴다). 헤더를 고를 수
-        있으면 "⭐ 추천 — 실호출 검증됨" 같은 문자열이 모델명으로 저장돼 API 호출이 깨진다.
+        있으면 "Gemini (6)" 같은 문자열이 모델명으로 저장돼 API 호출이 깨진다.
         비활성 항목은 마우스·키보드로 선택할 수 없다.
         """
         combo.addItem(text)
@@ -871,72 +880,92 @@ class SettingsDialog(QDialog):
         # 헤더는 모델명이 아니므로 검색·폭 계산에서 구분할 수 있게 표시해 둔다.
         combo.setItemData(idx, True, _HEADER_ROLE)
 
-    def _fill_model_combo(self, combo: QComboBox, verified: list[str], unverified: list[str]):
-        """콤보를 그룹 헤더 + 항목 아이콘으로 채운다.
+    def _fill_model_combo(self, combo: QComboBox, candidates: list[str], backend: str,
+                          *, for_ocr: bool):
+        """콤보를 **계열 헤더 + 상태 아이콘**으로 채운다.
 
-        아이콘은 **항목당 하나**로, 그 항목에 대해 가장 중요한 사실을 보여준다:
-          ⭐ = 추천(`_VERIFIED_MODELS` 화이트리스트, 텍스트·이미지 실호출 확인)
-          🖼 = 추천 밖이지만 이미지 입력 가능
-          📝 = 텍스트 전용 (이미지 질의 실패) — AI 질의 콤보에만 등장
-        추천 모델은 전부 비전 가능이므로 ⭐가 🖼을 덮어도 정보 손실이 없다.
-        OCR 콤보는 비전 가능 모델만 담으므로 추천 밖 항목엔 아이콘을 달지 않는다.
+        상태는 `model_matrix.json`(실호출 스윕 산출물)에서 온다. 아이콘은 항목당 하나:
+          🚫 = 사용 불가 — 회색·**선택 불가**. 품질 판단이 아니라 API가 실제로 에러를
+               내는 객관적 사실이다(유령 404 / 이미지 첨부 400 / TTS 모델).
+          ⚠  = OCR 부정확 — 큰 글씨는 읽지만 12px 다크 UI 텍스트에서 무너진다. 고를 수는 있다.
+          📝 = 텍스트 전용 — AI 질의 콤보에만. 텍스트 질문은 되지만 **이미지를 첨부하는
+               질의**(이미지 항목 우클릭 "AI에게 질문")는 400으로 실패한다. 막지는 않는다.
+          ❓ = 미측정 — 스윕 때 429·503으로 못 재봤다. 막지 않는다.
+          (없음) = 정상. 투명 아이콘을 넣어 나머지 항목과 텍스트 시작 위치를 맞춘다.
 
-        헤더에는 그룹별 개수를 함께 적는다("추천 — 실호출 검증됨 (7종)").
+        아이콘으로 표시하는 이유: 텍스트 접미사를 붙이면 **모델명이 오염된다**(이 콤보는
+        editable이라 `currentText()`가 그대로 저장·호출된다). 툴팁은 사용자가 잘 안 보므로
+        상태는 반드시 아이콘으로 드러낸다(툴팁은 상세 이유를 보조로 담을 뿐).
 
-        가격(저렴/고가) 배지는 **의도적으로 없다** — 게이트웨이가 chat 단가를 노출하지
-        않아 `tier_rank`가 어림값이기 때문이다(정렬 순서로만 쓴다). 추측을 사실처럼
-        표시하지 않는다.
+        ⭐(추천) 배지는 **의도적으로 없다** — 스윕 결과 45종 중 42종이 질의 가능이라
+        "검증됨" 배지에 정보가 없었고, 가격 배지는 게이트웨이가 단가를 노출하지 않아
+        추측이 된다. 활성/회색 이진과 계열 묶음이 실제 선택에 필요한 전부다.
         """
-        from pasteflow.ocr_engine import is_vision_capable
+        from pasteflow.ocr_engine import (
+            chat_capable, group_models, is_measured, model_status, ocr_capable, ocr_is_weak,
+        )
 
+        usable = (lambda n: ocr_capable(n, backend)) if for_ocr else (lambda n: chat_capable(n, backend))
         combo.clear()
-        # OCR 콤보는 이미 비전 가능 모델만 담고 있으므로 이미지 관련 표시를 생략한다.
-        show_vision = combo is not self._ocr_model_combo
         gray = QColor(COLORS['subtext0'])
 
-        def _add(name: str, recommended: bool, tip: str):
-            combo.addItem(name)
-            idx = combo.count() - 1
-            if recommended:
-                combo.setItemData(idx, _emoji_icon("⭐"), Qt.ItemDataRole.DecorationRole)
-            elif show_vision:
-                vision = is_vision_capable(name)
-                combo.setItemData(idx, _emoji_icon("🖼" if vision else "📝"),
-                                  Qt.ItemDataRole.DecorationRole)
-                if not vision:
-                    tip += "\n\n📝 텍스트 전용 — 이미지를 첨부하는 질의는 실패합니다."
-            if not recommended:
-                combo.setItemData(idx, gray, Qt.ItemDataRole.ForegroundRole)
-            combo.setItemData(idx, tip, Qt.ItemDataRole.ToolTipRole)
+        for family, names in group_models(candidates, usable):
+            self._add_group_header(combo, f"{family} ({len(names)})")
+            for name in names:
+                st = model_status(name, backend)
+                ok = usable(name)
+                weak = for_ocr and ok and ocr_is_weak(name, backend)
 
-        if verified:
-            self._add_group_header(combo, f"추천 — 실호출 검증됨 ({len(verified)}종)")
-            for name in verified:
-                _add(name, recommended=True,
-                     tip=f"⭐ {name}\n\nPasteFlow가 텍스트·이미지 양쪽을 실제로 호출해 확인한 모델입니다.")
-        if unverified:
-            self._add_group_header(combo, f"그 외 모델 ({len(unverified)}종)")
-            for name in unverified:
-                _add(name, recommended=False,
-                     tip=f"{name}\n\n추천 목록 밖 — 게이트웨이가 제공하며 호출은 확인됐지만,\n"
-                         "PasteFlow가 품질을 보증하지는 않습니다.")
+                # AI 질의 콤보에서도 비전 미지원은 알려야 한다 — 이미지 항목 우클릭
+                # "AI에게 질문"은 이 모델로 이미지를 멀티모달 전송하므로 400으로 실패한다.
+                text_only = (not for_ocr) and ok and st.get("ocr") == "fail"
+
+                combo.addItem(name)
+                idx = combo.count() - 1
+                if not ok:
+                    icon, tip = "🚫", f"사용 불가 — {st.get('why') or '호출 실패'}"
+                elif weak:
+                    icon, tip = "⚠", f"OCR 부정확 — {st.get('why') or '작은 글씨에서 오독'}"
+                elif text_only:
+                    icon, tip = "📝", "텍스트 전용 — 이미지를 첨부하는 질의는 실패합니다."
+                elif not is_measured(name, backend):
+                    icon, tip = "❓", "미측정 — 스윕 때 호출 한도로 확인하지 못했습니다."
+                else:
+                    icon, tip = "", "실호출로 확인됨"
+
+                combo.setItemData(idx, _status_icon(icon), Qt.ItemDataRole.DecorationRole)
+                combo.setItemData(idx, f"{name}\n\n{tip}", Qt.ItemDataRole.ToolTipRole)
+                if not ok:
+                    combo.model().item(idx).setEnabled(False)
+                    combo.setItemData(idx, gray, Qt.ItemDataRole.ForegroundRole)
 
         self._select_first_enabled(combo)
         self._adjust_model_popup_width(combo)
 
     def _select_first_enabled(self, combo: QComboBox):
-        """현재 선택이 비활성 헤더에 걸려 있으면 첫 번째 실제 모델로 옮긴다.
+        """현재 선택이 비활성 헤더에 걸려 있으면 쓸 만한 모델로 옮긴다.
 
         `clear()` 직후 첫 addItem이 헤더면 Qt가 currentIndex=0으로 잡아 헤더 문자열이
-        `currentText()`(= 저장되는 모델명)가 된다. 호출부가 이후 선택을 복원하지만,
-        복원할 값이 없는 경우(첫 실행 등)를 대비한 안전망.
+        `currentText()`(= 저장되는 모델명)가 된다. 호출부가 이후 저장된 선택을 복원하지만,
+        복원할 값이 없는 첫 실행을 대비한 안전망.
+
+        안전망 모델(`_FALLBACK_DEFAULT`)이 목록에 있으면 그것을 고른다 — 계열 안이
+        이름순이라 그냥 첫 항목을 잡으면 공식 백엔드에서 `gemini-2.0-flash` 같은 구형
+        모델이 기본값이 된다.
         """
         idx = combo.currentIndex()
-        if idx >= 0 and not combo.model().item(idx).isEnabled():
-            for i in range(combo.count()):
-                if combo.model().item(i).isEnabled():
-                    combo.setCurrentIndex(i)
-                    return
+        if idx >= 0 and combo.model().item(idx).isEnabled():
+            return
+
+        from pasteflow.ocr_engine import _FALLBACK_DEFAULT
+        preferred = combo.findText(_FALLBACK_DEFAULT)
+        if preferred >= 0 and combo.model().item(preferred).isEnabled():
+            combo.setCurrentIndex(preferred)
+            return
+        for i in range(combo.count()):
+            if combo.model().item(i).isEnabled():
+                combo.setCurrentIndex(i)
+                return
 
     def _adjust_model_popup_width(self, combo: QComboBox):
         """드롭다운 팝업만 최장 모델명에 맞춰 넓힌다 — 콤보 본체/설정창 폭은 불변.
@@ -957,7 +986,7 @@ class SettingsDialog(QDialog):
             combo.view().setMinimumWidth(widest + 40)
 
     def _populate_model_combo(self):
-        """현재 backend의 캐시로 두 모델 콤보를 구성. 캐시 없으면 화이트리스트 기본값."""
+        """현재 backend의 캐시로 두 모델 콤보를 구성. 캐시 없으면 매트릭스가 아는 모델."""
         import json
 
         backend = self._current_backend()
@@ -973,26 +1002,20 @@ class SettingsDialog(QDialog):
         self._fill_both_combos(cached, backend)
 
     def _fill_both_combos(self, candidates: list[str], backend: str):
-        """후보 목록 하나로 AI 질의 콤보(전 모델)와 AI OCR 콤보(비전 가능만)를 채운다.
+        """후보 목록 하나로 AI 질의 콤보와 AI OCR 콤보를 채운다.
 
-        candidates가 비면(캐시 없는 첫 실행) 화이트리스트 기본값으로 대체한다.
+        **두 콤보 모두 같은 모델 집합을 담는다.** 옛날엔 OCR 콤보에서 비전 미지원 모델을
+        아예 빼버려 "왜 solar-pro2가 없지?"가 됐는데, 이제는 회색·비활성 + 🚫로 이유까지
+        보여준다(사용자 요청: 안 되는 것도 보이되 못 고르게).
+
+        candidates가 비면(캐시 없는 첫 실행) 매트릭스가 아는 모델로 채운다.
         _populate_model_combo(캐시 로드)와 _on_models_fetched(↻ 새로고침)가 공유.
         """
-        from pasteflow.ocr_engine import (
-            sort_models_with_whitelist, whitelist_model_names, vision_capable_models,
-        )
-        if candidates:
-            ai_verified, ai_unverified = sort_models_with_whitelist(candidates, backend)
-            ocr_verified, ocr_unverified = sort_models_with_whitelist(
-                vision_capable_models(candidates), backend)
-        else:
-            # 현 화이트리스트는 전원 비전 확인된 모델이지만, 나중에 텍스트 전용 모델이
-            # 등재돼도 OCR 콤보로 새지 않도록 방어적으로 같은 필터를 통과시킨다.
-            ai_verified = whitelist_model_names(backend)
-            ocr_verified = vision_capable_models(ai_verified)
-            ai_unverified = ocr_unverified = []
-        self._fill_model_combo(self._model_combo, ai_verified, ai_unverified)
-        self._fill_model_combo(self._ocr_model_combo, ocr_verified, ocr_unverified)
+        from pasteflow.ocr_engine import matrix_model_names
+
+        names = candidates or matrix_model_names(backend)
+        self._fill_model_combo(self._model_combo, names, backend, for_ocr=False)
+        self._fill_model_combo(self._ocr_model_combo, names, backend, for_ocr=True)
 
     def _set_status(self, message: str, ok: bool | None = None):
         """연결 테스트 / 모델 새로고침이 공유하는 상태 줄. ok=None이면 중립 색."""
@@ -1070,11 +1093,15 @@ class SettingsDialog(QDialog):
             for combo in (self._model_combo, self._ocr_model_combo):
                 combo.setUpdatesEnabled(True)
 
-        n_ai = sum(1 for i in range(self._model_combo.count())
-                   if not self._model_combo.itemData(i, _HEADER_ROLE))
-        n_ocr = sum(1 for i in range(self._ocr_model_combo.count())
-                    if not self._ocr_model_combo.itemData(i, _HEADER_ROLE))
-        self._set_status(f"✓ 새로고침 완료 — 질의 {n_ai}종 · OCR {n_ocr}종", ok=True)
+        # 두 콤보가 같은 모델 집합을 담으므로 '개수'가 아니라 '고를 수 있는 수'를 알린다.
+        def _usable(combo) -> int:
+            return sum(1 for i in range(combo.count())
+                       if not combo.itemData(i, _HEADER_ROLE)
+                       and combo.model().item(i).isEnabled())
+
+        self._set_status(
+            f"✓ 새로고침 완료 — {len(unique)}종 중 질의 가능 {_usable(self._model_combo)} · "
+            f"OCR 가능 {_usable(self._ocr_model_combo)}", ok=True)
 
         import json
         # 캐시도 backend별로 분리 저장 — 공식/게이트웨이 모델 라인업이 달라 섞이면 안 됨
