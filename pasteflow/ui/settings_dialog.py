@@ -328,9 +328,18 @@ class SettingsDialog(QDialog):
     # OCR은 이미지를 보내므로 비전 가능 모델만 고를 수 있고, 저렴한 모델을 따로 둘 수 있다.
     KEY_OCR_MODEL_OFFICIAL = "ocr_model_official"
     KEY_OCR_MODEL_GATEWAY = "ocr_model_gateway"
+    # 여러 모델 비교(선택) — 기본 AI 질의 모델에 더해 동시에 물어볼 추가 모델 2개. 빈 값이면
+    # 미사용. backend별 분리(같은 backend 안에서만 비교 — 키·URL 공유). 질문창 체크박스가
+    # 켜졌을 때만 발동한다.
+    KEY_AI_COMPARE_MODEL_A_OFFICIAL = "ai_compare_model_a_official"
+    KEY_AI_COMPARE_MODEL_A_GATEWAY = "ai_compare_model_a_gateway"
+    KEY_AI_COMPARE_MODEL_B_OFFICIAL = "ai_compare_model_b_official"
+    KEY_AI_COMPARE_MODEL_B_GATEWAY = "ai_compare_model_b_gateway"
     # AI 질의 시스템 프롬프트(멘토 페르소나). 빈 값이면 ocr_engine.AI_SYSTEM_PROMPT로 폴백.
     KEY_AI_SYSTEM_PROMPT = "ai_system_prompt"
     KEY_QUEUE_IDLE_RESET = "queue_idle_reset_sec"
+    # 비교 콤보의 '미사용' 표시값 — 저장 시 빈 문자열로 환원한다(editable 콤보라 텍스트=값).
+    _COMPARE_UNUSED = "(사용 안 함)"
 
     # 워커 스레드 → UI 안전 통신용 내부 시그널 (models, error_msg)
     _models_fetched = pyqtSignal(list, str)
@@ -607,13 +616,15 @@ class SettingsDialog(QDialog):
         # 모델 콤보 2개 — OCR(이미지 입력 필요)과 AI 질의(전 모델)를 분리한다.
         # 같은 모델을 공유하면 답변용 고가 모델이 OCR에도 쓰이거나(과금), 텍스트 전용
         # 모델을 고르면 OCR이 400으로 깨진다. ↻ 새로고침 1회로 두 콤보를 함께 채운다.
-        self._model_label = QLabel("•  AI 질의 모델:")
+        self._model_label = QLabel("•  질의 모델 1:")
         self._model_combo = QComboBox()
         self._model_combo.setEditable(True)
         self._model_combo.setStyleSheet(_combo_style)
-        self._model_combo.setToolTip("AI 질문·답변에 쓰는 모델")
+        self._model_combo.setToolTip(
+            "AI 질문·답변의 기본 모델. 평소엔 이 모델만 답하고,\n"
+            "질문창에서 '여러 모델로 비교'를 켜면 모델 1·2·3으로 동시에 질의합니다.")
 
-        self._ocr_model_label = QLabel("•  AI OCR 모델:")
+        self._ocr_model_label = QLabel("•  OCR 모델:")
         self._ocr_model_combo = QComboBox()
         self._ocr_model_combo.setEditable(True)
         self._ocr_model_combo.setStyleSheet(_combo_style)
@@ -621,6 +632,20 @@ class SettingsDialog(QDialog):
             "이미지에서 텍스트를 추출할 때 쓰는 모델.\n"
             "이미지 입력을 받는 모델이어야 합니다 — [연결 테스트]로 확인하세요."
         )
+
+        # 질의 모델 2·3 (선택) — 질의 모델 1에 더해 '여러 모델로 비교' 시 동시에 물어볼 모델.
+        # 질문창에서 '🔀 여러 모델로 비교'를 켜면 이 모델들로 함께 질의한다. 미설정(사용 안 함)이
+        # 기본이며, 모델 1을 포함해 2개 이상 설정돼야 질문창 체크박스가 나타난다.
+        self._compare_a_label = QLabel("•  질의 모델 2:")
+        self._compare_model_a_combo = QComboBox()
+        self._compare_model_a_combo.setEditable(True)
+        self._compare_model_a_combo.setStyleSheet(_combo_style)
+        self._compare_model_a_combo.setToolTip("비교 질의에 함께 쓸 모델(선택). 같은 백엔드 안에서만.")
+        self._compare_b_label = QLabel("•  질의 모델 3:")
+        self._compare_model_b_combo = QComboBox()
+        self._compare_model_b_combo.setEditable(True)
+        self._compare_model_b_combo.setStyleSheet(_combo_style)
+        self._compare_model_b_combo.setToolTip("비교 질의에 함께 쓸 모델(선택). 같은 백엔드 안에서만.")
 
         # 콤보 초기 채우기는 _load_values에서 backend가 정해진 뒤 수행한다. 캐시가 없으면
         # 빈 콤보라, 무엇을 해야 할지 placeholder로 안내한다(빈 값은 엔진 기본 모델로 폴백).
@@ -631,31 +656,45 @@ class SettingsDialog(QDialog):
             # 계열 헤더 아래 모델명을 들여써 상하위를 구분(팝업 view 한정 — 닫힌 콤보는 불변).
             # 델리게이트는 combo를 부모로 둬야 GC로 사라지지 않는다.
             combo.view().setItemDelegate(_ModelIndentDelegate(combo))
+        # 비교 콤보도 같은 들여쓰기 델리게이트를 쓴다(placeholder는 '(사용 안 함)'이 대신).
+        for combo in (self._compare_model_a_combo, self._compare_model_b_combo):
+            combo.view().setItemDelegate(_ModelIndentDelegate(combo))
 
         # 모델별 프로브 결과 줄 — 연결 테스트가 각 모델을 실호출해 여기에 개별로 쓴다.
         # 상태 줄 하나에 뭉치면 "뭐가 성공했다는 거지?"가 되므로 콤보마다 따로 둔다.
         self._model_probe_status = self._make_probe_label()
         self._ocr_model_probe_status = self._make_probe_label()
+        self._compare_a_probe_status = self._make_probe_label()
+        self._compare_b_probe_status = self._make_probe_label()
 
         # 모델을 바꾸면 직전 결과는 다른 모델 이야기다 — 낡은 ✓를 남기면 그게 거짓말이 된다.
         # 진행 중인 테스트가 있다면 그 결과도 무효화한다(도착해도 화면의 모델과 다른 모델 얘기).
         for combo, probe_label in ((self._model_combo, self._model_probe_status),
-                                   (self._ocr_model_combo, self._ocr_model_probe_status)):
+                                   (self._ocr_model_combo, self._ocr_model_probe_status),
+                                   (self._compare_model_a_combo, self._compare_a_probe_status),
+                                   (self._compare_model_b_combo, self._compare_b_probe_status)):
             combo.currentTextChanged.connect(
                 lambda _t, lbl=probe_label: self._on_model_text_changed(lbl))
 
-        ai_form.addRow(self._model_label, self._stack(self._model_combo,
-                                                      self._model_probe_status))
+        # 배치: OCR 모델을 위로, 질의 모델 1·2·3을 이어 묶어 "함께 쓰는 질의 모델군"임을
+        # 시각적으로 드러낸다(모델 1=평소 답변, 2·3=비교 시 추가).
         ai_form.addRow(self._ocr_model_label, self._stack(self._ocr_model_combo,
                                                           self._ocr_model_probe_status))
+        ai_form.addRow(self._model_label, self._stack(self._model_combo,
+                                                      self._model_probe_status))
+        ai_form.addRow(self._compare_a_label, self._stack(self._compare_model_a_combo,
+                                                          self._compare_a_probe_status))
+        ai_form.addRow(self._compare_b_label, self._stack(self._compare_model_b_combo,
+                                                          self._compare_b_probe_status))
 
         # API 연결 테스트 — 모델명 바로 아래에 배치(설명 힌트보다 위). 힌트를 그룹 맨 아래로
         # 내려 워드랩 공간을 넉넉히 확보한다.
         self._test_btn = QPushButton("연결 테스트")
         self._test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._test_btn.setToolTip(
-            "키·연결을 확인하고, 위에서 고른 두 모델을 실제로 한 번씩 호출해 봅니다.\n"
-            "(질의 모델은 텍스트 질문 1회, OCR 모델은 작은 테스트 이미지 1회)"
+            "키·연결을 확인하고, 설정한 질의 모델(1·2·3)과 OCR 모델을 실제로 한 번씩\n"
+            "호출해 각 줄에 결과를 보여줍니다. (질의 모델은 이미지 첨부 질문 1회, OCR 모델은\n"
+            "작은 테스트 이미지 1회. 질의 모델 2·3은 설정했을 때만 테스트)"
         )
         self._test_btn.clicked.connect(self._on_test_api)
         self._test_status = QLabel("")
@@ -768,7 +807,8 @@ class SettingsDialog(QDialog):
         outer.addWidget(self._btn_bar)
 
     def _on_test_api(self):
-        """연결 테스트 — 키·연결 + **선택된 두 모델**을 실호출해 3줄로 개별 보고(워커 스레드).
+        """연결 테스트 — 키·연결 + **설정한 질의 모델(1·2·3)과 OCR 모델**을 실호출해 각 줄에
+        개별 보고(워커 스레드). 질의 모델 2·3은 설정됐을 때만 테스트하고, 미설정이면 줄을 숨긴다.
 
         옛 버전은 모델 목록 조회 하나만 하고 "연결 성공 — API 키가 유효합니다"를 띄웠다.
         모델 콤보가 둘인 화면에서 그 문구는 "고른 모델이 된다"로 읽히지만, 실제로는 **어느
@@ -787,6 +827,17 @@ class SettingsDialog(QDialog):
         # 콤보 값은 UI 스레드에서만 읽는다 (워커에서 위젯 접근 금지).
         chat_model = self._model_combo.currentText().strip()
         ocr_model = self._ocr_model_combo.currentText().strip()
+        cmp_a = self._compare_value(self._compare_model_a_combo)  # 질의 모델 2 ("" = 미설정)
+        cmp_b = self._compare_value(self._compare_model_b_combo)  # 질의 모델 3
+
+        # 프로브할 (slot, 모델, is_ocr) 목록 — 질의 모델 1·2·3(비었으면 제외) + OCR.
+        # 질의 모델은 이미지 첨부 chat 프로브, OCR은 이미지 OCR 프로브로 판정한다.
+        targets: list[tuple[str, str, bool]] = [("chat", chat_model, False)]
+        if cmp_a:
+            targets.append(("chat2", cmp_a, False))
+        if cmp_b:
+            targets.append(("chat3", cmp_b, False))
+        targets.append(("ocr", ocr_model, True))
 
         # 회차 번호. 테스트 도중 사용자가 모델을 바꾸거나 다시 누르면 이 값이 올라가고,
         # 뒤늦게 도착한 옛 회차의 결과는 버려진다 — 안 그러면 A 모델의 ✓가 화면에 떠 있는
@@ -798,6 +849,9 @@ class SettingsDialog(QDialog):
         self._set_probe_status(self._test_status, "run", "연결 확인 중…")
         self._set_probe_status(self._model_probe_status, "run", "대기 중…")
         self._set_probe_status(self._ocr_model_probe_status, "run", "대기 중…")
+        # 미설정 질의 모델(2·3)은 줄을 비워 숨긴다(빈 detail → 라벨 hidden).
+        self._set_probe_status(self._compare_a_probe_status, "run", "대기 중…" if cmp_a else "")
+        self._set_probe_status(self._compare_b_probe_status, "run", "대기 중…" if cmp_b else "")
 
         import threading
 
@@ -809,17 +863,17 @@ class SettingsDialog(QDialog):
                 conn = probe_connection(api_key, base_url)
                 self._probe_done.emit(run_id, "conn", conn.status, conn.detail)
                 if conn.status != "ok":
-                    for slot in ("chat", "ocr"):
+                    for slot, _model, _is_ocr in targets:
                         self._probe_done.emit(run_id, slot, "skip", "연결이 안 돼 건너뛰었습니다.")
                     return
 
-                for slot, model, probe in (("chat", chat_model, probe_chat_model),
-                                           ("ocr", ocr_model, probe_ocr_model)):
+                for slot, model, is_ocr in targets:
                     if not model:
                         self._probe_done.emit(
                             run_id, slot, "skip", "모델이 비어 있습니다 — ↻로 목록을 불러오세요.")
                         continue
                     self._probe_done.emit(run_id, slot, "run", f"{model} 호출 중…")
+                    probe = probe_ocr_model if is_ocr else probe_chat_model
                     result = probe(api_key, base_url, model)
                     self._probe_done.emit(run_id, slot, result.status, result.detail)
             except Exception as e:
@@ -847,6 +901,8 @@ class SettingsDialog(QDialog):
         label = {
             "conn": self._test_status,
             "chat": self._model_probe_status,
+            "chat2": self._compare_a_probe_status,
+            "chat3": self._compare_b_probe_status,
             "ocr": self._ocr_model_probe_status,
         }[slot]
         self._set_probe_status(label, status, detail)
@@ -865,11 +921,15 @@ class SettingsDialog(QDialog):
             self._settings[self.KEY_OCR_GEMINI_API_KEY_OFFICIAL] = self._api_key_edit.text()
             self._settings[self.KEY_OCR_GEMINI_MODEL_OFFICIAL] = self._model_combo.currentText()
             self._settings[self.KEY_OCR_MODEL_OFFICIAL] = self._ocr_model_combo.currentText()
+            self._settings[self.KEY_AI_COMPARE_MODEL_A_OFFICIAL] = self._compare_value(self._compare_model_a_combo)
+            self._settings[self.KEY_AI_COMPARE_MODEL_B_OFFICIAL] = self._compare_value(self._compare_model_b_combo)
         elif prev_backend == "gateway":
             self._settings[self.KEY_OCR_GEMINI_API_KEY_GATEWAY] = self._api_key_edit.text()
             self._settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
             self._settings[self.KEY_OCR_GEMINI_MODEL_GATEWAY] = self._model_combo.currentText()
             self._settings[self.KEY_OCR_MODEL_GATEWAY] = self._ocr_model_combo.currentText()
+            self._settings[self.KEY_AI_COMPARE_MODEL_A_GATEWAY] = self._compare_value(self._compare_model_a_combo)
+            self._settings[self.KEY_AI_COMPARE_MODEL_B_GATEWAY] = self._compare_value(self._compare_model_b_combo)
 
         # 2) 새 backend 값으로 입력란 채우기
         if backend == "gateway":
@@ -895,6 +955,13 @@ class SettingsDialog(QDialog):
         saved_ocr = self._current_saved_ocr_model_for(backend) or saved_model
         if saved_ocr:
             self._ocr_model_combo.setCurrentText(saved_ocr)
+        # 비교 모델 A/B — 저장값이 있으면 복원, 없으면 콤보 기본값('(사용 안 함)') 유지.
+        saved_a = self._current_saved_compare_for(backend, "a")
+        if saved_a:
+            self._compare_model_a_combo.setCurrentText(saved_a)
+        saved_b = self._current_saved_compare_for(backend, "b")
+        if saved_b:
+            self._compare_model_b_combo.setCurrentText(saved_b)
 
     def _current_saved_model_for(self, backend: str) -> str:
         if backend == "gateway":
@@ -905,6 +972,16 @@ class SettingsDialog(QDialog):
         if backend == "gateway":
             return self._settings.get(self.KEY_OCR_MODEL_GATEWAY, "")
         return self._settings.get(self.KEY_OCR_MODEL_OFFICIAL, "")
+
+    def _current_saved_compare_for(self, backend: str, slot: str) -> str:
+        """비교 모델 A/B의 backend별 저장값(slot='a'|'b')."""
+        if slot == "a":
+            key = (self.KEY_AI_COMPARE_MODEL_A_GATEWAY if backend == "gateway"
+                   else self.KEY_AI_COMPARE_MODEL_A_OFFICIAL)
+        else:
+            key = (self.KEY_AI_COMPARE_MODEL_B_GATEWAY if backend == "gateway"
+                   else self.KEY_AI_COMPARE_MODEL_B_OFFICIAL)
+        return self._settings.get(key, "")
 
     def _pick_capture_folder(self):
         """캡처 저장 폴더 선택 다이얼로그"""
@@ -1033,6 +1110,28 @@ class SettingsDialog(QDialog):
         self._select_first_enabled(combo)
         self._adjust_model_popup_width(combo)
 
+    def _fill_compare_combo(self, combo: QComboBox, candidates: list[str]):
+        """비교 모델 콤보를 '(사용 안 함)' + 계열 헤더 + 모델명으로 채운다(기본=미사용).
+
+        기본 콤보(_fill_model_combo)와 달리 첫 항목이 '(사용 안 함)'이고 기본 선택도 그것 —
+        비교는 옵트인이라 아무것도 안 고른 상태가 정상이다. 나머지는 동일(헤더는 선택 불가).
+        """
+        from pasteflow.ocr_engine import group_models
+
+        combo.clear()
+        combo.addItem(self._COMPARE_UNUSED)
+        for family, names in group_models(candidates):
+            self._add_group_header(combo, f"{family} ({len(names)})")
+            for name in names:
+                combo.addItem(name)
+        combo.setCurrentIndex(0)  # 기본 = 사용 안 함
+        self._adjust_model_popup_width(combo)
+
+    def _compare_value(self, combo: QComboBox) -> str:
+        """비교 콤보의 저장값 — '(사용 안 함)'/빈 값은 빈 문자열로 환원."""
+        text = combo.currentText().strip()
+        return "" if text == self._COMPARE_UNUSED else text
+
     def _select_first_enabled(self, combo: QComboBox):
         """현재 선택이 비활성 헤더에 걸려 있으면 실제 모델로 옮긴다.
 
@@ -1094,6 +1193,8 @@ class SettingsDialog(QDialog):
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass
         self._fill_both_combos(cached)
+        self._fill_compare_combo(self._compare_model_a_combo, cached)
+        self._fill_compare_combo(self._compare_model_b_combo, cached)
 
     def _fill_both_combos(self, candidates: list[str]):
         """후보 목록 하나로 AI 질의 콤보와 AI OCR 콤보를 함께 채운다.
@@ -1192,14 +1293,22 @@ class SettingsDialog(QDialog):
         # setUpdatesEnabled: 39개 항목을 지웠다 다시 넣는 동안의 중간 상태 repaint를 한 프레임으로 묶는다.
         # (조회 중 모델명이 파랗게 반전되던 문제는 여기가 아니라 새로고침 버튼의 포커스 이동이
         #  원인이었다 → _model_refresh_btn.setFocusPolicy(NoFocus)로 해결. 아래 deselect는 안전망.)
+        all_combos = (self._model_combo, self._ocr_model_combo,
+                      self._compare_model_a_combo, self._compare_model_b_combo)
         current_ai = self._model_combo.currentText()
         current_ocr = self._ocr_model_combo.currentText()
-        for combo in (self._model_combo, self._ocr_model_combo):
+        current_a = self._compare_model_a_combo.currentText()
+        current_b = self._compare_model_b_combo.currentText()
+        for combo in all_combos:
             combo.setUpdatesEnabled(False)
         try:
             self._fill_both_combos(unique)
+            self._fill_compare_combo(self._compare_model_a_combo, unique)
+            self._fill_compare_combo(self._compare_model_b_combo, unique)
             for combo, current in ((self._model_combo, current_ai),
-                                   (self._ocr_model_combo, current_ocr)):
+                                   (self._ocr_model_combo, current_ocr),
+                                   (self._compare_model_a_combo, current_a),
+                                   (self._compare_model_b_combo, current_b)):
                 idx = combo.findText(current)
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
@@ -1213,7 +1322,7 @@ class SettingsDialog(QDialog):
                     le.deselect()
                     le.setCursorPosition(0)
         finally:
-            for combo in (self._model_combo, self._ocr_model_combo):
+            for combo in all_combos:
                 combo.setUpdatesEnabled(True)
 
         # ↻는 '어떤 모델이 있는지'만 안다. '되는지'는 연결 테스트가 실호출로 답한다.
@@ -1263,10 +1372,14 @@ class SettingsDialog(QDialog):
             self._settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
             self._settings[self.KEY_OCR_GEMINI_MODEL_GATEWAY] = self._model_combo.currentText()
             self._settings[self.KEY_OCR_MODEL_GATEWAY] = self._ocr_model_combo.currentText()
+            self._settings[self.KEY_AI_COMPARE_MODEL_A_GATEWAY] = self._compare_value(self._compare_model_a_combo)
+            self._settings[self.KEY_AI_COMPARE_MODEL_B_GATEWAY] = self._compare_value(self._compare_model_b_combo)
         else:
             self._settings[self.KEY_OCR_GEMINI_API_KEY_OFFICIAL] = self._api_key_edit.text()
             self._settings[self.KEY_OCR_GEMINI_MODEL_OFFICIAL] = self._model_combo.currentText()
             self._settings[self.KEY_OCR_MODEL_OFFICIAL] = self._ocr_model_combo.currentText()
+            self._settings[self.KEY_AI_COMPARE_MODEL_A_OFFICIAL] = self._compare_value(self._compare_model_a_combo)
+            self._settings[self.KEY_AI_COMPARE_MODEL_B_OFFICIAL] = self._compare_value(self._compare_model_b_combo)
 
         # 양쪽 backend의 키/모델/캐시를 모두 같이 전달 — 일부만 보내면 다른 쪽이 사라질 위험
         for k in (
@@ -1277,6 +1390,10 @@ class SettingsDialog(QDialog):
             self.KEY_OCR_GEMINI_MODEL_GATEWAY,
             self.KEY_OCR_MODEL_OFFICIAL,
             self.KEY_OCR_MODEL_GATEWAY,
+            self.KEY_AI_COMPARE_MODEL_A_OFFICIAL,
+            self.KEY_AI_COMPARE_MODEL_A_GATEWAY,
+            self.KEY_AI_COMPARE_MODEL_B_OFFICIAL,
+            self.KEY_AI_COMPARE_MODEL_B_GATEWAY,
             self.KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL,
             self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY,
         ):

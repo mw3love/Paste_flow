@@ -7,7 +7,7 @@ Enter로 전송, Shift+Enter 줄바꿈, Esc 취소.
 
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
-    QPushButton,
+    QPushButton, QCheckBox,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QCursor, QPixmap
@@ -37,8 +37,10 @@ class AiQueryDialog(QDialog):
 
     _CTX_PREVIEW_CHARS = 300
 
-    def __init__(self, context_text: str, parent=None, context_image: bytes | None = None):
+    def __init__(self, context_text: str, parent=None, context_image: bytes | None = None,
+                 compare_models: list[str] | None = None):
         super().__init__(parent)
+        self._compare_models = [m for m in (compare_models or []) if m]
         self.setWindowTitle("AI에게 질문")
         self.setMinimumSize(420, 240)
         self.setStyleSheet(f"""
@@ -87,6 +89,22 @@ class AiQueryDialog(QDialog):
             QPushButton[text="질문"]:hover {{
                 background-color: {PEACH_HOVER};
             }}
+            QCheckBox {{
+                color: {COLORS['subtext0']};
+                font-size: 12px;
+                spacing: 6px;
+            }}
+            QCheckBox::indicator {{
+                width: 15px;
+                height: 15px;
+                border: 1px solid {COLORS['surface2']};
+                border-radius: 3px;
+                background-color: {COLORS['surface0']};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {COLORS['peach']};
+                border-color: {COLORS['peach']};
+            }}
         """)
 
         layout = QVBoxLayout(self)
@@ -123,6 +141,17 @@ class AiQueryDialog(QDialog):
         self._editor = _QuestionEdit(self._try_submit)
         self._editor.setFocus()
         layout.addWidget(self._editor, 1)
+
+        # 여러 모델 비교 체크박스 — 비교 모델이 2개 이상 설정됐을 때만 노출한다(1개면 무의미).
+        # 켜면 이 질문을 설정된 모델들로 동시에 던져 답변창을 나란히 띄운다.
+        self._compare_check: QCheckBox | None = None
+        if len(self._compare_models) >= 2:
+            self._compare_check = QCheckBox(
+                f"🔀 여러 모델로 비교 ({len(self._compare_models)}개)")
+            self._compare_check.setToolTip(
+                "이 질문을 아래 모델들로 동시에 질의해 답변을 나란히 비교합니다:\n"
+                + "\n".join(f"· {m}" for m in self._compare_models))
+            layout.addWidget(self._compare_check)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -189,3 +218,7 @@ class AiQueryDialog(QDialog):
 
     def get_question(self) -> str:
         return self._editor.toPlainText().strip()
+
+    def is_compare(self) -> bool:
+        """'여러 모델로 비교' 체크 여부. 체크박스가 없으면(모델 미설정) 항상 False."""
+        return self._compare_check is not None and self._compare_check.isChecked()

@@ -255,7 +255,9 @@ class TextPreviewPopup(QWidget):
     @classmethod
     def open_new(cls, item: ClipboardItem, panel_geom: QRect, editable: bool = True,
                  markdown: bool = False, center: bool = False,
-                 initial_turn: tuple[str, str] | None = None) -> "TextPreviewPopup":
+                 initial_turn: tuple[str, str] | None = None,
+                 model_title: str = "", pending_question: str | None = None,
+                 place_rect: QRect | None = None) -> "TextPreviewPopup":
         """새 미리보기 창을 열고 인스턴스 목록에 등록한다.
 
         editable=False면 우클릭 "수정" 메뉴를 숨긴다(AI 답변 등 DB에 없는 임시 항목 —
@@ -266,13 +268,23 @@ class TextPreviewPopup(QWidget):
         (AI 답변 전용 — _ai_anchor가 가리키는 커서 모니터 한복판).
         initial_turn=(질문, 답변)이면 첫 대화 턴으로 설정한 뒤 표시한다(AI 답변 전용 —
         show 전에 턴을 넣어 빈 화면 깜빡임·재사이즈를 피한다).
+
+        model_title이 주어지면 상단 바 좌측에 모델명을 상시 표시한다(다중 모델 비교 전용 —
+        어느 창이 어느 모델 답변인지 구분). pending_question이 주어지면 첫 턴을 '생각 중'
+        상태로 열고(답변은 아직 없음) 애니메이션을 시작한다(비교 창을 답 도착 전에 미리
+        띄우는 용도 — 답은 resolve_pending으로 채운다). place_rect가 주어지면 center/cascade
+        대신 그 사각형에 고정 배치한다(모니터 N등분 타일).
         """
         cascade_offset = len(cls._instances) * _CASCADE_STEP
-        popup = cls(item, editable=editable, markdown=markdown)
+        popup = cls(item, editable=editable, markdown=markdown, model_title=model_title)
         cls._instances.append(popup)
-        if initial_turn is not None:
+        if pending_question is not None:
+            popup._append_turn_data(pending_question, _PENDING)
+        elif initial_turn is not None:
             popup._append_turn_data(initial_turn[0], initial_turn[1])
-        popup.show_preview(panel_geom, cascade_offset, center=center)
+        popup.show_preview(panel_geom, cascade_offset, center=center, place_rect=place_rect)
+        if pending_question is not None:
+            popup._start_pending_anim()
         return popup
 
     @classmethod
@@ -285,11 +297,16 @@ class TextPreviewPopup(QWidget):
     # 인스턴스 초기화
     # ------------------------------------------------------------------
 
-    def __init__(self, item: ClipboardItem, editable: bool = True, markdown: bool = False):
+    def __init__(self, item: ClipboardItem, editable: bool = True, markdown: bool = False,
+                 model_title: str = ""):
         super().__init__(None)
         self._item = item
         self._editable = editable
         self._markdown = markdown
+        # 다중 모델 비교 창: 상단 바 좌측에 표시할 모델명(빈 문자열이면 상시 표시 안 함).
+        self._model_title = model_title
+        # 이 창의 후속 질문이 재질의할 모델(비교 창은 자기 모델로만 이어감). None이면 기본.
+        self._ai_model: str | None = model_title or None
         self._raw_text = ""  # 마크다운 측정용 원문 (show_preview에서 채움)
         self._marks: list[tuple[int, int]] = []  # 형광펜 범위(문서 position 좌표)
         # 형광펜(True) ↔ 선택→복사(False, 기본) 모드. 우상단 버튼·Shift+백틱으로 토글.
@@ -598,7 +615,13 @@ class TextPreviewPopup(QWidget):
     # 표시
     # ------------------------------------------------------------------
 
-    def show_preview(self, panel_geom: QRect, cascade_offset: int = 0, center: bool = False):
+    def show_preview(self, panel_geom: QRect, cascade_offset: int = 0, center: bool = False,
+                     place_rect: QRect | None = None):
+        # place_rect(모니터 N등분 타일)면 자동 크기 산정 대신 그 사각형에 고정한다 —
+        # 비교 창은 폭이 정해져야 나란히 놓이고, 내용은 wrap+세로 스크롤로 흡수한다.
+        if place_rect is not None:
+            self._manual_size = True
+            self._set_line_wrap(True)
         if self._markdown:
             if self._turns:
                 self._render_current_turn()  # 현재 턴만 렌더(탭)
@@ -608,6 +631,11 @@ class TextPreviewPopup(QWidget):
             text = self._item.text_content or self._item.preview_text or ""
             self._raw_text = text
             self._editor.setPlainText(text)
+        if place_rect is not None:
+            self.setGeometry(place_rect)
+            self.show()
+            self.raise_()
+            return
         self._resize_to_content()
         screen = QApplication.screenAt(panel_geom.center()) or QApplication.primaryScreen()
         if screen:
@@ -679,17 +707,47 @@ class TextPreviewPopup(QWidget):
         답변 자리를 sentinel(_PENDING)로 둔 턴을 하나 넣고 최신 탭으로 전환한다. 창 크기는
         재산정하지 않아(이전 답변 크기 유지) 답 도착 전까지 깜빡임이 없다.
         """
-        import time
         self._append_turn_data(question, _PENDING)
+        self._start_pending_anim()
+        self._editor.verticalScrollBar().setValue(0)
+
+    def _start_pending_anim(self):
+        """현재(마지막) 턴이 _PENDING이라는 전제로 "생각 중" 애니메이션을 시작한다.
+
+        후속 질문(begin_followup)과 비교 창의 초기 대기(open_new의 pending_question) 공용 —
+        입력칸을 잠그고 경과시간 갱신 타이머를 돌린다. 답은 resolve_pending으로 채운다.
+        """
+        import time
         self.set_thinking(True)
         self._pending_start = time.monotonic()
         self._render_current_turn()  # 크기 재산정 없이 본문만 "생각 중"으로
-        self._editor.verticalScrollBar().setValue(0)
         if self._think_timer is None:
             self._think_timer = QTimer(self)
             self._think_timer.setInterval(500)
             self._think_timer.timeout.connect(self._tick_pending)
         self._think_timer.start()
+
+    def fail_pending(self, msg: str):
+        """펜딩 상태에서 질의가 실패했을 때의 처리 — 되돌아갈 이전 턴 유무로 갈린다.
+
+        - 첫/유일 턴이 실패(비교 창의 초기 대기가 깨짐)면 되돌아갈 데가 없으므로 오류를
+          답변 자리에 채워 "이 모델은 실패했다"를 그 창에 남긴다.
+        - 후속 턴 실패(대화 중)면 기존처럼 펜딩 탭을 제거하고 직전 탭으로 복귀한다.
+        """
+        self._stop_think_timer()
+        if not (self._turns and self._turns[self._current_tab][1] is _PENDING):
+            self.set_thinking(False)
+            return
+        if len(self._turns) == 1:
+            q = self._turns[0][0]
+            self._turns[0] = (q, f"⚠️ 답변을 받지 못했어요.\n\n{msg}")
+            self._marks = []
+            self._render_current_turn()
+            self.set_thinking(False)
+            if not self._manual_size:
+                self._resize_to_content()
+        else:
+            self.cancel_pending()
 
     def _tick_pending(self):
         """펜딩 탭 본문의 경과시간·점 애니메이션을 0.5초마다 갱신(가벼운 setMarkdown)."""
@@ -797,18 +855,29 @@ class TextPreviewPopup(QWidget):
             if w is not None:
                 w.setParent(None)
         self._tab_btns = []
-        for i in range(len(self._turns)):
-            b = QPushButton(f"Q{i + 1}")
-            b.setFixedHeight(24)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            b.clicked.connect(lambda _=False, idx=i: self._select_tab(idx))
-            lay.addWidget(b)
-            self._tab_btns.append(b)
+        # 다중 모델 비교 창: 탭 왼쪽에 모델명을 상시 표시(클릭 불가 라벨).
+        if self._model_title:
+            title = QLabel(f"🤖 {self._model_title}")
+            title.setStyleSheet(
+                f"QLabel{{color:{_PEACH};font-size:12px;font-weight:bold;"
+                f"padding:2px 6px;}}")
+            title.setToolTip(f"이 답변의 모델: {self._model_title}")
+            lay.addWidget(title)
+        # Q 탭 버튼은 두 턴 이상일 때만 — 한 턴이면 탭이 무의미하다(비교 창은 모델명만 남김).
+        if len(self._turns) > 1:
+            for i in range(len(self._turns)):
+                b = QPushButton(f"Q{i + 1}")
+                b.setFixedHeight(24)
+                b.setCursor(Qt.CursorShape.PointingHandCursor)
+                b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                b.clicked.connect(lambda _=False, idx=i: self._select_tab(idx))
+                lay.addWidget(b)
+                self._tab_btns.append(b)
         lay.addStretch(1)
         self._update_tab_styles()
         # 한 턴이면 숨김(첫 답변은 예전 모습). 두 번째부터 탭 노출.
-        self._tabbar.setVisible(len(self._turns) > 1)
+        # 단 비교 창(_model_title)은 모델명을 보여야 하므로 한 턴에도 바를 노출한다.
+        self._tabbar.setVisible(bool(self._model_title) or len(self._turns) > 1)
 
     def _update_tab_styles(self):
         """현재 탭=코랄 강조, 나머지=중립. (앱 2톤 체계와 동일)"""
@@ -824,9 +893,9 @@ class TextPreviewPopup(QWidget):
                     f"font-size:12px;}}QPushButton:hover{{background:{_SURFACE2};}}")
 
     def _top_reserve(self) -> int:
-        """상단 턴 탭 바가 차지하는 높이(두 턴 이상일 때만 — 자동 크기 산정에서 예약)."""
+        """상단 턴 탭 바가 차지하는 높이(두 턴 이상 또는 비교 창 — 자동 크기 산정에서 예약)."""
         tb = getattr(self, "_tabbar", None)
-        if tb is not None and len(self._turns) > 1:
+        if tb is not None and (self._model_title or len(self._turns) > 1):
             return tb.height()
         return 0
 

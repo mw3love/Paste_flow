@@ -660,7 +660,7 @@ class _SignalBridge(QObject):
     capture_requested  = pyqtSignal()        # 훅 스레드 → 메인: 영역 캡처 오버레이 띄우기
     ask_ai             = pyqtSignal()        # 훅 스레드 → 메인: AI 자유질문 입력창 띄우기
     ai_turn_done       = pyqtSignal(object)  # AI 워커 스레드 → 메인: 대화 턴 결과 dict(팝업·답변·히스토리)
-    ai_error           = pyqtSignal(str)     # AI 워커 스레드 → 메인: 에러 메시지
+    ai_error           = pyqtSignal(object)  # AI 워커 스레드 → 메인: 에러 dict({popup, msg})
 
 
 class PasteFlowApp:
@@ -698,7 +698,6 @@ class PasteFlowApp:
         self._bridge.ask_ai.connect(self._on_ask_ai_hotkey)
         self._bridge.ai_turn_done.connect(self._on_ai_turn_done)
         self._bridge.ai_error.connect(self._on_ai_error)
-        self._ai_inflight_popup: TextPreviewPopup | None = None  # 진행 중 후속질의 답변창(에러 시 재활성화)
 
         self._saved_panel_geometry = None
         self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
@@ -962,7 +961,8 @@ class PasteFlowApp:
         else:
             ToastNotification("캡처를 클립보드에 복사했습니다", icon="📷")
 
-    def _resolve_gemini_cfg(self, purpose: str = "ai") -> tuple[str, str, str]:
+    def _resolve_gemini_cfg(self, purpose: str = "ai",
+                            model_override: str | None = None) -> tuple[str, str, str]:
         """게이트웨이/공식 백엔드 설정을 해석해 (api_key, base_url, model) 반환.
 
         OCR 워커와 AI 질의 워커가 공유하되 **모델만 용도별로 갈린다**(v1.39.0):
@@ -973,7 +973,8 @@ class PasteFlowApp:
         OCR에도 그대로 쓰여 텍스트 추출 한 번에 과금이 커지고, 반대로 텍스트 전용 모델
         (solar-pro2 등)을 AI용으로 고르면 OCR이 400으로 깨진다.
 
-        api_key·base_url·backend는 두 용도가 계속 공유한다(같은 계정/엔드포인트).
+        model_override가 주어지면 설정의 모델 슬롯 대신 그 모델을 쓴다(여러 모델 비교 —
+        같은 backend·키·URL로 모델만 갈아끼운다). api_key·base_url·backend는 계속 공유.
         backend 명시값 우선, 미설정 시 base_url 유무로 추론(레거시 호환).
         공식 API는 base_url을 무시하므로 ""로 강제한다.
         DB 접근은 _lock으로 직렬화되어 워커 스레드에서 호출해도 안전.
@@ -983,12 +984,15 @@ class PasteFlowApp:
         if backend not in ("official", "gateway"):
             backend = "gateway" if (base_url_saved or "").strip() else "official"
 
-        model_key = (
-            f"ocr_model_{backend}" if purpose == "ocr"
-            else f"ocr_gemini_model_{backend}"
-        )
-        model = self.db.get_setting(model_key, "")
-        if purpose == "ocr" and not model:
+        if model_override is not None:
+            model = model_override
+        else:
+            model_key = (
+                f"ocr_model_{backend}" if purpose == "ocr"
+                else f"ocr_gemini_model_{backend}"
+            )
+            model = self.db.get_setting(model_key, "")
+        if model_override is None and purpose == "ocr" and not model:
             # OCR 슬롯이 아직 비었으면(마이그레이션 전/초기화됨) AI 모델을 그대로 쓴다.
             # 빈 문자열이면 OcrEngine이 backend별 기본 모델로 폴백하므로 여기서 강제하지 않는다.
             model = self.db.get_setting(f"ocr_gemini_model_{backend}", "")
@@ -1009,19 +1013,21 @@ class PasteFlowApp:
         conversation = [{"role": "user", "content": prompt, "display": question}]
         self._run_ai_turn(conversation, image_png, popup=None)
 
-    def _run_ai_turn(self, conversation: list, image_png: bytes | None, popup):
-        """대화 한 턴을 백그라운드에서 질의한다(첫 질문·후속 질문 공용).
+    def _run_ai_turn(self, conversation: list, image_png: bytes | None, popup,
+                     model: str | None = None):
+        """대화 한 턴을 백그라운드에서 질의한다(첫 질문·후속 질문·비교 질의 공용).
 
         OCR과 동일한 게이트웨이/공식 배관(`OcrEngine.ask_messages`)을 재사용한다. OCR 엔진
         설정과 무관하게 항상 gemini 경로. `image_png`는 첫 user 턴에만 멀티모달로 실린다.
-        진행 표시는 첫 턴이면 커서 모니터 정중앙 진행 칩, 후속 턴이면 답변창 하단 입력칸의
-        'AI 생각 중…'(팝업 `_submit_followup`이 이미 잠금)으로 갈린다. 결과/에러는
-        `ai_turn_done` / `ai_error` 시그널로 메인 스레드에 통지.
+        `model`이 주어지면 설정 모델 대신 그 모델로 질의한다(비교 창은 자기 모델로 이어감).
+        진행 표시는 첫 턴이면 커서 모니터 정중앙 진행 칩, 팝업이 주어지면(후속 턴·비교 창)
+        그 팝업이 자체 '생각 중'을 표시하므로 칩을 띄우지 않는다. 결과/에러는
+        `ai_turn_done` / `ai_error` 시그널로 메인 스레드에 통지(둘 다 팝업 참조를 실어 여러
+        워커가 병렬로 돌아도 서로 섞이지 않는다).
         """
         from PyQt6.QtGui import QCursor
-        self._ai_inflight_popup = popup  # 에러 시 입력칸 재활성화 대상(후속 턴만 non-None)
         if popup is None:
-            # 첫 턴: "다운된 게 아니라 작업 중"임을 진행 칩으로 알린다(비스트리밍이라 %는 불가).
+            # 첫 턴(단일 답변): "다운된 게 아니라 작업 중"임을 진행 칩으로 알린다(비스트리밍이라 %는 불가).
             anchor = self._ai_anchor.topLeft() if getattr(self, "_ai_anchor", None) else QCursor.pos()
             self._start_cursor_progress("AI 생각 중…", "🤖", anchor)
 
@@ -1031,10 +1037,10 @@ class PasteFlowApp:
         def _run():
             try:
                 from pasteflow.ocr_engine import OcrEngine
-                api_key, base_url, model = self._resolve_gemini_cfg()
+                api_key, base_url, model_id = self._resolve_gemini_cfg(model_override=model)
                 system_prompt = self.db.get_setting("ai_system_prompt", "")
                 engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url,
-                                   model=model, system_prompt=system_prompt)
+                                   model=model_id, system_prompt=system_prompt)
                 answer = engine.ask_messages(messages, image_png=image_png)
                 if engine.last_fallback_from and engine.last_used_model:
                     self._bridge.ocr_fallback.emit(engine.last_fallback_from, engine.last_used_model)
@@ -1042,11 +1048,72 @@ class PasteFlowApp:
                 self._bridge.ai_turn_done.emit({
                     "popup": popup, "answer": answer,
                     "conversation": new_conv, "image_png": image_png,
+                    "model": model,
                 })
             except Exception as e:
-                self._bridge.ai_error.emit(str(e))
+                self._bridge.ai_error.emit({"popup": popup, "msg": str(e)})
 
         threading.Thread(target=_run, daemon=True, name="ai-worker").start()
+
+    def _resolve_compare_models(self) -> list[str]:
+        """여러 모델 비교에 쓸 모델 목록 — [기본 AI 모델, 비교 A, 비교 B] 중 비어있지 않은
+        것을 중복 제거해 반환. 같은 backend 안에서만 고른다(키·URL 공유 — 공식/게이트웨이
+        혼합 불가). 2개 미만이면 비교가 무의미하므로 호출부가 그때 체크박스를 숨긴다.
+        """
+        backend = self.db.get_setting("ocr_gemini_backend", "")
+        base_url_saved = self.db.get_setting("ocr_gemini_base_url", "")
+        if backend not in ("official", "gateway"):
+            backend = "gateway" if (base_url_saved or "").strip() else "official"
+        primary = self.db.get_setting(f"ocr_gemini_model_{backend}", "")
+        a = self.db.get_setting(f"ai_compare_model_a_{backend}", "")
+        b = self.db.get_setting(f"ai_compare_model_b_{backend}", "")
+        models: list[str] = []
+        for m in (primary, a, b):
+            m = (m or "").strip()
+            if m and m not in models:
+                models.append(m)
+        return models
+
+    def _start_compare_query(self, question: str, context_text: str,
+                             image_png: bytes | None, models: list[str]):
+        """질문을 여러 모델로 동시에 질의하고 답변창을 모니터 N등분 타일로 나란히 띄운다.
+
+        각 창은 '생각 중' 펜딩 상태로 먼저 뜨고(어느 모델이 아직인지 보임) 각자 답이 도착하면
+        채워진다. 창마다 자기 모델을 기억해 '이어서 질문'도 그 모델로 이어간다. 진행 칩은
+        띄우지 않는다(각 창이 자체 표시). 모델은 같은 backend·키·URL로 모델만 갈아끼운다.
+        """
+        from pasteflow.ocr_engine import build_ask_prompt
+        from pasteflow.ui.text_preview import TextPreviewPopup
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtGui import QCursor
+
+        anchor = getattr(self, "_ai_anchor", None)
+        pt = anchor.topLeft() if anchor else QCursor.pos()
+        screen = QApplication.screenAt(pt) or QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        n = len(models)
+        gap = 12
+        margin_v = max(24, int(avail.height() * 0.08))
+        tile_h = avail.height() - margin_v * 2
+        col_w = max(280, (avail.width() - gap * (n + 1)) // n)
+
+        prompt = build_ask_prompt(question, context_text)
+        for i, model in enumerate(models):
+            x = avail.left() + gap + i * (col_w + gap)
+            rect = QRect(x, avail.top() + margin_v, col_w, tile_h)
+            item = ClipboardItem(content_type="text", text_content="",
+                                 preview_text=question[:200])
+            popup = TextPreviewPopup.open_new(
+                item, QRect(pt.x(), pt.y(), 1, 1), editable=False, markdown=True,
+                model_title=model, pending_question=question, place_rect=rect)
+            popup.copy_requested.connect(self._on_copy_item)
+            popup.copy_as_image_requested.connect(self._on_answer_image_copy)
+            popup.copy_text_requested.connect(self._on_copy_selected_text)
+            popup.followup_requested.connect(
+                lambda text, p=popup: self._on_ai_followup(p, text))
+            conversation = [{"role": "user", "content": prompt, "display": question}]
+            self._run_ai_turn(conversation, image_png, popup=popup, model=model)
 
     def _start_cursor_progress(self, prefix: str, icon: str, anchor):
         """진행 칩 — 지속형 토스트(클릭 통과) + 0.5초 간격 경과시간 갱신.
@@ -1348,13 +1415,17 @@ class PasteFlowApp:
         cur = QCursor.pos()
         self._ai_anchor = QRect(cur.x(), cur.y(), 1, 1)
 
-        dialog = AiQueryDialog("", self.panel)
+        compare_models = self._resolve_compare_models()
+        dialog = AiQueryDialog("", self.panel, compare_models=compare_models)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         question = dialog.get_question()
         if not question:
             return
-        self._start_ai_worker(question, "")
+        if dialog.is_compare():
+            self._start_compare_query(question, "", None, compare_models)
+        else:
+            self._start_ai_worker(question, "")
 
     def _on_pin_hotkey(self):
         """화면에 핀 단축키(기본 Alt+F3) — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다.
@@ -1753,23 +1824,32 @@ class PasteFlowApp:
             except Exception as e:
                 ToastNotification(f"이미지 변환 실패 — {e}", icon="🤖")
                 return
-            dialog = AiQueryDialog("", self.panel, context_image=image_png)
+            compare_models = self._resolve_compare_models()
+            dialog = AiQueryDialog("", self.panel, context_image=image_png,
+                                   compare_models=compare_models)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             question = dialog.get_question()
             if not question:
                 return
-            self._start_ai_worker(question, "", image_png=image_png)
+            if dialog.is_compare():
+                self._start_compare_query(question, "", image_png, compare_models)
+            else:
+                self._start_ai_worker(question, "", image_png=image_png)
             return
 
         context_text = item.text_content or item.preview_text or ""
-        dialog = AiQueryDialog(context_text, self.panel)
+        compare_models = self._resolve_compare_models()
+        dialog = AiQueryDialog(context_text, self.panel, compare_models=compare_models)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         question = dialog.get_question()
         if not question:
             return
-        self._start_ai_worker(question, context_text)
+        if dialog.is_compare():
+            self._start_compare_query(question, context_text, None, compare_models)
+        else:
+            self._start_ai_worker(question, context_text)
 
     def _on_ai_turn_done(self, payload: dict):
         """AI 대화 턴 결과 → 답변창 생성(첫 턴) 또는 새 턴 탭 추가(후속 턴).
@@ -1783,14 +1863,14 @@ class PasteFlowApp:
         answer = payload["answer"]
         conversation = payload["conversation"]
         image_png = payload["image_png"]
-        self._ai_inflight_popup = None
 
         if popup is None:
             self._stop_cursor_progress()  # 첫 턴 진행 칩 종료 (답변창이 같은 정중앙에 펼쳐짐)
 
         if not answer.strip():
             if popup is not None:
-                popup.cancel_pending()  # 후속 턴: 펜딩 탭 제거·입력칸 재활성화
+                # 비교 창(단일 펜딩 턴)은 "답 없음"을 그 창에 남기고, 후속 턴은 펜딩 탭만 제거.
+                popup.fail_pending("답변이 비어 있어요.")
             else:
                 ToastNotification("답변을 받지 못했습니다", icon="🤖")
             return
@@ -1822,6 +1902,8 @@ class PasteFlowApp:
         # 대화 상태를 답변창에 보관 — 다음 후속 질문에 사용(이미지는 첫 턴에만 실림).
         popup._conversation = conversation
         popup._image_png = image_png
+        # 이 창이 후속 질문 시 쓸 모델(비교 창은 자기 모델로 이어감, 단일 창은 None=기본).
+        popup._ai_model = payload.get("model")
 
     def _on_ai_followup(self, popup, text: str):
         """답변창 하단 입력칸 Enter → 이전 문답을 인지한 상태로 후속 질의.
@@ -1833,8 +1915,9 @@ class PasteFlowApp:
         if conversation is None:
             return
         image_png = getattr(popup, "_image_png", None)
+        model = getattr(popup, "_ai_model", None)  # 비교 창은 자기 모델로 이어감
         new_conv = conversation + [{"role": "user", "content": text, "display": text}]
-        self._run_ai_turn(new_conv, image_png, popup=popup)
+        self._run_ai_turn(new_conv, image_png, popup=popup, model=model)
 
     def _on_copy_selected_text(self, text: str):
         """AI 답변창 '선택→복사' 모드 — 드래그로 선택한 부분 텍스트를 클립보드+히스토리에 저장.
@@ -1877,22 +1960,28 @@ class PasteFlowApp:
         self._persist_clipboard_item(item)
         ToastNotification("답변을 이미지로 복사 + 히스토리 저장됨", icon="🖼")
 
-    def _on_ai_error(self, msg: str):
+    def _on_ai_error(self, payload):
         from pasteflow.ui.toast import ToastNotification
 
-        self._stop_cursor_progress()  # 진행 칩 종료
-        # 후속 질의 실패면 답변창 입력칸을 다시 열어 재시도 가능하게 한다.
-        popup = self._ai_inflight_popup
-        self._ai_inflight_popup = None
-        if popup is not None:
-            popup.cancel_pending()  # 펜딩 탭 제거·직전 탭 복귀·입력칸 재활성화
+        popup = payload.get("popup") if isinstance(payload, dict) else None
+        msg = payload.get("msg", "") if isinstance(payload, dict) else str(payload)
 
-        # API 키 미설정 → 토스트 후 설정 다이얼로그 자동 열기 (OCR 에러 처리와 동일 패턴)
+        if popup is None:
+            # 단일 첫 턴 — 진행 칩을 닫고 토스트로 알린다(답변창이 아직 없음).
+            self._stop_cursor_progress()
+        else:
+            # 후속 턴·비교 창 — 그 창 안에 오류를 표시(비교 창은 어느 모델이 실패했는지 그대로 보임).
+            popup.fail_pending(msg)
+
+        # API 키 미설정 → 설정 다이얼로그 자동 열기 (OCR 에러 처리와 동일 패턴, 재진입 가드가
+        # 여러 창의 동시 실패에서 중복 오픈을 막는다).
         if "API 키" in msg:
             ToastNotification("API 키를 설정해 주세요", icon="🤖")
             QTimer.singleShot(300, self._open_settings)
             return
-        ToastNotification(f"AI 질의 실패 — {msg}", icon="🤖")
+        # 단일 첫 턴만 토스트(비교/후속은 창 안에 표시되므로 N개 토스트로 도배하지 않는다).
+        if popup is None:
+            ToastNotification(f"AI 질의 실패 — {msg}", icon="🤖")
 
     def _on_clear_history(self):
         self.db.clear_history()
@@ -2090,6 +2179,11 @@ class PasteFlowApp:
             # OCR 전용 모델 슬롯 (AI 질의 모델과 분리 — 비전 가능 모델만 고를 수 있다)
             "ocr_model_official": self.db.get_setting("ocr_model_official", ""),
             "ocr_model_gateway": self.db.get_setting("ocr_model_gateway", ""),
+            # 여러 모델 비교(선택) — 기본 AI 모델에 더해 동시에 물어볼 모델 2개(backend별)
+            "ai_compare_model_a_official": self.db.get_setting("ai_compare_model_a_official", ""),
+            "ai_compare_model_a_gateway": self.db.get_setting("ai_compare_model_a_gateway", ""),
+            "ai_compare_model_b_official": self.db.get_setting("ai_compare_model_b_official", ""),
+            "ai_compare_model_b_gateway": self.db.get_setting("ai_compare_model_b_gateway", ""),
             "ai_system_prompt": self.db.get_setting("ai_system_prompt", ""),
             "notify_on_copy": self.db.get_setting("notify_on_copy", "1"),
             "queue_idle_reset_sec": self.db.get_setting("queue_idle_reset_sec", "10"),
