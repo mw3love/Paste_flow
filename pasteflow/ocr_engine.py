@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import re
 from typing import Callable, Literal, NamedTuple, Optional
 
 from PIL import Image
@@ -22,6 +23,28 @@ EngineKind = Literal["winrt", "gemini"]
 # 게이트웨이 AI 질의에서 도구(웹 검색) 왕복을 허용하는 최대 횟수. 모델이 검색어를 바꿔
 # 재검색하는 것까지는 허용하되, 무한 루프(계속 검색만 하고 답을 안 함)는 막는다.
 _MAX_TOOL_ROUNDS = 3
+
+# 일부 게이트웨이 모델(claude 계열)이 **간헐적으로** 도구 호출을 구조화 `tool_calls` 필드가
+# 아니라 본문 텍스트에 Anthropic식 XML(`<function_calls><invoke name="web_search">…`)로 뱉는다
+# (2026-07-11 실측 ~20-30% 빈도, max_tokens·프롬프트·동시성과 무관한 게이트웨이측 비결정성).
+# 그러면 우리 도구-왕복 루프가 못 잡아 ① 실제 검색이 안 되고 ② raw XML이 사용자에게 그대로
+# 보인다. 아래 정규식으로 텍스트로 샌 web_search 호출을 감지·파싱해, 실제로 검색한 뒤 그
+# 자료로 도구 없이 한 번 더 답하게 해 검색을 살리고 XML을 없앤다(_ask_openai_compat).
+_LEAKED_TOOL_MARKER_RE = re.compile(r'<invoke\s+name=["\']web_search["\']', re.IGNORECASE)
+_LEAKED_QUERY_RE = re.compile(
+    r'<parameter\s+name=["\']query["\']\s*>(.*?)</parameter>', re.IGNORECASE | re.DOTALL)
+_LEAKED_BLOCK_RE = re.compile(r'<function_calls>.*?</function_calls>', re.IGNORECASE | re.DOTALL)
+
+
+def _extract_leaked_search_queries(content: str) -> list[str]:
+    """본문 텍스트로 새어 나온 web_search 도구 호출에서 검색어들을 뽑는다(없으면 빈 목록).
+
+    `<invoke name="web_search">` 마커가 있을 때만 검색어를 추출해, 사용자가 우연히 그 태그를
+    문자로 언급한 경우의 오탐 비용(불필요한 검색 1회)을 최소화한다.
+    """
+    if not content or not _LEAKED_TOOL_MARKER_RE.search(content):
+        return []
+    return [q.strip() for q in _LEAKED_QUERY_RE.findall(content) if q.strip()]
 
 
 def _normalize_base_url(base_url: str) -> str:
@@ -802,8 +825,44 @@ class OcrEngine:
             # 때문이다 — SDK 객체에는 그 필드가 타입으로 노출되지 않는다.
             raw = message.model_dump()
             tool_calls = raw.get("tool_calls") or []
+            last_round = (_round == _MAX_TOOL_ROUNDS - 1)
             if not tool_calls:
-                return (message.content or "").strip()
+                content = (message.content or "").strip()
+                # 구조화 tool_calls는 없지만 본문에 web_search 호출이 XML 텍스트로 샜는지
+                # 검사한다(위 _extract_leaked_search_queries 주석 참조 — claude 계열 간헐
+                # 증상). 샜으면 실제로 검색해 그 자료로 도구 없이 한 번 더 답하게 한다:
+                # ① 검색을 살리고 ② raw XML을 사용자에게 안 보이게 한다.
+                #
+                # 게이트는 use_tools(런타임 플래그)가 아니라 tools_enabled(원래 검색이
+                # 허용됐는가)로 건다 — 동시 부하로 첫 도구-호출이 예외를 내면 위에서
+                # use_tools=False로 떨어뜨리고(도구 미지원 모델 대비) 도구 없이 재시도하는데,
+                # 그 경로에서 claude가 XML을 뱉는 게 실측된 누출 케이스다(2026-07-11). use_tools로
+                # 게이트하면 바로 그 케이스를 놓친다. 반대로 tools_enabled=False(공유 검색·OCR)면
+                # 자료가 이미 주입돼 있어 여기서 또 검색하면 공유가 깨지므로 살리지 않는다.
+                # 마지막 라운드면 무한 방지를 위해 그대로 반환한다.
+                leaked = _extract_leaked_search_queries(content) if tools_enabled else []
+                if not leaked or last_round:
+                    return content
+                facts = []
+                for q in leaked:
+                    if self.on_tool_progress:
+                        self.on_tool_progress(q)
+                    facts.append(web_search.search(
+                        q, api_key=self.api_key, base_url=self.base_url))
+                    if self.on_tool_progress:
+                        self.on_tool_progress("")
+                # 모델의 XML 의도는 지운 채(재누출 유도 방지) 어시스턴트 턴을 남기고, 검색
+                # 자료+깔끔히 답하라는 지시를 user 턴으로 얹어 **도구 없이** 재질의한다.
+                cleaned = _LEAKED_BLOCK_RE.sub("", content).strip() or "검색해 볼게요."
+                out.append({"role": "assistant", "content": cleaned})
+                out.append({"role": "user", "content": (
+                    "[검색 결과]\n" + "\n\n".join(facts) + "\n\n"
+                    "위 검색 결과를 근거로 원래 질문에 답하세요. 검색 도구 호출 태그"
+                    "(<function_calls>, <invoke> 등)는 절대 출력하지 말고 자연스러운 문장과 "
+                    "마크다운으로만 답하세요. 자료에 없는 수치는 지어내지 마세요."
+                )})
+                resp = _call(out, with_tools=False)
+                continue
 
             out.append(_assistant_tool_turn(raw))
             for tc in tool_calls:
@@ -812,7 +871,6 @@ class OcrEngine:
             # 검색 결과를 실어 재질의. **마지막 라운드는 도구를 떼서** "지금까지 찾은 걸로
             # 답하라"고 강제한다 — 도구를 붙인 채로 두면 모델이 또 검색을 요청해 영영 답이
             # 안 나올 수 있다.
-            last_round = (_round == _MAX_TOOL_ROUNDS - 1)
             resp = _call(out, with_tools=use_tools and not last_round)
 
         return (resp.choices[0].message.content or "").strip()

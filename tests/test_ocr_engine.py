@@ -589,6 +589,149 @@ class TestWebSearchToolLoop:
         assert system["role"] == "system"
         assert f"{today.year}년 {today.month}월 {today.day}일" in system["content"]
 
+    def test_검색을_붙이면_시스템_프롬프트에_검색_지시가_박힌다(self, monkeypatch):
+        # 페르소나의 '정직' 원칙이 도구-왕복 모델의 검색을 억제하던 것을 상쇄(2026-07-11 실측:
+        # 게이트웨이 claude가 날씨 질문에 검색 없이 포기). 도구가 붙는 경로에서만 얹는다.
+        from pasteflow.ocr_engine import OcrEngine
+
+        sent = _install_fake_openai(monkeypatch, [_fake_response(_fake_message(content="답"))])
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        engine._ask_openai_compat([{"role": "user", "content": "q"}], "k", "https://gw",
+                                  "claude-sonnet-5", tools_enabled=True)
+        assert "web_search" in sent[0]["messages"][0]["content"]
+
+    def test_공유검색_모드는_검색_지시를_안_붙인다(self, monkeypatch):
+        # tools_enabled=False(공유 검색·OCR)면 도구가 없으므로 검색을 종용하면 모순이다.
+        from pasteflow.ocr_engine import OcrEngine
+
+        sent = _install_fake_openai(monkeypatch, [_fake_response(_fake_message(content="답"))])
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        engine._ask_openai_compat([{"role": "user", "content": "q"}], "k", "https://gw",
+                                  "claude-sonnet-5", tools_enabled=False)
+        assert "[웹 검색]" not in sent[0]["messages"][0]["content"]
+
+    def test_XML로_샌_도구호출을_감지해_검색하고_깔끔히_답한다(self, monkeypatch):
+        # 회귀: claude 계열이 간헐적으로 도구 호출을 구조화 tool_calls가 아니라 본문에
+        # <function_calls> XML로 뱉는다. 그러면 검색이 안 되고 raw XML이 사용자에게 보인다.
+        from pasteflow.ocr_engine import OcrEngine
+        from pasteflow import web_search
+
+        called = []
+        monkeypatch.setattr(web_search, "search",
+                            lambda q, **kw: called.append(q) or "[검색] 최고 36도")
+        leaked = ('확인해 드릴게요.\n<function_calls>\n<invoke name="web_search">\n'
+                  '<parameter name="query">서울 내일 날씨</parameter>\n</invoke>\n</function_calls>')
+        sent = _install_fake_openai(monkeypatch, [
+            _fake_response(_fake_message(content=leaked)),          # XML 누출(구조화 tool_calls 없음)
+            _fake_response(_fake_message(content="내일 서울 최고 36도입니다.")),  # 정리된 최종답
+        ])
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        out = engine._ask_openai_compat(
+            [{"role": "user", "content": "내일 서울 날씨?"}], "k", "https://gw", "claude-haiku-4-5")
+
+        assert called == ["서울 내일 날씨"], "XML로 샌 검색어로 실제 검색을 수행해야 한다"
+        assert out == "내일 서울 최고 36도입니다.", "정리된 최종답을 반환한다(XML 미노출)"
+        assert len(sent) == 2, "검색 후 도구 없이 한 번 더 답한다"
+        assert "tools" not in sent[1], "재답변은 도구를 떼 재누출을 막는다"
+        injected = [m for m in sent[1]["messages"] if m.get("role") == "user"][-1]["content"]
+        assert "[검색 결과]" in injected and "최고 36도" in injected
+
+    def test_도구가_떨어진_뒤_XML로_새도_살려서_검색한다(self, monkeypatch):
+        # 실측 누출 케이스: 동시 부하로 첫 도구-호출이 예외→도구를 떼고 재시도하는데, 그
+        # 도구 없는 재시도에서 claude가 <function_calls> XML을 뱉는다. use_tools로 게이트하면
+        # 이 경로를 놓친다 → tools_enabled로 게이트해 여기서도 살려야 한다.
+        from pasteflow.ocr_engine import OcrEngine
+        from pasteflow import web_search
+
+        called = []
+        monkeypatch.setattr(web_search, "search",
+                            lambda q, **kw: called.append(q) or "[검색] 최고 36도")
+        leaked = '<function_calls><invoke name="web_search"><parameter name="query">서울 날씨</parameter></invoke></function_calls>'
+
+        sent = []
+
+        def _create(**kwargs):
+            sent.append(kwargs)
+            if len(sent) == 1:            # 첫 호출(도구 붙음) → 예외 → 도구 떼고 재시도
+                assert "tools" in kwargs
+                raise RuntimeError("503 upstream busy")
+            if len(sent) == 2:            # 도구 없는 재시도 → XML 누출
+                return _fake_response(_fake_message(content=leaked))
+            return _fake_response(_fake_message(content="내일 서울 최고 36도입니다."))  # 살린 답
+
+        client = MagicMock()
+        client.chat.completions.create = _create
+        fake = types.ModuleType("openai")
+        fake.OpenAI = MagicMock(return_value=client)
+        monkeypatch.setitem(sys.modules, "openai", fake)
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        out = engine._ask_openai_compat(
+            [{"role": "user", "content": "내일 서울 날씨?"}], "k", "https://gw",
+            "claude-haiku-4-5", tools_enabled=True)
+
+        assert called == ["서울 날씨"], "도구가 떨어진 뒤 샌 XML도 실제 검색으로 살려야 한다"
+        assert out == "내일 서울 최고 36도입니다."
+        assert "tools" not in sent[-1], "살린 재답변은 도구를 떼 재누출을 막는다"
+
+    def test_공유검색_모드는_XML이_새도_추가검색하지_않는다(self, monkeypatch):
+        # tools_enabled=False(공유 검색)면 자료가 이미 주입돼 있으므로 여기서 또 검색하면
+        # 세 창의 자료가 갈려 공유가 깨진다 → 살리지 않고 그대로 둔다(설계 보존).
+        from pasteflow.ocr_engine import OcrEngine
+        from pasteflow import web_search
+
+        called = []
+        monkeypatch.setattr(web_search, "search", lambda q, **kw: called.append(q) or "x")
+        leaked = '<invoke name="web_search"><parameter name="query">q</parameter></invoke>'
+        sent = _install_fake_openai(monkeypatch, [_fake_response(_fake_message(content=leaked))])
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        out = engine._ask_openai_compat([{"role": "user", "content": "q"}], "k", "https://gw",
+                                        "claude-haiku-4-5", tools_enabled=False)
+        assert out == leaked and called == [], "공유 검색 모드에서는 살리기를 안 한다"
+        assert len(sent) == 1
+
+    def test_XML_누출이어도_마지막_라운드면_그대로_반환한다(self, monkeypatch):
+        # 무한 방지: 이미 여러 라운드를 돈 뒤라면 파싱-재검색을 더 걸지 않는다.
+        from pasteflow.ocr_engine import OcrEngine
+        from pasteflow import web_search
+        from pasteflow.ocr_engine import _MAX_TOOL_ROUNDS
+
+        called = []
+        monkeypatch.setattr(web_search, "search", lambda q, **kw: called.append(q) or "결과")
+        leaked = '<function_calls><invoke name="web_search"><parameter name="query">x</parameter></invoke></function_calls>'
+        # 앞선 라운드들은 정상 tool_calls로 채워 마지막 라운드까지 도달시키고, 마지막에 XML 누출.
+        responses = [_fake_response(_fake_message(tool_calls=[_tool_call(call_id=f"c{i}", query="pre")]))
+                     for i in range(_MAX_TOOL_ROUNDS - 1)]
+        responses.append(_fake_response(_fake_message(content=leaked)))
+        _install_fake_openai(monkeypatch, responses)
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        out = engine._ask_openai_compat([{"role": "user", "content": "q"}], "k", "https://gw", "claude-haiku-4-5")
+        assert out == leaked, "마지막 라운드면 파싱하지 않고 그대로 반환(무한 방지)"
+        # 앞 라운드의 정상 검색만 있고, 마지막 누출 라운드에서는 추가 검색이 없어야 한다.
+        assert called == ["pre"] * (_MAX_TOOL_ROUNDS - 1), "누출 라운드에서는 추가 검색을 안 한다"
+
+
+class TestExtractLeakedSearchQueries:
+    def test_invoke_마커가_있을_때만_검색어를_뽑는다(self):
+        from pasteflow.ocr_engine import _extract_leaked_search_queries
+        leaked = ('<function_calls><invoke name="web_search">'
+                  '<parameter name="query">코스피 지수</parameter></invoke></function_calls>')
+        assert _extract_leaked_search_queries(leaked) == ["코스피 지수"]
+
+    def test_평범한_답에는_빈_목록(self):
+        from pasteflow.ocr_engine import _extract_leaked_search_queries
+        assert _extract_leaked_search_queries("내일은 맑고 최고 30도입니다.") == []
+        assert _extract_leaked_search_queries("") == []
+
+    def test_검색어가_여러_개면_모두_뽑는다(self):
+        from pasteflow.ocr_engine import _extract_leaked_search_queries
+        leaked = ('<invoke name="web_search"><parameter name="query">A</parameter></invoke>'
+                  '<invoke name="web_search"><parameter name="query">B</parameter></invoke>')
+        assert _extract_leaked_search_queries(leaked) == ["A", "B"]
+
 
 class TestSharedSearchNoTools:
     """여러 모델 비교의 '공유 검색' 모드 — tools_enabled=False면 세 경로 모두 도구를 뗀다.
