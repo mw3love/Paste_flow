@@ -661,6 +661,7 @@ class _SignalBridge(QObject):
     ask_ai             = pyqtSignal()        # 훅 스레드 → 메인: AI 자유질문 입력창 띄우기
     ai_turn_done       = pyqtSignal(object)  # AI 워커 스레드 → 메인: 대화 턴 결과 dict(팝업·답변·히스토리)
     ai_error           = pyqtSignal(object)  # AI 워커 스레드 → 메인: 에러 dict({popup, msg})
+    ai_searching       = pyqtSignal(str)     # AI 워커 스레드 → 메인: 웹 검색 시작(검색어) / 종료("")
 
 
 class PasteFlowApp:
@@ -698,6 +699,7 @@ class PasteFlowApp:
         self._bridge.ask_ai.connect(self._on_ask_ai_hotkey)
         self._bridge.ai_turn_done.connect(self._on_ai_turn_done)
         self._bridge.ai_error.connect(self._on_ai_error)
+        self._bridge.ai_searching.connect(self._on_ai_searching)
 
         self._saved_panel_geometry = None
         self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
@@ -1041,6 +1043,10 @@ class PasteFlowApp:
                 system_prompt = self.db.get_setting("ai_system_prompt", "")
                 engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url,
                                    model=model_id, system_prompt=system_prompt)
+                # 웹 검색이 끼면 응답이 2~3배 느려진다(LLM 왕복 2회 + 검색 2~4초).
+                # "멈춘 게 아니라 검색 중"임을 진행 칩에 보여준다(첫 턴 한정 — 후속·비교
+                # 창은 팝업 자체가 '생각 중'을 표시하므로 슬롯이 무시한다).
+                engine.on_tool_progress = self._bridge.ai_searching.emit
                 answer = engine.ask_messages(messages, image_png=image_png)
                 if engine.last_fallback_from and engine.last_used_model:
                     self._bridge.ocr_fallback.emit(engine.last_fallback_from, engine.last_used_model)
@@ -1134,6 +1140,17 @@ class PasteFlowApp:
         self._progress_timer.setInterval(500)
         self._progress_timer.timeout.connect(self._tick_cursor_progress)
         self._progress_timer.start()
+
+    def _on_ai_searching(self, query: str):
+        """AI가 웹 검색을 시작(query)/종료("")할 때 진행 칩 문구를 바꾼다.
+
+        진행 칩이 떠 있을 때(= 첫 턴 단일 질의)만 유효하다. 후속 질문·비교 창은 칩 대신
+        팝업의 '생각 중' 탭이 진행을 표시하므로 여기서는 조용히 무시한다.
+        """
+        if getattr(self, "_progress_toast", None) is None:
+            return
+        self._progress_prefix = f"웹 검색: {query[:18]}…" if query else "AI 생각 중…"
+        self._tick_cursor_progress()  # 다음 0.5초 틱을 기다리지 않고 즉시 반영
 
     def _tick_cursor_progress(self):
         import time

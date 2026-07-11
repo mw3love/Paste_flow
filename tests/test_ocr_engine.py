@@ -370,3 +370,238 @@ class TestCallWithFallback:
             engine._call_with_fallback("gemini-2.5-flash", call=_call)
         assert engine.last_fallback_from is None
 
+
+# ── 웹 검색 도구 왕복 (게이트웨이 chat.completions 경로) ────────────────────
+# 게이트웨이는 제공사 내장 검색을 chat.completions로 실어 주지 않으므로, 모델이 요청하면
+# 우리가 직접 검색해 결과를 되돌려준다. 여기서 지키는 계약:
+#   1) tool_calls가 오면 검색을 실행하고 재호출해 최종 답을 얻는다
+#   2) gemini-3의 thought_signature를 에코백한다 (없으면 게이트웨이가 400)
+#   3) 모델이 검색만 반복해도 _MAX_TOOL_ROUNDS에서 끊고 답을 낸다
+
+def _fake_message(content=None, tool_calls=None):
+    """openai SDK의 message 객체 흉내 — .content와 .model_dump()만 쓴다."""
+    msg = MagicMock()
+    msg.content = content
+    msg.model_dump.return_value = {"content": content, "tool_calls": tool_calls or []}
+    return msg
+
+
+def _fake_response(message):
+    resp = MagicMock()
+    resp.choices = [MagicMock(message=message)]
+    return resp
+
+
+def _tool_call(call_id="c1", query="내일 서울 날씨", extra_content=None):
+    call = {"id": call_id, "type": "function",
+            "function": {"name": "web_search",
+                         "arguments": '{"query": "%s"}' % query}}
+    if extra_content:
+        call["extra_content"] = extra_content
+    return call
+
+
+def _install_fake_openai(monkeypatch, responses):
+    """가짜 openai 모듈을 심고, chat.completions.create가 responses를 차례로 뱉게 한다.
+    호출 시 받은 kwargs를 기록해 반환한다(무엇을 보냈는지 검증용).
+    """
+    sent = []
+
+    def _create(**kwargs):
+        sent.append(kwargs)
+        return responses[len(sent) - 1]
+
+    client = MagicMock()
+    client.chat.completions.create = _create
+    fake = types.ModuleType("openai")
+    fake.OpenAI = MagicMock(return_value=client)
+    monkeypatch.setitem(sys.modules, "openai", fake)
+    return sent
+
+
+class TestWebSearchToolLoop:
+    def test_tool_call이_오면_검색후_재호출해_최종답을_낸다(self, monkeypatch):
+        from pasteflow.ocr_engine import OcrEngine
+        from pasteflow import web_search
+
+        monkeypatch.setattr(web_search, "search",
+                            lambda q, **kw: f"[검색결과] {q}: 비, 29도")
+        sent = _install_fake_openai(monkeypatch, [
+            _fake_response(_fake_message(tool_calls=[_tool_call()])),
+            _fake_response(_fake_message(content="내일 서울은 비, 최고 29도입니다.")),
+        ])
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw/v1/gateway")
+        out = engine._ask_openai_compat(
+            [{"role": "user", "content": "내일 서울 날씨?"}], "k", "https://gw/v1/gateway", "gemini-3.1-flash-lite")
+
+        assert out == "내일 서울은 비, 최고 29도입니다."
+        assert len(sent) == 2, "검색 후 재호출이 일어나야 한다"
+        # 2번째 호출에 검색 결과가 tool 메시지로 실려야 모델이 그걸 읽고 답할 수 있다
+        tool_msgs = [m for m in sent[1]["messages"] if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+        assert "비, 29도" in tool_msgs[0]["content"]
+
+    def test_gemini3의_thought_signature를_에코백한다(self, monkeypatch):
+        # 빠뜨리면 게이트웨이가 400 "missing a thought_signature"로 대화를 끊는다.
+        from pasteflow.ocr_engine import OcrEngine
+        from pasteflow import web_search
+
+        monkeypatch.setattr(web_search, "search", lambda q, **kw: "결과")
+        sig = {"google": {"thought_signature": "SIG-ABC"}}
+        sent = _install_fake_openai(monkeypatch, [
+            _fake_response(_fake_message(tool_calls=[_tool_call(extra_content=sig)])),
+            _fake_response(_fake_message(content="답변")),
+        ])
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        engine._ask_openai_compat([{"role": "user", "content": "q"}], "k", "https://gw", "gemini-3.1-flash-lite")
+
+        assistant = [m for m in sent[1]["messages"] if m.get("role") == "assistant"][0]
+        assert assistant["tool_calls"][0]["extra_content"] == sig
+
+    def test_서명이_없는_모델은_그대로_통과한다(self, monkeypatch):
+        # gpt·claude·gemini-2.5는 서명을 안 보낸다 — 없는 키를 만들어 넣으면 안 된다.
+        from pasteflow.ocr_engine import OcrEngine
+        from pasteflow import web_search
+
+        monkeypatch.setattr(web_search, "search", lambda q, **kw: "결과")
+        sent = _install_fake_openai(monkeypatch, [
+            _fake_response(_fake_message(tool_calls=[_tool_call()])),
+            _fake_response(_fake_message(content="답변")),
+        ])
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        engine._ask_openai_compat([{"role": "user", "content": "q"}], "k", "https://gw", "claude-sonnet-5")
+
+        assistant = [m for m in sent[1]["messages"] if m.get("role") == "assistant"][0]
+        assert "extra_content" not in assistant["tool_calls"][0]
+
+    def test_검색을_안_하면_한_번만_호출한다(self, monkeypatch):
+        # 평범한 질문(코드·번역 등)에 검색이 돌면 지연·비용만 늘어난다.
+        from pasteflow.ocr_engine import OcrEngine
+        from pasteflow import web_search
+
+        called = []
+        monkeypatch.setattr(web_search, "search", lambda q, **kw: called.append(q) or "x")
+        sent = _install_fake_openai(monkeypatch, [
+            _fake_response(_fake_message(content="1+1은 2입니다.")),
+        ])
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        out = engine._ask_openai_compat([{"role": "user", "content": "1+1?"}], "k", "https://gw", "gpt-5-mini")
+
+        assert out == "1+1은 2입니다."
+        assert len(sent) == 1
+        assert called == [], "모델이 요청하지 않으면 검색하지 않는다"
+
+    def test_계속_검색만_요청해도_최대_라운드에서_끊고_답을_낸다(self, monkeypatch):
+        # 무한 검색 루프 방지. 마지막 호출은 도구를 떼고 "지금까지 찾은 걸로 답하라"고 강제.
+        from pasteflow.ocr_engine import OcrEngine
+        from pasteflow import web_search
+        from pasteflow.ocr_engine import _MAX_TOOL_ROUNDS
+
+        monkeypatch.setattr(web_search, "search", lambda q, **kw: "결과")
+        responses = [_fake_response(_fake_message(tool_calls=[_tool_call(call_id=f"c{i}")]))
+                     for i in range(_MAX_TOOL_ROUNDS)]
+        responses.append(_fake_response(_fake_message(content="찾은 정보로 답합니다.")))
+        sent = _install_fake_openai(monkeypatch, responses)
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        out = engine._ask_openai_compat([{"role": "user", "content": "q"}], "k", "https://gw", "gemini-3.1-flash-lite")
+
+        assert out == "찾은 정보로 답합니다."
+        assert len(sent) == _MAX_TOOL_ROUNDS + 1
+        assert "tools" not in sent[-1], "마지막 호출은 도구를 떼야 또 검색을 요청하지 않는다"
+
+    def test_검색_진행_콜백이_시작과_종료를_알린다(self, monkeypatch):
+        from pasteflow.ocr_engine import OcrEngine
+        from pasteflow import web_search
+
+        monkeypatch.setattr(web_search, "search", lambda q, **kw: "결과")
+        _install_fake_openai(monkeypatch, [
+            _fake_response(_fake_message(tool_calls=[_tool_call(query="코스피")])),
+            _fake_response(_fake_message(content="답변")),
+        ])
+
+        seen = []
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        engine.on_tool_progress = seen.append
+        engine._ask_openai_compat([{"role": "user", "content": "q"}], "k", "https://gw", "gemini-3.1-flash-lite")
+
+        assert seen == ["코스피", ""], "검색 시작(검색어) → 종료(빈 문자열)"
+
+    def test_도구를_못_받는_모델은_도구를_떼고_다시_물어_답을_낸다(self, monkeypatch):
+        # 실측 회귀: meta-llama/Llama-4-Maverick은 tools를 붙이면 405로 죽는다. 도구 없이는
+        # 멀쩡히 답하던 모델이므로, 도구를 무조건 붙이면 예전 동작이 통째로 깨진다.
+        from pasteflow.ocr_engine import OcrEngine
+
+        sent = []
+
+        def _create(**kwargs):
+            sent.append(kwargs)
+            if "tools" in kwargs:
+                raise RuntimeError("Error code: 405 - tools not supported")
+            return _fake_response(_fake_message(content="2"))
+
+        client = MagicMock()
+        client.chat.completions.create = _create
+        fake = types.ModuleType("openai")
+        fake.OpenAI = MagicMock(return_value=client)
+        monkeypatch.setitem(sys.modules, "openai", fake)
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        out = engine._ask_openai_compat(
+            [{"role": "user", "content": "1+1?"}], "k", "https://gw",
+            "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8")
+
+        assert out == "2", "도구를 떼고 재시도해 답을 내야 한다"
+        assert "tools" in sent[0] and "tools" not in sent[1]
+
+    def test_진짜_오류는_도구를_떼도_그대로_올라간다(self, monkeypatch):
+        # 도구 재시도가 진짜 오류(키 불량 등)를 삼켜 버리면 사용자가 원인을 못 본다.
+        from pasteflow.ocr_engine import OcrEngine
+
+        def _create(**kwargs):
+            raise RuntimeError("401 invalid api key")
+
+        client = MagicMock()
+        client.chat.completions.create = _create
+        fake = types.ModuleType("openai")
+        fake.OpenAI = MagicMock(return_value=client)
+        monkeypatch.setitem(sys.modules, "openai", fake)
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        with pytest.raises(RuntimeError, match="invalid api key"):
+            engine._ask_openai_compat([{"role": "user", "content": "q"}], "k", "https://gw", "claude-sonnet-5")
+
+    def test_시스템_프롬프트에_오늘_날짜가_박힌다(self, monkeypatch):
+        # 날짜가 없으면 모델이 검색 결과를 받고도 "'내일'이 언제인지 모르겠다"고 답한다.
+        import datetime as dt
+        from pasteflow.ocr_engine import OcrEngine
+
+        sent = _install_fake_openai(monkeypatch, [_fake_response(_fake_message(content="답"))])
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        engine._ask_openai_compat([{"role": "user", "content": "q"}], "k", "https://gw", "gpt-5-mini")
+
+        system = sent[0]["messages"][0]
+        today = dt.date.today()
+        assert system["role"] == "system"
+        assert f"{today.year}년 {today.month}월 {today.day}일" in system["content"]
+
+
+class TestResponsesApiRouting:
+    """GPT는 Responses API(내장 웹 검색)로, 나머지는 chat.completions(DDG)로 간다."""
+
+    def test_gpt_계열만_responses를_탄다(self):
+        from pasteflow.ocr_engine import supports_responses_api
+        assert supports_responses_api("gpt-5-mini")
+        assert supports_responses_api("gpt-5.5")
+        assert not supports_responses_api("claude-sonnet-5")
+        assert not supports_responses_api("gemini-3.1-flash-lite")
+
+    def test_이름만_gpt인_서드파티_모델은_제외한다(self):
+        # accounts/fireworks/models/gpt-oss-120b 는 OpenAI 모델이 아니라 Responses를 못 탄다.
+        from pasteflow.ocr_engine import supports_responses_api
+        assert not supports_responses_api("accounts/fireworks/models/gpt-oss-120b")
+

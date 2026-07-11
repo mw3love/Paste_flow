@@ -9,11 +9,19 @@
 """
 from __future__ import annotations
 
-from typing import Literal, NamedTuple, Optional
+import datetime as _dt
+import json
+from typing import Callable, Literal, NamedTuple, Optional
 
 from PIL import Image
 
+from . import web_search
+
 EngineKind = Literal["winrt", "gemini"]
+
+# 게이트웨이 AI 질의에서 도구(웹 검색) 왕복을 허용하는 최대 횟수. 모델이 검색어를 바꿔
+# 재검색하는 것까지는 허용하되, 무한 루프(계속 검색만 하고 답을 안 함)는 막는다.
+_MAX_TOOL_ROUNDS = 3
 
 
 def _normalize_base_url(base_url: str) -> str:
@@ -136,6 +144,44 @@ def select_fallback_model(failed_model: str) -> Optional[str]:
         if candidate != failed_model:
             return candidate
     return None
+
+
+def supports_responses_api(model: str) -> bool:
+    """이 모델을 게이트웨이의 Responses API 경로로 보낼 수 있는가 (= 내장 웹 검색 사용 가능).
+
+    Responses API(`/v1/gateway/responses`)는 **OpenAI 규격**이라 GPT 모델만 받는다 —
+    claude·gemini를 넣으면 게이트웨이가 400으로 거부한다(2026-07-11 실호출 확인).
+    대신 GPT는 이 경로에서 OpenAI **내장** web_search 도구가 그대로 중계돼, 검색 실행과
+    본문 독해·인용까지 서버가 다 해준다(DuckDuckGo 스니펫보다 품질이 훨씬 높다).
+
+    `/`가 든 이름을 제외하는 이유: `accounts/fireworks/models/gpt-oss-120b`처럼 이름만
+    gpt로 시작하는 서드파티 모델은 OpenAI 모델이 아니라 Responses를 못 탄다.
+    """
+    m = (model or "").lower()
+    return m.startswith("gpt-") and "/" not in m
+
+
+def _assistant_tool_turn(raw_message: dict) -> dict:
+    """도구를 요청한 assistant 턴을, 다음 요청에 되돌려 보낼 형태로 재구성한다.
+
+    ⚠ **`thought_signature`를 반드시 에코백해야 한다.** Gemini 3 계열은 도구를 호출할 때
+    "내가 왜 이 도구를 부르는지"에 대한 서명(`extra_content.google.thought_signature`)을
+    응답에 실어 보내고, 다음 요청의 그 assistant 턴에 **그대로 되돌려 주길 요구**한다.
+    빠뜨리면 400 "Function call is missing a thought_signature"로 대화가 끊긴다
+    (2026-07-11 gemini-3.1-flash-lite에서 재현 → 에코백으로 해결 확인).
+    gpt·claude·gemini-2.5는 이 필드를 안 보내므로 그냥 없는 채로 지나간다.
+    """
+    calls = []
+    for tc in raw_message.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        call = {"id": tc.get("id"), "type": "function",
+                "function": {"name": fn.get("name"), "arguments": fn.get("arguments")}}
+        extra = tc.get("extra_content")
+        if extra:
+            call["extra_content"] = extra
+        calls.append(call)
+    return {"role": "assistant", "content": raw_message.get("content"),
+            "tool_calls": calls}
 
 
 # WinRT OcrEngine.MaxImageDimension (4096px 초과 이미지는 에러)
@@ -261,6 +307,11 @@ class OcrEngine:
         # last_fallback_from — 원래 시도했다가 실패한 모델 (폴백 없으면 None)
         self.last_used_model: str = ""
         self.last_fallback_from: Optional[str] = None
+        # 웹 검색이 시작될 때 main이 진행 칩 문구를 바꿀 수 있게 하는 콜백(검색어를 받는다).
+        # 검색이 끼면 응답이 2~3배 느려지므로(LLM 왕복 2회 + 검색 2~4초) "멈춘 게 아니라
+        # 검색 중"임을 보여줘야 한다. 워커 스레드에서 호출되므로 main은 시그널로 넘긴다.
+        # GPT 내장 검색(Responses) 경로는 서버가 검색을 수행해 시점을 알 수 없어 미호출.
+        self.on_tool_progress: Optional[Callable[[str], None]] = None
 
     def recognize(self, pil_image: Image.Image) -> str:
         """동기 OCR — 호출자가 워커 스레드에서 실행해야 UI 블로킹이 없다."""
@@ -544,6 +595,24 @@ class OcrEngine:
 
         if self.base_url:
             model_name = self.model or "gemini-3.1-flash-lite"
+            # 게이트웨이는 제공사 내장 검색을 chat.completions로는 실어 주지 않는다. 그래서
+            # 웹 검색을 두 갈래로 얻는다 (2026-07-11 실호출로 각각 검증):
+            #   GPT 계열 → Responses API의 **내장** web_search (서버가 검색·독해·인용까지)
+            #   그 외    → chat.completions + 우리가 만든 web_search 도구(DuckDuckGo)
+            if supports_responses_api(model_name):
+                try:
+                    return self._call_with_fallback(
+                        model_name,
+                        call=lambda m: self._ask_openai_responses(
+                            messages, api_key, self.base_url, m, image_png),
+                    )
+                except Exception:
+                    # 게이트웨이가 이 GPT 모델에 Responses를 안 열어 줄 수도 있다. 그때는
+                    # 아래 공용 경로(chat.completions + DDG)로 내려가 답이라도 낸다. 진짜
+                    # 오류(키 불량 등)라면 그 경로에서도 같은 예외가 나 사용자에게 전달된다.
+                    # 실패한 시도가 남긴 폴백 흔적은 지운다 — 안 지우면 아래 경로가 성공해도
+                    # main이 "A → B로 폴백" 토스트를 잘못 띄운다(그 폴백은 무산된 것이다).
+                    self.last_fallback_from = None
             return self._call_with_fallback(
                 model_name,
                 call=lambda m: self._ask_openai_compat(messages, api_key, self.base_url, m, image_png),
@@ -571,16 +640,67 @@ class OcrEngine:
                 return self._ask_google_genai(client, messages, _FALLBACK_DEFAULT, image_png)
             raise
 
+    def _system_text(self) -> str:
+        """AI 질의용 시스템 프롬프트 + 오늘 날짜.
+
+        날짜를 박아 주는 이유: 모델은 '오늘'이 며칠인지 모른다(학습 시점에 얼려져 있다).
+        날짜가 없으면 검색 결과를 받아 놓고도 "현재 날짜를 알 수 없어 '내일'이 언제인지
+        모르겠다"고 답한다 — 2026-07-11 gemini-2.5-flash에서 실제로 재현된 증상이다.
+        """
+        base = self.system_prompt or AI_SYSTEM_PROMPT
+        today = _dt.date.today()
+        weekday = "월화수목금토일"[today.weekday()]
+        return (
+            f"{base}\n\n"
+            f"[참고] 오늘은 {today.year}년 {today.month}월 {today.day}일 ({weekday}요일)입니다. "
+            f"'오늘·내일·어제·최근·현재' 같은 표현은 이 날짜를 기준으로 해석하세요."
+        )
+
+    def _run_tool_call(self, tool_call: dict) -> dict:
+        """모델이 요청한 도구를 실제로 실행하고, 그 결과를 tool 메시지로 만들어 돌려준다.
+
+        실패해도 예외를 올리지 않는다 — 도구가 깨졌다고 대화를 끊으면 사용자는 답을 아예
+        못 받는다. 실패 사유를 결과로 넘기면 모델이 학습 지식으로라도 답하고 한계를 밝힌다.
+        """
+        fn = tool_call.get("function") or {}
+        name = fn.get("name") or ""
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except (ValueError, TypeError):
+            args = {}
+
+        if name == "web_search":
+            query = str(args.get("query") or "")
+            if self.on_tool_progress:
+                self.on_tool_progress(query)      # 진행 칩: "웹 검색: …"
+            # 자격증명을 넘겨 GPT 검색 심부름꾼(고품질)을 쓰게 한다. 못 쓰면 web_search가
+            # 알아서 DuckDuckGo 안전망으로 내려간다.
+            result = web_search.search(query, api_key=self.api_key, base_url=self.base_url)
+            if self.on_tool_progress:
+                self.on_tool_progress("")         # 검색 끝 — 다시 "AI 생각 중…"
+        else:
+            result = f"알 수 없는 도구입니다: {name}"
+
+        return {"role": "tool", "tool_call_id": tool_call.get("id"),
+                "name": name, "content": result}
+
     def _ask_openai_compat(
         self, messages: list[dict], api_key: str, base_url: str, model: str,
         image_png: bytes | None = None,
     ) -> str:
-        """OpenAI 호환 게이트웨이 멀티턴 질의 단일 호출 (폴백 없음).
+        """OpenAI 호환 게이트웨이 멀티턴 질의 (모델 폴백 없음 — 도구 왕복은 여기서 처리).
 
         system 프롬프트를 맨 앞에 두고 대화 히스토리를 그대로 실어 보낸다(role은 user/
         assistant 그대로 OpenAI chat.completions에 매핑). image_png가 있으면 **첫 user 턴**의
         content를 image_url+text 멀티모달 배열로 감싼다(OCR _openai_compat_call과 동일 형식).
         max_tokens=16384는 OCR과 동일(thinking 토큰 잘림 방지).
+
+        **웹 검색 도구 왕복**: 매 호출에 `web_search` 도구를 함께 실어, 모델이 최신 정보가
+        필요하다고 판단하면 `tool_calls`로 검색을 요청하게 한다. 요청이 오면 실제로 검색해
+        (`_run_tool_call`) 결과를 tool 메시지로 되돌려주고 다시 호출한다. 모델이 검색어를
+        바꿔 재검색하는 것도 허용하되 `_MAX_TOOL_ROUNDS`에서 끊는다(무한 검색 방지).
+        게이트웨이가 tool_calls를 실제로 돌려준다는 건 2026-07-11 실호출로 확인했다
+        (gemini-3.1-flash-lite·gpt-5-mini·claude-sonnet-5 전부).
         """
         import base64
         try:
@@ -589,7 +709,7 @@ class OcrEngine:
             raise RuntimeError("openai 패키지 미설치: pip install openai")
         client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
 
-        out = [{"role": "system", "content": self.system_prompt or AI_SYSTEM_PROMPT}]
+        out = [{"role": "system", "content": self._system_text()}]
         first_user_done = False
         for m in messages:
             role, content = m["role"], m["content"]
@@ -603,9 +723,87 @@ class OcrEngine:
                     ]
             out.append({"role": role, "content": content})
 
-        resp = client.chat.completions.create(
-            model=model, max_tokens=16384, messages=out)
+        def _call(messages: list[dict], with_tools: bool):
+            kw: dict = {"model": model, "max_tokens": 16384, "messages": messages}
+            if with_tools:
+                kw["tools"] = [web_search.SEARCH_TOOL_SPEC]
+            return client.chat.completions.create(**kw)
+
+        # 도구를 아예 못 받는 모델이 있다(실측: meta-llama/Llama-4-Maverick → 405). 도구를
+        # 무조건 붙이면 예전엔 잘 답하던 모델이 통째로 깨진다. 그래서 첫 호출이 실패하면
+        # **도구를 떼고 한 번 더** 던져 본다 — 되면 그 모델은 도구 미지원(검색 없이 답한다),
+        # 그래도 실패면 진짜 오류라 그대로 올라간다. 에러 메시지 문구에 기대지 않는 판별이라
+        # 게이트웨이가 뭐라고 답하든 흔들리지 않는다(probe_chat_model의 이미지→텍스트 재시도와
+        # 같은 기법).
+        use_tools = True
+        try:
+            resp = _call(out, with_tools=True)
+        except Exception:
+            use_tools = False
+            resp = _call(out, with_tools=False)
+
+        for _round in range(_MAX_TOOL_ROUNDS):
+            message = resp.choices[0].message
+            # model_dump()로 원본 dict를 쓰는 이유는 아래 extra_content(thought_signature)
+            # 때문이다 — SDK 객체에는 그 필드가 타입으로 노출되지 않는다.
+            raw = message.model_dump()
+            tool_calls = raw.get("tool_calls") or []
+            if not tool_calls:
+                return (message.content or "").strip()
+
+            out.append(_assistant_tool_turn(raw))
+            for tc in tool_calls:
+                out.append(self._run_tool_call(tc))
+
+            # 검색 결과를 실어 재질의. **마지막 라운드는 도구를 떼서** "지금까지 찾은 걸로
+            # 답하라"고 강제한다 — 도구를 붙인 채로 두면 모델이 또 검색을 요청해 영영 답이
+            # 안 나올 수 있다.
+            last_round = (_round == _MAX_TOOL_ROUNDS - 1)
+            resp = _call(out, with_tools=use_tools and not last_round)
+
         return (resp.choices[0].message.content or "").strip()
+
+    def _ask_openai_responses(
+        self, messages: list[dict], api_key: str, base_url: str, model: str,
+        image_png: bytes | None = None,
+    ) -> str:
+        """게이트웨이 Responses API 경로 — GPT 전용, OpenAI **내장** 웹 검색 사용.
+
+        chat.completions 경로(위)와 달리 검색을 우리가 하지 않는다. `tools=[{"type":
+        "web_search"}]` 한 줄이면 OpenAI 서버가 스스로 검색하고 **페이지 본문까지 읽어**
+        인용과 함께 답한다(DuckDuckGo 스니펫보다 품질이 확연히 높다 — 실측에서 기상청
+        폭염주의보·시간대별 기온까지 가져왔다). 그래서 도구 왕복 루프가 필요 없다.
+
+        형식이 chat.completions와 다르다: system→`instructions`, messages→`input`,
+        이미지는 `input_text`/`input_image`(chat의 `text`/`image_url`이 아니다).
+        멀티턴·시스템 프롬프트·이미지 모두 동작 확인함(2026-07-11).
+        """
+        import base64
+        try:
+            import openai
+        except ImportError:
+            raise RuntimeError("openai 패키지 미설치: pip install openai")
+        client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
+
+        inp: list[dict] = []
+        first_user_done = False
+        for m in messages:
+            role, content = m["role"], m["content"]
+            if role == "user" and not first_user_done:
+                first_user_done = True
+                if image_png:
+                    b64 = base64.standard_b64encode(image_png).decode()
+                    content = [
+                        {"type": "input_text", "text": content},
+                        {"type": "input_image",
+                         "image_url": f"data:image/png;base64,{b64}"},
+                    ]
+            inp.append({"role": role, "content": content})
+
+        resp = client.responses.create(
+            model=model, instructions=self._system_text(), input=inp,
+            tools=[{"type": "web_search"}])
+        return (getattr(resp, "output_text", "") or "").strip()
 
     def _ask_google_genai(
         self, client, messages: list[dict], model_name: str, image_png: bytes | None = None

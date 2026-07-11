@@ -616,7 +616,7 @@ class SettingsDialog(QDialog):
         # 모델 콤보 2개 — OCR(이미지 입력 필요)과 AI 질의(전 모델)를 분리한다.
         # 같은 모델을 공유하면 답변용 고가 모델이 OCR에도 쓰이거나(과금), 텍스트 전용
         # 모델을 고르면 OCR이 400으로 깨진다. ↻ 새로고침 1회로 두 콤보를 함께 채운다.
-        self._model_label = QLabel("•  질의 모델 1:")
+        self._model_label = QLabel("•  AI 모델 1:")
         self._model_combo = QComboBox()
         self._model_combo.setEditable(True)
         self._model_combo.setStyleSheet(_combo_style)
@@ -636,12 +636,12 @@ class SettingsDialog(QDialog):
         # 질의 모델 2·3 (선택) — 질의 모델 1에 더해 '여러 모델로 비교' 시 동시에 물어볼 모델.
         # 질문창에서 '🔀 여러 모델로 비교'를 켜면 이 모델들로 함께 질의한다. 미설정(사용 안 함)이
         # 기본이며, 모델 1을 포함해 2개 이상 설정돼야 질문창 체크박스가 나타난다.
-        self._compare_a_label = QLabel("•  질의 모델 2:")
+        self._compare_a_label = QLabel("•  AI 모델 2:")
         self._compare_model_a_combo = QComboBox()
         self._compare_model_a_combo.setEditable(True)
         self._compare_model_a_combo.setStyleSheet(_combo_style)
         self._compare_model_a_combo.setToolTip("비교 질의에 함께 쓸 모델(선택). 같은 백엔드 안에서만.")
-        self._compare_b_label = QLabel("•  질의 모델 3:")
+        self._compare_b_label = QLabel("•  AI 모델 3:")
         self._compare_model_b_combo = QComboBox()
         self._compare_model_b_combo.setEditable(True)
         self._compare_model_b_combo.setStyleSheet(_combo_style)
@@ -692,9 +692,9 @@ class SettingsDialog(QDialog):
         self._test_btn = QPushButton("연결 테스트")
         self._test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._test_btn.setToolTip(
-            "키·연결을 확인하고, 설정한 질의 모델(1·2·3)과 OCR 모델을 실제로 한 번씩\n"
-            "호출해 각 줄에 결과를 보여줍니다. (질의 모델은 이미지 첨부 질문 1회, OCR 모델은\n"
-            "작은 테스트 이미지 1회. 질의 모델 2·3은 설정했을 때만 테스트)"
+            "키·연결을 확인하고, 설정한 AI 모델(1·2·3)과 OCR 모델을 실제로 한 번씩\n"
+            "호출해 각 줄에 결과를 보여줍니다. (AI 모델은 이미지 첨부 질문 1회, OCR 모델은\n"
+            "작은 테스트 이미지 1회. AI 모델 2·3은 설정했을 때만 테스트)"
         )
         self._test_btn.clicked.connect(self._on_test_api)
         self._test_status = QLabel("")

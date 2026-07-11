@@ -6,3 +6,4 @@ comtypes        # Windows UI Automation (마그네틱 캡처 — ElementFromPoin
 google-generativeai     # Google Gemini OCR (lazy import)
 google-genai            # 신 SDK — 공식 AI 질의의 웹 검색(grounding)용 (lazy import)
 openai                  # OpenAI 호환 게이트웨이 OCR (lazy import, base_url 사용 시)
+ddgs                    # DuckDuckGo 웹 검색 — 게이트웨이 비-GPT 모델의 실시간 질문용 (lazy import, 키 불필요)
