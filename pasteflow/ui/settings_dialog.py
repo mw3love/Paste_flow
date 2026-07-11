@@ -850,14 +850,16 @@ class SettingsDialog(QDialog):
         # 프로브할 (slot, 모델, is_ocr, backend, key, base_url) 목록. 비교 슬롯(2·3)은 자기
         # backend의 키/URL로 호출한다(크로스 백엔드 비교 — 활성 backend와 다를 수 있다).
         # creds는 UI 스레드에서 미리 해석해 넣는다(워커에서 위젯 접근 금지).
-        targets: list[tuple] = [("chat", chat_model, False, active, api_key, base_url)]
+        # OCR을 맨 앞에 둔다 — 캡처가 가장 자주 실패하는(텍스트 전용 모델 오선택) 지점이라
+        # 결과를 가장 먼저 보여준다.
+        targets: list[tuple] = [("ocr", ocr_model, True, active, api_key, base_url),
+                                ("chat", chat_model, False, active, api_key, base_url)]
         if cmp_a:
             ak, ab = self._creds_for(a_backend)
             targets.append(("chat2", cmp_a, False, a_backend, ak, ab))
         if cmp_b:
             bk, bb = self._creds_for(b_backend)
             targets.append(("chat3", cmp_b, False, b_backend, bk, bb))
-        targets.append(("ocr", ocr_model, True, active, api_key, base_url))
 
         # 회차 번호. 테스트 도중 사용자가 모델을 바꾸거나 다시 누르면 이 값이 올라가고,
         # 뒤늦게 도착한 옛 회차의 결과는 버려진다 — 안 그러면 A 모델의 ✓가 화면에 떠 있는
