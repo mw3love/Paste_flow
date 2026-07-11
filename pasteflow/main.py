@@ -1028,9 +1028,15 @@ class PasteFlowApp:
         if backend_override in ("official", "gateway"):
             backend = backend_override
         else:
-            backend = self.db.get_setting("ocr_gemini_backend", "")
+            # v1.48.0: OCR은 자기 backend(ocr_backend), AI는 모델 1 backend(ocr_gemini_backend).
+            # ocr_backend 미설정(업그레이드 직후)이면 모델 1 backend로 폴백 → 옛 '공유 backend'
+            # 동작을 그대로 유지한다(별도 DB 마이그레이션 불필요, 이 폴백이 곧 하위호환).
+            key = "ocr_backend" if purpose == "ocr" else "ocr_gemini_backend"
+            backend = self.db.get_setting(key, "")
             if backend not in ("official", "gateway"):
-                backend = "gateway" if (base_url_saved or "").strip() else "official"
+                backend = self.db.get_setting("ocr_gemini_backend", "")
+                if backend not in ("official", "gateway"):
+                    backend = "gateway" if (base_url_saved or "").strip() else "official"
 
         if model_override is not None:
             model = model_override
