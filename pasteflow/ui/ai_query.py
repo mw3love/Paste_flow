@@ -7,10 +7,10 @@ Enter로 전송, Shift+Enter 줄바꿈, Esc 취소.
 
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
-    QPushButton, QCheckBox, QFileDialog,
+    QPushButton, QCheckBox, QFileDialog, QWidget,
 )
-from PyQt6.QtCore import Qt, QBuffer, QByteArray, QIODevice
-from PyQt6.QtGui import QCursor, QPixmap, QImage
+from PyQt6.QtCore import Qt, QBuffer, QByteArray, QIODevice, QSize
+from PyQt6.QtGui import QCursor, QPixmap, QImage, QIcon
 
 from pasteflow.ui.theme import COLORS, PEACH_HOVER
 
@@ -142,31 +142,33 @@ class AiQueryDialog(QDialog):
         layout.setSpacing(8)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        # 첨부 이미지(PNG bytes) — 우클릭 이미지 항목의 컨텍스트로 시작하거나, 아래 첨부
-        # 버튼(클립보드/파일)으로 사용자가 붙인다. 질의 시 image_png로 멀티모달 전송된다.
-        self._image: bytes | None = context_image
+        # 첨부 이미지들(PNG bytes) — 우클릭 이미지 항목의 컨텍스트로 시작하거나, 아래 첨부
+        # 버튼(클립보드/파일)·질문칸 Ctrl+V·드롭으로 여러 장 붙일 수 있다. 질의 시 images로
+        # 멀티모달 전송된다(여러 장이면 전부 첫 user 턴에 실린다).
+        self._images: list[bytes] = [context_image] if context_image else []
 
         ctx = (context_text or "").strip()
-        # 이미지 미리보기 — self._image가 있을 때만 보인다. 첨부/제거 시 갱신.
-        self._img_caption = QLabel("이미지 (질문과 함께 전송):")
-        self._img_label = QLabel()
-        self._img_label.setObjectName("ctx")
-        self._img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 이미지 미리보기 — 첨부가 하나라도 있을 때만 보인다. 썸네일 스트립(각각 클릭 시 제거).
+        self._img_caption = QLabel("")
+        self._img_strip = QWidget()
+        self._img_strip_layout = QHBoxLayout(self._img_strip)
+        self._img_strip_layout.setContentsMargins(0, 0, 0, 0)
+        self._img_strip_layout.setSpacing(6)
         layout.addWidget(self._img_caption)
-        layout.addWidget(self._img_label)
+        layout.addWidget(self._img_strip)
 
-        # 첨부 버튼 행 — 클립보드 이미지 붙이기 / 파일에서 고르기 / 제거.
+        # 첨부 버튼 행 — 클립보드 이미지 붙이기 / 파일에서 고르기 / 모두 제거.
         attach_row = QHBoxLayout()
         attach_row.setContentsMargins(0, 0, 0, 0)
         attach_row.setSpacing(6)
         self._attach_clip_btn = QPushButton("📋 클립보드 이미지")
-        self._attach_clip_btn.setToolTip("현재 클립보드의 이미지를 질문에 첨부합니다.")
+        self._attach_clip_btn.setToolTip("현재 클립보드의 이미지를 질문에 첨부합니다(여러 장 누적).")
         self._attach_clip_btn.clicked.connect(self._attach_from_clipboard)
         self._attach_file_btn = QPushButton("📁 파일…")
-        self._attach_file_btn.setToolTip("이미지 파일을 골라 질문에 첨부합니다.")
+        self._attach_file_btn.setToolTip("이미지 파일을 골라 질문에 첨부합니다(여러 장 선택 가능).")
         self._attach_file_btn.clicked.connect(self._attach_from_file)
-        self._remove_img_btn = QPushButton("✕ 이미지 제거")
-        self._remove_img_btn.clicked.connect(self._remove_image)
+        self._remove_img_btn = QPushButton("✕ 모두 제거")
+        self._remove_img_btn.clicked.connect(self._remove_all_images)
         for b in (self._attach_clip_btn, self._attach_file_btn, self._remove_img_btn):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
         attach_row.addWidget(self._attach_clip_btn)
@@ -177,7 +179,7 @@ class AiQueryDialog(QDialog):
 
         self._refresh_image_preview()
 
-        if not self._image and ctx:
+        if not self._images and ctx:
             layout.addWidget(QLabel("선택한 항목(컨텍스트):"))
             preview = ctx[: self._CTX_PREVIEW_CHARS].replace("\n", " ")
             if len(ctx) > self._CTX_PREVIEW_CHARS:
@@ -277,9 +279,9 @@ class AiQueryDialog(QDialog):
         """'여러 모델로 비교' 체크 여부. 체크박스가 없으면(모델 미설정) 항상 False."""
         return self._compare_check is not None and self._compare_check.isChecked()
 
-    def get_image(self) -> bytes | None:
-        """질문과 함께 보낼 이미지(PNG bytes). 없으면 None."""
-        return self._image
+    def get_images(self) -> list[bytes]:
+        """질문과 함께 보낼 이미지들(PNG bytes 리스트). 없으면 빈 리스트."""
+        return list(self._images)
 
     # ── 이미지 첨부 ────────────────────────────────────────────────────────────
     @staticmethod
@@ -296,60 +298,76 @@ class AiQueryDialog(QDialog):
         buf.close()
         return bytes(ba) if ok else None
 
+    def _add_image(self, png: bytes | None) -> bool:
+        """PNG bytes를 첨부 목록에 추가하고 미리보기를 갱신한다."""
+        if not png:
+            return False
+        self._images.append(png)
+        self._refresh_image_preview()
+        return True
+
     def _attach_from_clipboard(self):
         """현재 클립보드의 이미지를 첨부한다(없으면 안내)."""
         image = QApplication.clipboard().image()
         png = self._qimage_to_png(image) if image is not None else None
-        if not png:
+        if not self._add_image(png):
             self._img_caption.setText("클립보드에 이미지가 없습니다.")
-            return
-        self._image = png
-        self._refresh_image_preview()
+            self._img_caption.setVisible(True)
 
     def _attach_from_file(self):
-        """이미지 파일을 골라 첨부한다(PNG로 정규화)."""
-        path, _ = QFileDialog.getOpenFileName(
+        """이미지 파일을 골라 첨부한다(여러 장 선택 가능, PNG로 정규화)."""
+        paths, _ = QFileDialog.getOpenFileNames(
             self, "이미지 파일 선택", "",
             "이미지 (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;모든 파일 (*.*)")
-        if not path:
-            return
-        image = QImage(path)
-        png = self._qimage_to_png(image)
-        if not png:
+        added = False
+        for path in paths:
+            if self._add_image(self._qimage_to_png(QImage(path))):
+                added = True
+        if paths and not added:
             self._img_caption.setText("이미지를 읽지 못했습니다.")
-            return
-        self._image = png
-        self._refresh_image_preview()
+            self._img_caption.setVisible(True)
 
     def _on_image_pasted(self, image: QImage):
         """질문칸에 Ctrl+V/드롭된 이미지를 첨부한다(_QuestionEdit 콜백)."""
-        png = self._qimage_to_png(image)
-        if png:
-            self._image = png
+        self._add_image(self._qimage_to_png(image))
+
+    def _remove_at(self, index: int):
+        if 0 <= index < len(self._images):
+            del self._images[index]
             self._refresh_image_preview()
 
-    def _remove_image(self):
-        self._image = None
+    def _remove_all_images(self):
+        self._images.clear()
         self._refresh_image_preview()
 
     def _refresh_image_preview(self):
-        """self._image에 맞춰 미리보기·버튼 표시를 갱신한다."""
-        has_img = self._image is not None
-        if has_img:
+        """첨부 목록에 맞춰 썸네일 스트립·버튼 표시를 갱신한다(각 썸네일 클릭 시 그 장 제거)."""
+        # 기존 썸네일 위젯 제거
+        while self._img_strip_layout.count():
+            item = self._img_strip_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        has_img = bool(self._images)
+        for i, png in enumerate(self._images):
             pix = QPixmap()
-            if pix.loadFromData(self._image) and not pix.isNull():
-                thumb = pix.scaled(
-                    280, 180,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                self._img_label.setPixmap(thumb)
-                self._img_caption.setText("이미지 (질문과 함께 전송):")
-            else:
-                has_img = False
-                self._image = None
-        if not has_img:
-            self._img_label.clear()
+            if not (pix.loadFromData(png) and not pix.isNull()):
+                continue
+            thumb = pix.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+            btn = QPushButton()
+            btn.setIcon(QIcon(thumb))
+            btn.setIconSize(QSize(56, 56))
+            btn.setFixedSize(66, 66)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip("클릭하면 이 이미지를 제거합니다.")
+            btn.clicked.connect(lambda _c, idx=i: self._remove_at(idx))
+            self._img_strip_layout.addWidget(btn)
+        self._img_strip_layout.addStretch(1)
+
+        if has_img:
+            self._img_caption.setText(f"이미지 {len(self._images)}장 (질문과 함께 전송 · 클릭 제거):")
         self._img_caption.setVisible(has_img)
-        self._img_label.setVisible(has_img)
+        self._img_strip.setVisible(has_img)
         self._remove_img_btn.setVisible(has_img)

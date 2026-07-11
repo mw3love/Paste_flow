@@ -612,17 +612,18 @@ class OcrEngine:
 
     # ── 텍스트 AI 질의 (OCR과 동일 배관 재사용) ──
 
-    def ask(self, question: str, context_text: str = "", image_png: bytes | None = None) -> str:
+    def ask(self, question: str, context_text: str = "",
+            images: list[bytes] | None = None) -> str:
         """AI 질의(단발) — 클립보드 항목(텍스트/이미지)을 컨텍스트로 질문에 답한다.
 
         단일 user 턴을 만들어 `ask_messages`에 위임한다(멀티턴 배관과 동일 경로).
-        `image_png`가 주어지면 질문과 함께 이미지를 멀티모달로 전송(시각 질의).
+        `images`가 주어지면 질문과 함께 이미지들을 멀티모달로 전송(시각 질의, 여러 장 가능).
         동기 호출이므로 호출자가 워커 스레드에서 실행해야 UI 블로킹이 없다.
         """
         prompt = _ask_prompt(question, context_text)
-        return self.ask_messages([{"role": "user", "content": prompt}], image_png=image_png)
+        return self.ask_messages([{"role": "user", "content": prompt}], images=images)
 
-    def ask_messages(self, messages: list[dict], image_png: bytes | None = None,
+    def ask_messages(self, messages: list[dict], images: list[bytes] | None = None,
                      tools_enabled: bool = True) -> str:
         """멀티턴 AI 질의 — `messages`는 [{"role":"user"/"assistant","content":str}, ...].
 
@@ -633,8 +634,8 @@ class OcrEngine:
         모델이 또 검색해 자료가 갈린다(공유가 무의미해진다).
 
         마지막 항목이 방금 던진 user 질문이고, 앞선 턴들은 직전까지의 대화(웹 챗봇처럼
-        이전 문답을 인지한 상태로 답하게 함). `image_png`는 **첫 user 턴에만** 멀티모달로
-        실린다(이미지는 한 번만 전송, 이후 턴은 텍스트만). OCR과 동일한 Gemini 배관
+        이전 문답을 인지한 상태로 답하게 함). `images`(여러 장 가능)는 **첫 user 턴에만**
+        멀티모달로 실린다(이미지는 한 번만 전송, 이후 턴은 텍스트만). OCR과 동일한 Gemini 배관
         (게이트웨이/공식 분기·자동 폴백·_normalize_base_url·max_tokens=16384)을 재사용하고,
         시스템 프롬프트(AI_SYSTEM_PROMPT)를 주입한다. 공식 경로는 google_search(grounding)
         도구를 붙여 실시간 질문에도 답한다. 동기 호출이라 워커 스레드에서 실행해야 한다.
@@ -657,7 +658,7 @@ class OcrEngine:
                     return self._call_with_fallback(
                         model_name,
                         call=lambda m: self._ask_openai_responses(
-                            messages, api_key, self.base_url, m, image_png, tools_enabled),
+                            messages, api_key, self.base_url, m, images, tools_enabled),
                     )
                 except Exception:
                     # 게이트웨이가 이 GPT 모델에 Responses를 안 열어 줄 수도 있다. 그때는
@@ -669,7 +670,7 @@ class OcrEngine:
             return self._call_with_fallback(
                 model_name,
                 call=lambda m: self._ask_openai_compat(
-                    messages, api_key, self.base_url, m, image_png, tools_enabled),
+                    messages, api_key, self.base_url, m, images, tools_enabled),
             )
 
         try:
@@ -679,7 +680,7 @@ class OcrEngine:
 
         client = genai.Client(api_key=api_key)
         model_name = self.model or "gemini-2.5-flash"
-        call = lambda m: self._ask_google_genai(client, messages, m, image_png, tools_enabled)
+        call = lambda m: self._ask_google_genai(client, messages, m, images, tools_enabled)
         try:
             return self._call_with_fallback(model_name, call=call)
         except Exception as exc:
@@ -692,7 +693,7 @@ class OcrEngine:
                 self.last_fallback_from = model_name
                 self.last_used_model = _FALLBACK_DEFAULT
                 return self._ask_google_genai(
-                    client, messages, _FALLBACK_DEFAULT, image_png, tools_enabled)
+                    client, messages, _FALLBACK_DEFAULT, images, tools_enabled)
             raise
 
     def _system_text(self, search_available: bool = False) -> str:
@@ -761,13 +762,13 @@ class OcrEngine:
 
     def _ask_openai_compat(
         self, messages: list[dict], api_key: str, base_url: str, model: str,
-        image_png: bytes | None = None, tools_enabled: bool = True,
+        images: list[bytes] | None = None, tools_enabled: bool = True,
     ) -> str:
         """OpenAI 호환 게이트웨이 멀티턴 질의 (모델 폴백 없음 — 도구 왕복은 여기서 처리).
 
         system 프롬프트를 맨 앞에 두고 대화 히스토리를 그대로 실어 보낸다(role은 user/
-        assistant 그대로 OpenAI chat.completions에 매핑). image_png가 있으면 **첫 user 턴**의
-        content를 image_url+text 멀티모달 배열로 감싼다(OCR _openai_compat_call과 동일 형식).
+        assistant 그대로 OpenAI chat.completions에 매핑). images가 있으면 **첫 user 턴**의
+        content를 image_url(들)+text 멀티모달 배열로 감싼다(여러 장 가능, OCR과 동일 형식).
         max_tokens=16384는 OCR과 동일(thinking 토큰 잘림 방지).
 
         **웹 검색 도구 왕복**: 매 호출에 `web_search` 도구를 함께 실어, 모델이 최신 정보가
@@ -790,12 +791,14 @@ class OcrEngine:
             role, content = m["role"], m["content"]
             if role == "user" and not first_user_done:
                 first_user_done = True
-                if image_png:
-                    b64 = base64.standard_b64encode(image_png).decode()
-                    content = [
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-                        {"type": "text", "text": content},
-                    ]
+                if images:
+                    parts = []
+                    for png in images:
+                        b64 = base64.standard_b64encode(png).decode()
+                        parts.append({"type": "image_url",
+                                      "image_url": {"url": f"data:image/png;base64,{b64}"}})
+                    parts.append({"type": "text", "text": content})
+                    content = parts
             out.append({"role": role, "content": content})
 
         def _call(messages: list[dict], with_tools: bool):
@@ -877,7 +880,7 @@ class OcrEngine:
 
     def _ask_openai_responses(
         self, messages: list[dict], api_key: str, base_url: str, model: str,
-        image_png: bytes | None = None, tools_enabled: bool = True,
+        images: list[bytes] | None = None, tools_enabled: bool = True,
     ) -> str:
         """게이트웨이 Responses API 경로 — GPT 전용, OpenAI **내장** 웹 검색 사용.
 
@@ -903,13 +906,13 @@ class OcrEngine:
             role, content = m["role"], m["content"]
             if role == "user" and not first_user_done:
                 first_user_done = True
-                if image_png:
-                    b64 = base64.standard_b64encode(image_png).decode()
-                    content = [
-                        {"type": "input_text", "text": content},
-                        {"type": "input_image",
-                         "image_url": f"data:image/png;base64,{b64}"},
-                    ]
+                if images:
+                    parts = [{"type": "input_text", "text": content}]
+                    for png in images:
+                        b64 = base64.standard_b64encode(png).decode()
+                        parts.append({"type": "input_image",
+                                      "image_url": f"data:image/png;base64,{b64}"})
+                    content = parts
             inp.append({"role": role, "content": content})
 
         resp = client.responses.create(
@@ -918,7 +921,7 @@ class OcrEngine:
         return (getattr(resp, "output_text", "") or "").strip()
 
     def _ask_google_genai(
-        self, client, messages: list[dict], model_name: str, image_png: bytes | None = None,
+        self, client, messages: list[dict], model_name: str, images: list[bytes] | None = None,
         tools_enabled: bool = True,
     ) -> str:
         """공식 Google API 멀티턴 질의 단일 호출 (폴백 없음). 신 SDK google-genai 사용.
@@ -928,7 +931,7 @@ class OcrEngine:
         날씨·뉴스 등 grounding). 구 SDK(google-generativeai 0.8.x)는 proto에 필드는
         있으나 요청에 이 도구를 실어 보내지 못해 검색이 동작하지 않으므로 신 SDK로
         이전했다(2026-06-27 실호출 검증: 구 SDK 4방식 모두 미검색, 신 SDK 검색 동작).
-        image_png가 있으면 **첫 user 턴**에 멀티모달로 실린다 — 이미지+grounding 동시도 정상.
+        images가 있으면 **첫 user 턴**에 멀티모달로 실린다(여러 장) — 이미지+grounding 동시도 정상.
         max_output_tokens=16384는 thinking 모델 본문 잘림 방지(OCR과 동일 사유).
         """
         from google.genai import types
@@ -944,8 +947,8 @@ class OcrEngine:
             parts = []
             if role == "user" and not first_user_done:
                 first_user_done = True
-                if image_png:
-                    parts.append(types.Part.from_bytes(data=image_png, mime_type="image/png"))
+                for png in (images or []):
+                    parts.append(types.Part.from_bytes(data=png, mime_type="image/png"))
             parts.append(types.Part(text=m["content"]))
             contents.append(types.Content(role=role, parts=parts))
 

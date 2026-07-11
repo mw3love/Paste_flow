@@ -169,7 +169,7 @@ _GATEKEEPER_INSTRUCTIONS = (
 
 
 def prefetch(question: str, api_key: str = "", base_url: str = "",
-             image_png: bytes | None = None) -> Prefetch:
+             images: list[bytes] | None = None) -> Prefetch:
     """질문에 필요한 웹 검색을 **미리 한 번만** 수행해 사실 텍스트를 돌려준다.
 
     여러 모델 비교(`main._start_compare_query`)가 쓴다. 모델마다 각자 검색하면 같은 질문에
@@ -196,14 +196,13 @@ def prefetch(question: str, api_key: str = "", base_url: str = "",
         return Prefetch(False, "")
 
     content: object = question
-    if image_png:
+    if images:
         # 이미지에만 단서가 있는 질문("이 사진 도시의 내일 날씨는?")도 검색어를 만들 수 있다
         # (2026-07-11 실호출 검증: 질문에 없는 'BUSAN'을 이미지에서 읽어 부산 날씨를 찾아옴).
-        b64 = base64.standard_b64encode(image_png).decode()
-        content = [
-            {"type": "input_text", "text": question},
-            {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"},
-        ]
+        content = [{"type": "input_text", "text": question}]
+        for png in images:
+            b64 = base64.standard_b64encode(png).decode()
+            content.append({"type": "input_image", "image_url": f"data:image/png;base64,{b64}"})
 
     try:
         client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))

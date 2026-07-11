@@ -199,8 +199,9 @@ class TestPrefetch:
     def test_이미지가_있으면_input_image로_실어_보낸다(self):
         create = MagicMock(return_value=_resp("결과", ["web_search_call", "message"]))
         _inject_openai(create)
+        # 여러 장(images 리스트)이면 각각 input_image로 실린다.
         web_search.prefetch("이 도시 날씨", api_key="k", base_url="https://gw",
-                            image_png=b"\x89PNG_fake")
+                            images=[b"\x89PNG_fake1", b"\x89PNG_fake2"])
         content = create.call_args.kwargs["input"][0]["content"]
         kinds = [part["type"] for part in content]
-        assert "input_image" in kinds and "input_text" in kinds
+        assert kinds.count("input_image") == 2 and "input_text" in kinds

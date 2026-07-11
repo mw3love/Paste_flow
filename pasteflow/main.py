@@ -1055,19 +1055,21 @@ class PasteFlowApp:
             return (self._get_secret("ocr_gemini_api_key_gateway"), base_url_saved, model)
         return (self._get_secret("ocr_gemini_api_key_official"), "", model)
 
-    def _start_ai_worker(self, question: str, context_text: str, image_png: bytes | None = None):
+    def _start_ai_worker(self, question: str, context_text: str,
+                         images: list[bytes] | None = None):
         """AI 질의(첫 턴) — 질문+컨텍스트로 대화 히스토리를 시작해 워커에 넘긴다.
 
         첫 user 턴의 컨텐츠는 `build_ask_prompt`로 컨텍스트를 임베드한 프롬프트이고, 화면
         표시용 원문 질문은 `display`에 따로 담는다(트랜스크립트 렌더는 display를 쓴다).
         이후 후속 질문은 `_on_ai_followup`이 같은 히스토리에 쌓아 재질의한다.
+        `images`는 여러 장 첨부 가능(첫 user 턴에만 멀티모달로 실림).
         """
         from pasteflow.ocr_engine import build_ask_prompt
         prompt = build_ask_prompt(question, context_text)
         conversation = [{"role": "user", "content": prompt, "display": question}]
-        self._run_ai_turn(conversation, image_png, popup=None)
+        self._run_ai_turn(conversation, images, popup=None)
 
-    def _run_ai_turn(self, conversation: list, image_png: bytes | None, popup,
+    def _run_ai_turn(self, conversation: list, images: list[bytes] | None, popup,
                      model: str | None = None, tools_enabled: bool = True,
                      backend: str | None = None):
         """대화 한 턴을 백그라운드에서 질의한다(첫 질문·후속 질문·비교 질의 공용).
@@ -1077,7 +1079,7 @@ class PasteFlowApp:
         뗀다. 그래야 세 모델이 같은 자료를 본다.
 
         OCR과 동일한 게이트웨이/공식 배관(`OcrEngine.ask_messages`)을 재사용한다. OCR 엔진
-        설정과 무관하게 항상 gemini 경로. `image_png`는 첫 user 턴에만 멀티모달로 실린다.
+        설정과 무관하게 항상 gemini 경로. `images`(여러 장 가능)는 첫 user 턴에만 실린다.
         `model`이 주어지면 설정 모델 대신 그 모델로 질의한다(비교 창은 자기 모델로 이어감).
         진행 표시는 첫 턴이면 커서 모니터 정중앙 진행 칩, 팝업이 주어지면(후속 턴·비교 창)
         그 팝업이 자체 '생각 중'을 표시하므로 칩을 띄우지 않는다. 결과/에러는
@@ -1105,14 +1107,14 @@ class PasteFlowApp:
                 # "멈춘 게 아니라 검색 중"임을 진행 칩에 보여준다(첫 턴 한정 — 후속·비교
                 # 창은 팝업 자체가 '생각 중'을 표시하므로 슬롯이 무시한다).
                 engine.on_tool_progress = self._bridge.ai_searching.emit
-                answer = engine.ask_messages(messages, image_png=image_png,
+                answer = engine.ask_messages(messages, images=images,
                                              tools_enabled=tools_enabled)
                 if engine.last_fallback_from and engine.last_used_model:
                     self._bridge.ocr_fallback.emit(engine.last_fallback_from, engine.last_used_model)
                 new_conv = conversation + [{"role": "assistant", "content": answer}]
                 self._bridge.ai_turn_done.emit({
                     "popup": popup, "answer": answer,
-                    "conversation": new_conv, "image_png": image_png,
+                    "conversation": new_conv, "images": images,
                     "model": model, "backend": backend,
                 })
             except Exception as e:
@@ -1155,7 +1157,7 @@ class PasteFlowApp:
         return specs
 
     def _start_compare_query(self, question: str, context_text: str,
-                             image_png: bytes | None, specs: list[dict]):
+                             images: list[bytes] | None, specs: list[dict]):
         """질문을 여러 모델로 동시에 질의하고 답변창을 모니터 N등분 타일로 나란히 띄운다.
 
         각 창은 '생각 중' 펜딩 상태로 먼저 뜨고(어느 모델이 아직인지 보임) 각자 답이 도착하면
@@ -1220,15 +1222,15 @@ class PasteFlowApp:
         if mixed:
             # 각 모델이 자기 backend·자기 검색으로 답한다(검색 메커니즘 비교).
             for job in jobs:
-                self._run_ai_turn(job["conversation"], image_png, popup=job["popup"],
+                self._run_ai_turn(job["conversation"], images, popup=job["popup"],
                                   model=job["model"], backend=job["backend"],
                                   tools_enabled=True)
         else:
             # 한 번 검색해 같은 자료를 전 모델에게 물린다(정리력 비교).
-            self._start_shared_search(question, jobs, image_png, cache)
+            self._start_shared_search(question, jobs, images, cache)
 
     def _start_shared_search(self, question: str, jobs: list[dict],
-                             image_png: bytes | None, cache: dict):
+                             images: list[bytes] | None, cache: dict):
         """비교 질의의 웹 검색을 **앞단에서 한 번만** 수행하고 그 자료로 전 모델을 질의한다.
 
         각 모델이 스스로 검색하면(v1.45.0까지의 동작) 같은 질문에도 서로 다른 자료를 찾아와
@@ -1248,12 +1250,12 @@ class PasteFlowApp:
             if facts is None:
                 api_key, base_url, _ = self._resolve_gemini_cfg()
                 res = web_search.prefetch(question, api_key=api_key, base_url=base_url,
-                                          image_png=image_png)
+                                          images=images)
                 available, facts = res.available, res.facts
                 if available:
                     cache[question] = facts   # ""(검색 불필요)도 캐시 — 재판정 비용 절약
             self._bridge.ai_prefetch_done.emit({
-                "jobs": jobs, "facts": facts, "available": available, "image_png": image_png,
+                "jobs": jobs, "facts": facts, "available": available, "images": images,
             })
 
         threading.Thread(target=_run, daemon=True, name="ai-prefetch").start()
@@ -1268,14 +1270,14 @@ class PasteFlowApp:
         from pasteflow.ocr_engine import build_facts_prompt
 
         facts, available = payload["facts"], payload["available"]
-        image_png = payload["image_png"]
+        images = payload["images"]
         for job in payload["jobs"]:
             conv = [dict(t) for t in job["conversation"]]
             if facts:
                 conv[-1]["content"] = build_facts_prompt(conv[-1]["content"], facts)
             # 심부름꾼이 돌았으면 모델 도구를 뗀다(공유 자료만 보게). 못 썼으면 현행대로
             # 모델이 자기 도구로 검색하게 둔다 — 안 그러면 실시간 질문에 답할 길이 사라진다.
-            self._run_ai_turn(conv, image_png, popup=job["popup"], model=job["model"],
+            self._run_ai_turn(conv, images, popup=job["popup"], model=job["model"],
                               tools_enabled=not available, backend=job.get("backend"))
 
     def _start_cursor_progress(self, prefix: str, icon: str, anchor):
@@ -1596,11 +1598,11 @@ class PasteFlowApp:
         question = dialog.get_question()
         if not question:
             return
-        image_png = dialog.get_image()  # 사용자가 첨부했으면 함께 전송(없으면 None)
+        images = dialog.get_images()  # 사용자가 첨부한 이미지들(없으면 [])
         if dialog.is_compare():
-            self._start_compare_query(question, "", image_png, compare_models)
+            self._start_compare_query(question, "", images, compare_models)
         else:
-            self._start_ai_worker(question, "", image_png=image_png)
+            self._start_ai_worker(question, "", images=images)
 
     def _on_pin_hotkey(self):
         """화면에 핀 단축키(기본 Alt+F3) — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다.
@@ -2007,11 +2009,11 @@ class PasteFlowApp:
             question = dialog.get_question()
             if not question:
                 return
-            image_png = dialog.get_image()  # 사용자가 제거·교체했으면 그 결과를 존중
+            images = dialog.get_images()  # 사용자가 제거·추가·교체했으면 그 결과를 존중
             if dialog.is_compare():
-                self._start_compare_query(question, "", image_png, compare_models)
+                self._start_compare_query(question, "", images, compare_models)
             else:
-                self._start_ai_worker(question, "", image_png=image_png)
+                self._start_ai_worker(question, "", images=images)
             return
 
         context_text = item.text_content or item.preview_text or ""
@@ -2022,10 +2024,11 @@ class PasteFlowApp:
         question = dialog.get_question()
         if not question:
             return
+        images = dialog.get_images()  # 텍스트 컨텍스트 질의에도 이미지 첨부 가능
         if dialog.is_compare():
-            self._start_compare_query(question, context_text, None, compare_models)
+            self._start_compare_query(question, context_text, images, compare_models)
         else:
-            self._start_ai_worker(question, context_text)
+            self._start_ai_worker(question, context_text, images=images)
 
     def _on_ai_turn_done(self, payload: dict):
         """AI 대화 턴 결과 → 답변창 생성(첫 턴) 또는 새 턴 탭 추가(후속 턴).
@@ -2038,7 +2041,7 @@ class PasteFlowApp:
         popup = payload["popup"]
         answer = payload["answer"]
         conversation = payload["conversation"]
-        image_png = payload["image_png"]
+        images = payload["images"]
 
         if popup is None:
             self._stop_cursor_progress()  # 첫 턴 진행 칩 종료 (답변창이 같은 정중앙에 펼쳐짐)
@@ -2077,7 +2080,7 @@ class PasteFlowApp:
 
         # 대화 상태를 답변창에 보관 — 다음 후속 질문에 사용(이미지는 첫 턴에만 실림).
         popup._conversation = conversation
-        popup._image_png = image_png
+        popup._images = images
         # 이 창이 후속 질문 시 쓸 모델·backend(비교 창은 자기 모델·backend로 이어감,
         # 단일 창은 None=활성 backend 기본). 크로스 백엔드 비교(v1.47.0)에서 창마다 backend가
         # 다를 수 있으므로 backend도 함께 기억한다.
@@ -2093,7 +2096,7 @@ class PasteFlowApp:
         conversation = getattr(popup, "_conversation", None)
         if conversation is None:
             return
-        image_png = getattr(popup, "_image_png", None)
+        images = getattr(popup, "_images", None)
         model = getattr(popup, "_ai_model", None)      # 비교 창은 자기 모델로 이어감
         backend = getattr(popup, "_ai_backend", None)  # 크로스 백엔드 비교 창은 자기 backend로
         new_conv = conversation + [{"role": "user", "content": text, "display": text}]
@@ -2106,10 +2109,10 @@ class PasteFlowApp:
             # (혼합 backend 비교 창은 _shared_cache가 없어 이 분기를 안 타고 각자 검색한다.)
             job = {"popup": popup, "model": model, "backend": backend,
                    "conversation": new_conv}
-            self._start_shared_search(text, [job], image_png, cache)
+            self._start_shared_search(text, [job], images, cache)
             return
 
-        self._run_ai_turn(new_conv, image_png, popup=popup, model=model, backend=backend)
+        self._run_ai_turn(new_conv, images, popup=popup, model=model, backend=backend)
 
     def _on_copy_selected_text(self, text: str):
         """AI 답변창 '선택→복사' 모드 — 드래그로 선택한 부분 텍스트를 클립보드+히스토리에 저장.
