@@ -577,46 +577,61 @@ class SettingsDialog(QDialog):
         ai_desc.setWordWrap(True)
         ai_form.addRow(ai_desc)
 
-        # 크리덴셜 — 공식·게이트웨이 키를 **둘 다 상시 노출**한다(v1.48.0 전면 재구성).
-        # 앱이 두 backend를 동시에 쓰므로(크로스 백엔드 비교·공식 검색+게이트웨이 답변) 옛
-        # 콤보로 한쪽을 숨기지 않는다. 각 행의 ↻는 그 backend의 모델 목록만 새로 불러온다.
+        # 크리덴셜 — Google AI Studio·Mindlogic 키를 **둘 다 상시 노출**한다(v1.48.0 전면
+        # 재구성). 앱이 두 backend를 동시에 쓰므로(크로스 백엔드 비교·Google 검색+Mindlogic
+        # 답변) 옛 콤보로 한쪽을 숨기지 않는다. 각 행의 ↻는 그 backend 모델 목록만 새로 불러온다.
+        # 두 제공사와 모델 섹션을 얇은 구분선으로 시각 그룹화한다(기능 단축키 그룹과 같은 방식).
         def _mk_refresh(backend: str) -> QPushButton:
             btn = QPushButton()
             # Qt 내장 표준 아이콘 — 폰트 의존성 없이 모든 환경에서 보장
             btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
             btn.setFixedWidth(34)
-            btn.setToolTip("이 backend에서 사용 가능한 모델 목록 가져오기")
+            btn.setToolTip("이 제공사에서 사용 가능한 모델 목록 가져오기")
             # NoFocus 필수: 클릭 시 setEnabled(False)로 꺼지는데, StrongFocus면 포커스가
             # editable 모델 콤보로 넘어가 텍스트가 전체 선택돼 조회 중 파랗게 반전돼 보인다.
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.clicked.connect(lambda: self._on_refresh_models(backend))
             return btn
 
+        def _ai_sep() -> QFrame:
+            line = QFrame()
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setFrameShadow(QFrame.Shadow.Plain)
+            line.setStyleSheet(f"color:{_LINE}; background-color:{_LINE};")
+            line.setFixedHeight(1)
+            return line
+
+        # ── Google AI Studio ──
         self._official_key_edit = QLineEdit()
         self._official_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._official_key_edit.setPlaceholderText("Google AI Studio 키")
+        self._official_key_edit.setPlaceholderText("Google AI Studio API 키")
         self._official_refresh_btn = _mk_refresh("official")
         off_row = QHBoxLayout()
         off_row.setContentsMargins(0, 0, 0, 0)
         off_row.setSpacing(4)
         off_row.addWidget(self._official_key_edit, 1)
         off_row.addWidget(self._official_refresh_btn)
-        ai_form.addRow(QLabel("•  공식 API 키:"), off_row)
+        ai_form.addRow(QLabel("•  Google AI Studio 키:"), off_row)
 
+        ai_form.addRow(_ai_sep())  # Google ↔ Mindlogic 구분
+
+        # ── Mindlogic ──
         self._gateway_key_edit = QLineEdit()
         self._gateway_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._gateway_key_edit.setPlaceholderText("Mindlogic Gateway 토큰")
+        self._gateway_key_edit.setPlaceholderText("Mindlogic API 키")
         self._gateway_refresh_btn = _mk_refresh("gateway")
         gw_row = QHBoxLayout()
         gw_row.setContentsMargins(0, 0, 0, 0)
         gw_row.setSpacing(4)
         gw_row.addWidget(self._gateway_key_edit, 1)
         gw_row.addWidget(self._gateway_refresh_btn)
-        ai_form.addRow(QLabel("•  게이트웨이 토큰:"), gw_row)
+        ai_form.addRow(QLabel("•  Mindlogic API 키:"), gw_row)
 
         self._base_url_edit = QLineEdit()
         self._base_url_edit.setPlaceholderText("예: https://factchat-cloud.mindlogic.ai/v1/gateway")
-        ai_form.addRow(QLabel("•  게이트웨이 URL:"), self._base_url_edit)
+        ai_form.addRow(QLabel("•  Mindlogic Base URL:"), self._base_url_edit)
+
+        ai_form.addRow(_ai_sep())  # 크리덴셜 ↔ 모델 섹션 구분(OCR 모델 위)
 
         # 모델 콤보 2개 — OCR(이미지 입력 필요)과 AI 질의(전 모델)를 분리한다.
         # 같은 모델을 공유하면 답변용 고가 모델이 OCR에도 쓰이거나(과금), 텍스트 전용
