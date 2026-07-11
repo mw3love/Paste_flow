@@ -149,3 +149,58 @@ class TestToolSpec:
         assert spec["type"] == "function"
         assert spec["function"]["name"] == "web_search"
         assert spec["function"]["parameters"]["required"] == ["query"]
+
+
+def _resp(output_text, item_types):
+    """가짜 Responses 응답 — output 항목 타입 리스트로 '검색했는지'를 표현한다."""
+    out = [types.SimpleNamespace(type=t) for t in item_types]
+    return types.SimpleNamespace(output_text=output_text, output=out)
+
+
+class TestPrefetch:
+    """여러 모델 비교의 '공유 검색' — nano 1콜로 검색 필요 판단 + 검색을 겸한다.
+
+    핵심 계약: `available`은 '심부름꾼을 썼는가'이지 '검색이 필요한가'가 아니다. 둘을
+    섞으면 심부름꾼을 못 쓴 것을 "검색 불필요"로 오해해, 실시간 질문에 도구도 없이 답하게 된다.
+    """
+
+    def test_자격증명이_없으면_available_False(self):
+        res = web_search.prefetch("내일 날씨", api_key="", base_url="")
+        assert res.available is False and res.facts == ""
+
+    def test_검색을_수행하면_available_True에_자료를_담는다(self):
+        # output에 web_search_call이 있으면 = 실제로 검색함.
+        _inject_openai(MagicMock(return_value=_resp(
+            "서울 36도", ["web_search_call", "message"])))
+        res = web_search.prefetch("내일 서울 날씨", api_key="k", base_url="https://gw")
+        assert res.available is True
+        assert res.facts == "서울 36도"
+
+    def test_검색_불필요_판정은_available_True에_빈_자료(self):
+        # 도구를 안 불렀다(message만) = "이 질문엔 검색이 불필요". 못 쓴 것과 구별된다.
+        _inject_openai(MagicMock(return_value=_resp("NO_SEARCH", ["message"])))
+        res = web_search.prefetch("리스트와 튜플 차이", api_key="k", base_url="https://gw")
+        assert res.available is True and res.facts == ""
+
+    def test_심부름꾼_예외는_available_False로_열화(self):
+        # 못 썼다 ≠ 검색 불필요. 호출자가 모델별 자체 검색으로 되돌아갈 수 있게 구분.
+        _inject_openai(MagicMock(side_effect=RuntimeError("403")))
+        res = web_search.prefetch("q", api_key="k", base_url="https://gw")
+        assert res.available is False
+
+    def test_검색_여부는_문구가_아니라_도구호출로_읽는다(self):
+        # output_text가 'NO_SEARCH'여도 도구를 실제로 불렀으면 검색한 것으로 본다
+        # (문구에 기대지 않는 판별 — 모델이 말투를 바꿔도 안 흔들린다).
+        _inject_openai(MagicMock(return_value=_resp(
+            "NO_SEARCH", ["web_search_call", "message"])))
+        res = web_search.prefetch("q", api_key="k", base_url="https://gw")
+        assert res.available is True and res.facts == "NO_SEARCH"
+
+    def test_이미지가_있으면_input_image로_실어_보낸다(self):
+        create = MagicMock(return_value=_resp("결과", ["web_search_call", "message"]))
+        _inject_openai(create)
+        web_search.prefetch("이 도시 날씨", api_key="k", base_url="https://gw",
+                            image_png=b"\x89PNG_fake")
+        content = create.call_args.kwargs["input"][0]["content"]
+        kinds = [part["type"] for part in content]
+        assert "input_image" in kinds and "input_text" in kinds

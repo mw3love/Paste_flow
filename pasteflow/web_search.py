@@ -25,7 +25,7 @@ DDG는 계정에 nano 권한이 없거나 Responses가 막혔을 때를 위한 �
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import NamedTuple, Optional
 
 # 검색 심부름꾼 모델. 가벼울수록 좋다 — 검색은 사실 수집이지 사고가 아니다.
 # (실측: nano 2.9초 vs gpt-5-mini 51~83초. 답변 품질은 어차피 본 모델이 책임진다.)
@@ -139,6 +139,88 @@ def _search_via_ddg(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> str:
         return f"검색 실패: {type(exc).__name__}: {exc}"
 
     return format_results(query, rows or [])
+
+
+class Prefetch(NamedTuple):
+    """`prefetch()`의 결과.
+
+    `available=False`는 "검색이 필요 없다"가 **아니라** "심부름꾼을 못 썼다"(모델 권한 없음·
+    Responses 차단·네트워크)는 뜻이다. 둘을 섞으면 안 된다 — 못 쓴 것을 "검색 불필요"로
+    읽으면 실시간 질문에 도구도 없이 답하게 되어 모델이 "저는 인터넷이 없습니다"로 답한다.
+    호출자는 `available=False`면 모델별 자체 검색(현행 동작)으로 열화해야 한다.
+    """
+    available: bool   # 심부름꾼을 실제로 썼는가
+    facts: str        # 검색 결과 텍스트. ""이면 "이 질문엔 검색이 불필요"라는 판정
+
+
+# 게이트키퍼 지시문 — `_SEARCH_AGENT_INSTRUCTIONS`와 다른 점은 **검색 여부 판단까지 맡긴다**는
+# 것이다. 도구 호출 판단이 곧 "이 질문에 검색이 필요한가"의 답이므로 판단기를 따로 둘 필요가
+# 없다(nano 1콜 = 판단 + 검색). 검색이 불필요하면 도구를 부르지 않고 NO_SEARCH만 답하게 한다.
+_GATEKEEPER_INSTRUCTIONS = (
+    "너는 웹 검색 심부름꾼이다. 질문에 답하지 말고, 답하는 데 필요한 **최신 사실만** 모아 온다.\n"
+    "1) 질문이 시점에 따라 변하는 정보(날씨·뉴스·시세·환율·최신 버전·출시일·근황 등)를 요구하면 "
+    "웹을 검색해 찾은 사실만 간결히 정리한다. 수치·날짜·고유명사는 찾은 그대로 옮기고, 각 항목 "
+    "끝에 출처 URL을 적는다. 출처를 모르면 URL을 지어내지 말고 비워 둔다.\n"
+    "2) 검색이 필요 없는 질문(일반 지식·코드·번역·요약·의견 등)이면 **검색하지 말고** 정확히 "
+    "'NO_SEARCH' 한 단어만 답한다.\n"
+    "질문에 이미지가 함께 오면 이미지 내용을 근거로 검색어를 만든다.\n"
+    "어떤 경우에도 조언·의견·인사를 덧붙이지 마라."
+)
+
+
+def prefetch(question: str, api_key: str = "", base_url: str = "",
+             image_png: bytes | None = None) -> Prefetch:
+    """질문에 필요한 웹 검색을 **미리 한 번만** 수행해 사실 텍스트를 돌려준다.
+
+    여러 모델 비교(`main._start_compare_query`)가 쓴다. 모델마다 각자 검색하면 같은 질문에
+    서로 다른 수치가 나와 비교가 성립하지 않는다("누가 더 잘 정리하나"를 봐야 하는데 "각자
+    무엇을 찾았나"가 섞인다). 그래서 검색은 앞단에서 한 번만 하고 같은 자료를 전 모델에 물린다.
+
+    **검색 필요 여부도 여기서 갈린다.** 판단기를 따로 두지 않는다 — 심부름꾼이 도구를
+    불렀는지(`web_search_call`)가 곧 그 판단이다. 응답 텍스트('NO_SEARCH')가 아니라 **도구
+    호출 유무**로 읽는 이유는 문구에 기대지 않기 위해서다(모델이 말투를 바꿔도 안 흔들린다 —
+    `_ask_openai_compat`의 도구 미지원 판별과 같은 기법).
+
+    게이트웨이 자격증명이 없으면(공식 백엔드 등) `available=False`로 즉시 반환한다.
+    동기 호출이라 호출자가 워커 스레드에서 실행해야 한다(검색 시 2~5초).
+    """
+    question = (question or "").strip()
+    if not question or not (api_key and base_url):
+        return Prefetch(False, "")
+
+    try:
+        import base64
+        import openai
+        from .ocr_engine import _normalize_base_url   # 순환 import 회피 — 함수 안에서
+    except ImportError:
+        return Prefetch(False, "")
+
+    content: object = question
+    if image_png:
+        # 이미지에만 단서가 있는 질문("이 사진 도시의 내일 날씨는?")도 검색어를 만들 수 있다
+        # (2026-07-11 실호출 검증: 질문에 없는 'BUSAN'을 이미지에서 읽어 부산 날씨를 찾아옴).
+        b64 = base64.standard_b64encode(image_png).decode()
+        content = [
+            {"type": "input_text", "text": question},
+            {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"},
+        ]
+
+    try:
+        client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
+        resp = client.responses.create(
+            model=SEARCH_AGENT_MODEL,
+            instructions=_GATEKEEPER_INSTRUCTIONS,
+            input=[{"role": "user", "content": content}],
+            tools=[{"type": "web_search"}],
+        )
+    except Exception:
+        return Prefetch(False, "")   # 못 썼다 ≠ 검색 불필요 → 호출자가 현행 동작으로 열화
+
+    searched = any("search" in (getattr(o, "type", "") or "")
+                   for o in (resp.output or []))
+    if not searched:
+        return Prefetch(True, "")    # 검색 불필요라고 판정함
+    return Prefetch(True, (getattr(resp, "output_text", "") or "").strip())
 
 
 def format_results(query: str, rows: list[dict]) -> str:

@@ -278,6 +278,29 @@ def build_ask_prompt(question: str, context_text: str = "") -> str:
     return _ask_prompt(question, context_text)
 
 
+def build_facts_prompt(prompt: str, facts: str) -> str:
+    """미리 수행한 웹 검색 결과(`facts`)를 user 프롬프트에 끼워 넣는다(여러 모델 비교 전용).
+
+    비교 질의는 모델마다 검색시키지 않고 앞단에서 한 번만 검색해(`web_search.prefetch`) 그
+    자료를 **전 모델에 똑같이** 물린다. 그래야 답이 갈리는 이유가 "무엇을 찾았나"가 아니라
+    "같은 자료를 누가 더 잘 정리하나"로 좁혀진다.
+
+    "자료에 없는 수치를 지어내지 말라"고 못박는 이유: 자료가 부족할 때 모델이 학습 지식에서
+    수치를 끌어오면 다시 모델마다 답이 갈려 공유의 의미가 사라진다.
+    """
+    if not facts.strip():
+        return prompt
+    return (
+        "다음은 이 질문에 답하기 위해 **미리 수행한 웹 검색 결과**입니다.\n"
+        "----\n"
+        f"{facts}\n"
+        "----\n"
+        "이 자료를 근거로 답하세요. 자료에 없는 수치·날짜를 지어내지 말고, 자료가 부족하면 "
+        "부족하다고 밝히세요.\n\n"
+        f"{prompt}"
+    )
+
+
 # ── 엔진 ────────────────────────────────────────────────────────────────────
 
 
@@ -576,8 +599,15 @@ class OcrEngine:
         prompt = _ask_prompt(question, context_text)
         return self.ask_messages([{"role": "user", "content": prompt}], image_png=image_png)
 
-    def ask_messages(self, messages: list[dict], image_png: bytes | None = None) -> str:
+    def ask_messages(self, messages: list[dict], image_png: bytes | None = None,
+                     tools_enabled: bool = True) -> str:
         """멀티턴 AI 질의 — `messages`는 [{"role":"user"/"assistant","content":str}, ...].
+
+        `tools_enabled=False`면 **웹 검색 도구를 붙이지 않는다**(세 경로 모두: 게이트웨이
+        chat.completions의 `web_search` 도구, GPT Responses의 내장 web_search, 공식 API의
+        google_search grounding). 여러 모델 비교에서 쓴다 — 검색은 앞단에서 한 번만 하고
+        (`web_search.prefetch`) 그 자료를 프롬프트에 주입하므로, 여기서 도구를 남겨 두면
+        모델이 또 검색해 자료가 갈린다(공유가 무의미해진다).
 
         마지막 항목이 방금 던진 user 질문이고, 앞선 턴들은 직전까지의 대화(웹 챗봇처럼
         이전 문답을 인지한 상태로 답하게 함). `image_png`는 **첫 user 턴에만** 멀티모달로
@@ -604,7 +634,7 @@ class OcrEngine:
                     return self._call_with_fallback(
                         model_name,
                         call=lambda m: self._ask_openai_responses(
-                            messages, api_key, self.base_url, m, image_png),
+                            messages, api_key, self.base_url, m, image_png, tools_enabled),
                     )
                 except Exception:
                     # 게이트웨이가 이 GPT 모델에 Responses를 안 열어 줄 수도 있다. 그때는
@@ -615,7 +645,8 @@ class OcrEngine:
                     self.last_fallback_from = None
             return self._call_with_fallback(
                 model_name,
-                call=lambda m: self._ask_openai_compat(messages, api_key, self.base_url, m, image_png),
+                call=lambda m: self._ask_openai_compat(
+                    messages, api_key, self.base_url, m, image_png, tools_enabled),
             )
 
         try:
@@ -625,7 +656,7 @@ class OcrEngine:
 
         client = genai.Client(api_key=api_key)
         model_name = self.model or "gemini-2.5-flash"
-        call = lambda m: self._ask_google_genai(client, messages, m, image_png)
+        call = lambda m: self._ask_google_genai(client, messages, m, image_png, tools_enabled)
         try:
             return self._call_with_fallback(model_name, call=call)
         except Exception as exc:
@@ -637,7 +668,8 @@ class OcrEngine:
             if _is_quota_error(exc) and model_name != _FALLBACK_DEFAULT:
                 self.last_fallback_from = model_name
                 self.last_used_model = _FALLBACK_DEFAULT
-                return self._ask_google_genai(client, messages, _FALLBACK_DEFAULT, image_png)
+                return self._ask_google_genai(
+                    client, messages, _FALLBACK_DEFAULT, image_png, tools_enabled)
             raise
 
     def _system_text(self) -> str:
@@ -686,7 +718,7 @@ class OcrEngine:
 
     def _ask_openai_compat(
         self, messages: list[dict], api_key: str, base_url: str, model: str,
-        image_png: bytes | None = None,
+        image_png: bytes | None = None, tools_enabled: bool = True,
     ) -> str:
         """OpenAI 호환 게이트웨이 멀티턴 질의 (모델 폴백 없음 — 도구 왕복은 여기서 처리).
 
@@ -734,11 +766,13 @@ class OcrEngine:
         # **도구를 떼고 한 번 더** 던져 본다 — 되면 그 모델은 도구 미지원(검색 없이 답한다),
         # 그래도 실패면 진짜 오류라 그대로 올라간다. 에러 메시지 문구에 기대지 않는 판별이라
         # 게이트웨이가 뭐라고 답하든 흔들리지 않는다(probe_chat_model의 이미지→텍스트 재시도와
-        # 같은 기법).
-        use_tools = True
+        # 같은 기법). tools_enabled=False(공유 검색)면 애초에 도구를 안 붙이므로 이 춤도 없다.
+        use_tools = tools_enabled
         try:
-            resp = _call(out, with_tools=True)
+            resp = _call(out, with_tools=use_tools)
         except Exception:
+            if not use_tools:
+                raise      # 도구 없이도 실패 = 진짜 오류(재시도해 봐야 같은 결과)
             use_tools = False
             resp = _call(out, with_tools=False)
 
@@ -765,7 +799,7 @@ class OcrEngine:
 
     def _ask_openai_responses(
         self, messages: list[dict], api_key: str, base_url: str, model: str,
-        image_png: bytes | None = None,
+        image_png: bytes | None = None, tools_enabled: bool = True,
     ) -> str:
         """게이트웨이 Responses API 경로 — GPT 전용, OpenAI **내장** 웹 검색 사용.
 
@@ -802,11 +836,12 @@ class OcrEngine:
 
         resp = client.responses.create(
             model=model, instructions=self._system_text(), input=inp,
-            tools=[{"type": "web_search"}])
+            tools=[{"type": "web_search"}] if tools_enabled else [])
         return (getattr(resp, "output_text", "") or "").strip()
 
     def _ask_google_genai(
-        self, client, messages: list[dict], model_name: str, image_png: bytes | None = None
+        self, client, messages: list[dict], model_name: str, image_png: bytes | None = None,
+        tools_enabled: bool = True,
     ) -> str:
         """공식 Google API 멀티턴 질의 단일 호출 (폴백 없음). 신 SDK google-genai 사용.
 
@@ -821,7 +856,7 @@ class OcrEngine:
         from google.genai import types
         config = types.GenerateContentConfig(
             system_instruction=self.system_prompt or AI_SYSTEM_PROMPT,
-            tools=[types.Tool(google_search=types.GoogleSearch())],
+            tools=[types.Tool(google_search=types.GoogleSearch())] if tools_enabled else None,
             max_output_tokens=16384,
         )
         contents = []

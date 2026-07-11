@@ -12,6 +12,7 @@ import json
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer, QObject, pyqtSignal, QBuffer, QRect, Qt
 
+from pasteflow import web_search
 from pasteflow.database import Database
 from pasteflow.models import ClipboardItem
 from pasteflow.paste_queue import PasteQueue
@@ -662,6 +663,7 @@ class _SignalBridge(QObject):
     ai_turn_done       = pyqtSignal(object)  # AI 워커 스레드 → 메인: 대화 턴 결과 dict(팝업·답변·히스토리)
     ai_error           = pyqtSignal(object)  # AI 워커 스레드 → 메인: 에러 dict({popup, msg})
     ai_searching       = pyqtSignal(str)     # AI 워커 스레드 → 메인: 웹 검색 시작(검색어) / 종료("")
+    ai_prefetch_done   = pyqtSignal(object)  # 공유 검색 워커 → 메인: 검색 자료 dict(jobs·facts·available)
 
 
 class PasteFlowApp:
@@ -700,6 +702,7 @@ class PasteFlowApp:
         self._bridge.ai_turn_done.connect(self._on_ai_turn_done)
         self._bridge.ai_error.connect(self._on_ai_error)
         self._bridge.ai_searching.connect(self._on_ai_searching)
+        self._bridge.ai_prefetch_done.connect(self._on_ai_prefetch_done)
 
         self._saved_panel_geometry = None
         self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
@@ -1016,8 +1019,12 @@ class PasteFlowApp:
         self._run_ai_turn(conversation, image_png, popup=None)
 
     def _run_ai_turn(self, conversation: list, image_png: bytes | None, popup,
-                     model: str | None = None):
+                     model: str | None = None, tools_enabled: bool = True):
         """대화 한 턴을 백그라운드에서 질의한다(첫 질문·후속 질문·비교 질의 공용).
+
+        `tools_enabled=False`는 **공유 검색 모드**(여러 모델 비교) — 검색은 앞단에서 이미
+        한 번 끝났고 그 자료가 프롬프트에 주입돼 있으므로, 모델이 또 검색하지 못하게 도구를
+        뗀다. 그래야 세 모델이 같은 자료를 본다.
 
         OCR과 동일한 게이트웨이/공식 배관(`OcrEngine.ask_messages`)을 재사용한다. OCR 엔진
         설정과 무관하게 항상 gemini 경로. `image_png`는 첫 user 턴에만 멀티모달로 실린다.
@@ -1047,7 +1054,8 @@ class PasteFlowApp:
                 # "멈춘 게 아니라 검색 중"임을 진행 칩에 보여준다(첫 턴 한정 — 후속·비교
                 # 창은 팝업 자체가 '생각 중'을 표시하므로 슬롯이 무시한다).
                 engine.on_tool_progress = self._bridge.ai_searching.emit
-                answer = engine.ask_messages(messages, image_png=image_png)
+                answer = engine.ask_messages(messages, image_png=image_png,
+                                             tools_enabled=tools_enabled)
                 if engine.last_fallback_from and engine.last_used_model:
                     self._bridge.ocr_fallback.emit(engine.last_fallback_from, engine.last_used_model)
                 new_conv = conversation + [{"role": "assistant", "content": answer}]
@@ -1105,6 +1113,10 @@ class PasteFlowApp:
         col_w = max(280, (avail.width() - gap * (n + 1)) // n)
 
         prompt = build_ask_prompt(question, context_text)
+        # 이 비교 그룹이 공유하는 검색 자료 캐시(질문 → 검색 결과). 같은 후속 질문을 여러
+        # 창에 던져도 검색은 한 번만 하고 같은 자료를 재사용한다.
+        cache: dict[str, str] = {}
+        jobs = []
         for i, model in enumerate(models):
             x = avail.left() + gap + i * (col_w + gap)
             rect = QRect(x, avail.top() + margin_v, col_w, tile_h)
@@ -1118,8 +1130,63 @@ class PasteFlowApp:
             popup.copy_text_requested.connect(self._on_copy_selected_text)
             popup.followup_requested.connect(
                 lambda text, p=popup: self._on_ai_followup(p, text))
+            popup._shared_cache = cache   # 이 창이 비교 그룹 소속임을 표시(후속 질문 경로 분기)
             conversation = [{"role": "user", "content": prompt, "display": question}]
-            self._run_ai_turn(conversation, image_png, popup=popup, model=model)
+            jobs.append({"popup": popup, "model": model, "conversation": conversation})
+
+        # 모델별로 각자 검색시키지 않는다 — 한 번 검색해 같은 자료를 셋 다에게 물린다.
+        self._start_shared_search(question, jobs, image_png, cache)
+
+    def _start_shared_search(self, question: str, jobs: list[dict],
+                             image_png: bytes | None, cache: dict):
+        """비교 질의의 웹 검색을 **앞단에서 한 번만** 수행하고 그 자료로 전 모델을 질의한다.
+
+        각 모델이 스스로 검색하면(v1.45.0까지의 동작) 같은 질문에도 서로 다른 자료를 찾아와
+        수치가 갈리고, 비교가 "누가 더 잘 정리하나"가 아니라 "각자 뭘 찾았나"가 되어 버린다
+        (2026-07-11 실측: 같은 날씨 질문에 36/25 · 36/24+출처불신 · "인터넷 없어서 모름" 3인3색).
+        검색 비용도 모델 수만큼 든다. 그래서 `web_search.prefetch`(nano 심부름꾼)가 **검색
+        필요 여부 판단과 검색을 한 콜로** 끝내고, 그 결과를 프롬프트에 주입한 뒤 모델 도구는
+        끈다(`tools_enabled=False` — 안 끄면 모델이 또 검색해 공유가 무의미해진다).
+
+        심부름꾼을 못 쓰면(공식 백엔드·nano 권한 없음·네트워크) `available=False`로 돌아오고,
+        그때는 **현행 동작으로 열화**한다(각 모델이 자기 도구로 검색). "못 썼다"를 "검색
+        불필요"로 읽으면 실시간 질문에 도구도 없이 답하게 되므로 둘을 구분한다.
+        """
+        def _run():
+            facts = cache.get(question)
+            available = True
+            if facts is None:
+                api_key, base_url, _ = self._resolve_gemini_cfg()
+                res = web_search.prefetch(question, api_key=api_key, base_url=base_url,
+                                          image_png=image_png)
+                available, facts = res.available, res.facts
+                if available:
+                    cache[question] = facts   # ""(검색 불필요)도 캐시 — 재판정 비용 절약
+            self._bridge.ai_prefetch_done.emit({
+                "jobs": jobs, "facts": facts, "available": available, "image_png": image_png,
+            })
+
+        threading.Thread(target=_run, daemon=True, name="ai-prefetch").start()
+
+    def _on_ai_prefetch_done(self, payload: dict):
+        """공유 검색이 끝났다 — 같은 자료를 각 모델 프롬프트에 주입해 병렬 질의를 띄운다.
+
+        검색 자료는 **그 턴의 user 메시지**에 끼운다(첫 턴이든 후속 턴이든 방금 던진 질문에
+        대한 자료이므로). 자료가 실린 대화가 그대로 팝업 히스토리에 남아 다음 턴에서도 모델이
+        무엇을 근거로 답했는지 기억한다.
+        """
+        from pasteflow.ocr_engine import build_facts_prompt
+
+        facts, available = payload["facts"], payload["available"]
+        image_png = payload["image_png"]
+        for job in payload["jobs"]:
+            conv = [dict(t) for t in job["conversation"]]
+            if facts:
+                conv[-1]["content"] = build_facts_prompt(conv[-1]["content"], facts)
+            # 심부름꾼이 돌았으면 모델 도구를 뗀다(공유 자료만 보게). 못 썼으면 현행대로
+            # 모델이 자기 도구로 검색하게 둔다 — 안 그러면 실시간 질문에 답할 길이 사라진다.
+            self._run_ai_turn(conv, image_png, popup=job["popup"], model=job["model"],
+                              tools_enabled=not available)
 
     def _start_cursor_progress(self, prefix: str, icon: str, anchor):
         """진행 칩 — 지속형 토스트(클릭 통과) + 0.5초 간격 경과시간 갱신.
@@ -1934,6 +2001,16 @@ class PasteFlowApp:
         image_png = getattr(popup, "_image_png", None)
         model = getattr(popup, "_ai_model", None)  # 비교 창은 자기 모델로 이어감
         new_conv = conversation + [{"role": "user", "content": text, "display": text}]
+
+        cache = getattr(popup, "_shared_cache", None)
+        if cache is not None:
+            # 비교 창 — 후속 질문도 공유 검색 경로로 보낸다. 첫 턴만 공유하고 후속을 모델에
+            # 맡기면 "그럼 모레는?" 한 마디에 세 모델이 각자 검색해 수치 분기가 되살아난다.
+            # 같은 후속 질문을 다른 창에도 던지면 캐시가 같은 자료를 재사용한다.
+            job = {"popup": popup, "model": model, "conversation": new_conv}
+            self._start_shared_search(text, [job], image_png, cache)
+            return
+
         self._run_ai_turn(new_conv, image_png, popup=popup, model=model)
 
     def _on_copy_selected_text(self, text: str):

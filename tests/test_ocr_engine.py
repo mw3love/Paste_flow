@@ -590,6 +590,72 @@ class TestWebSearchToolLoop:
         assert f"{today.year}년 {today.month}월 {today.day}일" in system["content"]
 
 
+class TestSharedSearchNoTools:
+    """여러 모델 비교의 '공유 검색' 모드 — tools_enabled=False면 세 경로 모두 도구를 뗀다.
+
+    검색은 앞단에서 한 번만 하고(web_search.prefetch) 그 자료를 프롬프트에 주입하므로,
+    여기서 도구를 남겨 두면 모델이 또 검색해 세 창의 자료가 갈린다(공유가 무의미해진다).
+    """
+
+    def test_compat_경로는_도구없이_한_번만_호출한다(self, monkeypatch):
+        from pasteflow.ocr_engine import OcrEngine
+        from pasteflow import web_search
+
+        searched = []
+        monkeypatch.setattr(web_search, "search",
+                            lambda q, **kw: searched.append(q) or "x")
+        sent = _install_fake_openai(monkeypatch, [
+            _fake_response(_fake_message(content="답변")),
+        ])
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        out = engine._ask_openai_compat(
+            [{"role": "user", "content": "q"}], "k", "https://gw",
+            "gemini-3.1-flash-lite", None, False)
+
+        assert out == "답변"
+        assert len(sent) == 1
+        assert "tools" not in sent[0], "공유 검색 모드는 도구를 안 붙인다"
+        assert searched == [], "앞단이 검색을 끝냈으므로 모델은 검색하지 않는다"
+
+    def test_responses_경로는_tools를_빈_리스트로_보낸다(self, monkeypatch):
+        from pasteflow.ocr_engine import OcrEngine
+
+        sent = []
+
+        def _create(**kwargs):
+            sent.append(kwargs)
+            return types.SimpleNamespace(output_text="답변")
+
+        client = MagicMock()
+        client.responses.create = _create
+        fake = types.ModuleType("openai")
+        fake.OpenAI = MagicMock(return_value=client)
+        monkeypatch.setitem(sys.modules, "openai", fake)
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        engine._ask_openai_responses(
+            [{"role": "user", "content": "q"}], "k", "https://gw", "gpt-5-mini", None, False)
+
+        assert sent[0]["tools"] == [], "GPT 내장 web_search를 붙이지 않는다"
+
+    def test_tools_enabled_기본은_True라_기존_동작_유지(self, monkeypatch):
+        # 단일 질의는 여전히 도구를 붙여 모델이 스스로 검색할 수 있어야 한다(회귀 가드).
+        from pasteflow.ocr_engine import OcrEngine
+        from pasteflow import web_search
+
+        monkeypatch.setattr(web_search, "search", lambda q, **kw: "x")
+        sent = _install_fake_openai(monkeypatch, [
+            _fake_response(_fake_message(content="답변")),
+        ])
+
+        engine = OcrEngine(kind="gemini", api_key="k", base_url="https://gw")
+        engine._ask_openai_compat(
+            [{"role": "user", "content": "q"}], "k", "https://gw", "claude-sonnet-5")
+
+        assert "tools" in sent[0]
+
+
 class TestResponsesApiRouting:
     """GPT는 Responses API(내장 웹 검색)로, 나머지는 chat.completions(DDG)로 간다."""
 
