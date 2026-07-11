@@ -7,10 +7,10 @@ Enter로 전송, Shift+Enter 줄바꿈, Esc 취소.
 
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
-    QPushButton, QCheckBox,
+    QPushButton, QCheckBox, QFileDialog,
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QCursor, QPixmap
+from PyQt6.QtCore import Qt, QBuffer, QByteArray, QIODevice
+from PyQt6.QtGui import QCursor, QPixmap, QImage
 
 from pasteflow.ui.theme import COLORS, PEACH_HOVER
 
@@ -112,22 +112,42 @@ class AiQueryDialog(QDialog):
         layout.setSpacing(8)
         layout.setContentsMargins(12, 12, 12, 12)
 
+        # 첨부 이미지(PNG bytes) — 우클릭 이미지 항목의 컨텍스트로 시작하거나, 아래 첨부
+        # 버튼(클립보드/파일)으로 사용자가 붙인다. 질의 시 image_png로 멀티모달 전송된다.
+        self._image: bytes | None = context_image
+
         ctx = (context_text or "").strip()
-        if context_image:
-            pix = QPixmap()
-            if pix.loadFromData(context_image) and not pix.isNull():
-                layout.addWidget(QLabel("선택한 이미지(컨텍스트):"))
-                thumb = pix.scaled(
-                    280, 180,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                img_label = QLabel()
-                img_label.setObjectName("ctx")
-                img_label.setPixmap(thumb)
-                img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                layout.addWidget(img_label)
-        elif ctx:
+        # 이미지 미리보기 — self._image가 있을 때만 보인다. 첨부/제거 시 갱신.
+        self._img_caption = QLabel("이미지 (질문과 함께 전송):")
+        self._img_label = QLabel()
+        self._img_label.setObjectName("ctx")
+        self._img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._img_caption)
+        layout.addWidget(self._img_label)
+
+        # 첨부 버튼 행 — 클립보드 이미지 붙이기 / 파일에서 고르기 / 제거.
+        attach_row = QHBoxLayout()
+        attach_row.setContentsMargins(0, 0, 0, 0)
+        attach_row.setSpacing(6)
+        self._attach_clip_btn = QPushButton("📋 클립보드 이미지")
+        self._attach_clip_btn.setToolTip("현재 클립보드의 이미지를 질문에 첨부합니다.")
+        self._attach_clip_btn.clicked.connect(self._attach_from_clipboard)
+        self._attach_file_btn = QPushButton("📁 파일…")
+        self._attach_file_btn.setToolTip("이미지 파일을 골라 질문에 첨부합니다.")
+        self._attach_file_btn.clicked.connect(self._attach_from_file)
+        self._remove_img_btn = QPushButton("✕ 이미지 제거")
+        self._remove_img_btn.clicked.connect(self._remove_image)
+        for b in (self._attach_clip_btn, self._attach_file_btn, self._remove_img_btn):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+        attach_row.addWidget(self._attach_clip_btn)
+        attach_row.addWidget(self._attach_file_btn)
+        attach_row.addWidget(self._remove_img_btn)
+        attach_row.addStretch(1)
+        layout.addLayout(attach_row)
+
+        self._refresh_image_preview()
+
+        if not self._image and ctx:
             layout.addWidget(QLabel("선택한 항목(컨텍스트):"))
             preview = ctx[: self._CTX_PREVIEW_CHARS].replace("\n", " ")
             if len(ctx) > self._CTX_PREVIEW_CHARS:
@@ -226,3 +246,70 @@ class AiQueryDialog(QDialog):
     def is_compare(self) -> bool:
         """'여러 모델로 비교' 체크 여부. 체크박스가 없으면(모델 미설정) 항상 False."""
         return self._compare_check is not None and self._compare_check.isChecked()
+
+    def get_image(self) -> bytes | None:
+        """질문과 함께 보낼 이미지(PNG bytes). 없으면 None."""
+        return self._image
+
+    # ── 이미지 첨부 ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _qimage_to_png(image: QImage) -> bytes | None:
+        """QImage → PNG bytes. 파이프라인이 PNG를 기대하므로 원본 포맷과 무관하게 통일."""
+        if image.isNull():
+            return None
+        buf = QBuffer(QByteArray())
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        if not image.save(buf, "PNG"):
+            return None
+        return bytes(buf.data())
+
+    def _attach_from_clipboard(self):
+        """현재 클립보드의 이미지를 첨부한다(없으면 안내)."""
+        image = QApplication.clipboard().image()
+        png = self._qimage_to_png(image) if image is not None else None
+        if not png:
+            self._img_caption.setText("클립보드에 이미지가 없습니다.")
+            return
+        self._image = png
+        self._refresh_image_preview()
+
+    def _attach_from_file(self):
+        """이미지 파일을 골라 첨부한다(PNG로 정규화)."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "이미지 파일 선택", "",
+            "이미지 (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;모든 파일 (*.*)")
+        if not path:
+            return
+        image = QImage(path)
+        png = self._qimage_to_png(image)
+        if not png:
+            self._img_caption.setText("이미지를 읽지 못했습니다.")
+            return
+        self._image = png
+        self._refresh_image_preview()
+
+    def _remove_image(self):
+        self._image = None
+        self._refresh_image_preview()
+
+    def _refresh_image_preview(self):
+        """self._image에 맞춰 미리보기·버튼 표시를 갱신한다."""
+        has_img = self._image is not None
+        if has_img:
+            pix = QPixmap()
+            if pix.loadFromData(self._image) and not pix.isNull():
+                thumb = pix.scaled(
+                    280, 180,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self._img_label.setPixmap(thumb)
+                self._img_caption.setText("이미지 (질문과 함께 전송):")
+            else:
+                has_img = False
+                self._image = None
+        if not has_img:
+            self._img_label.clear()
+        self._img_caption.setVisible(has_img)
+        self._img_label.setVisible(has_img)
+        self._remove_img_btn.setVisible(has_img)

@@ -1590,10 +1590,11 @@ class PasteFlowApp:
         question = dialog.get_question()
         if not question:
             return
+        image_png = dialog.get_image()  # 사용자가 첨부했으면 함께 전송(없으면 None)
         if dialog.is_compare():
-            self._start_compare_query(question, "", None, compare_models)
+            self._start_compare_query(question, "", image_png, compare_models)
         else:
-            self._start_ai_worker(question, "")
+            self._start_ai_worker(question, "", image_png=image_png)
 
     def _on_pin_hotkey(self):
         """화면에 핀 단축키(기본 Alt+F3) — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다.
@@ -2000,6 +2001,7 @@ class PasteFlowApp:
             question = dialog.get_question()
             if not question:
                 return
+            image_png = dialog.get_image()  # 사용자가 제거·교체했으면 그 결과를 존중
             if dialog.is_compare():
                 self._start_compare_query(question, "", image_png, compare_models)
             else:
