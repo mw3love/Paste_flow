@@ -38,9 +38,10 @@ class AiQueryDialog(QDialog):
     _CTX_PREVIEW_CHARS = 300
 
     def __init__(self, context_text: str, parent=None, context_image: bytes | None = None,
-                 compare_models: list[str] | None = None):
+                 compare_models: list[dict] | None = None):
         super().__init__(parent)
-        self._compare_models = [m for m in (compare_models or []) if m]
+        # compare_models는 (backend, model) spec dict 목록(v1.47.0 — 크로스 백엔드 비교).
+        self._compare_models = [s for s in (compare_models or []) if s and s.get("model")]
         self.setWindowTitle("AI에게 질문")
         self.setMinimumSize(420, 240)
         self.setStyleSheet(f"""
@@ -148,9 +149,12 @@ class AiQueryDialog(QDialog):
         if len(self._compare_models) >= 2:
             self._compare_check = QCheckBox(
                 f"🔀 여러 모델로 비교 ({len(self._compare_models)}개)")
+            _blabel = {"official": "공식", "gateway": "게이트웨이"}
             self._compare_check.setToolTip(
                 "이 질문을 아래 모델들로 동시에 질의해 답변을 나란히 비교합니다:\n"
-                + "\n".join(f"· {m}" for m in self._compare_models))
+                + "\n".join(
+                    f"· {s['model']} ({_blabel.get(s.get('backend', ''), s.get('backend', ''))})"
+                    for s in self._compare_models))
             layout.addWidget(self._compare_check)
 
         btn_row = QHBoxLayout()
