@@ -16,11 +16,13 @@ from pasteflow.ui.theme import COLORS, PEACH_HOVER
 
 
 class _QuestionEdit(QPlainTextEdit):
-    """Enter=전송, Shift+Enter=줄바꿈."""
+    """Enter=전송, Shift+Enter=줄바꿈. Ctrl+V/드롭으로 이미지 첨부."""
 
-    def __init__(self, on_submit, parent=None):
+    def __init__(self, on_submit, on_image_paste=None, parent=None):
         super().__init__(parent)
         self._on_submit = on_submit
+        self._on_image_paste = on_image_paste
+        self.setAcceptDrops(True)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -30,6 +32,30 @@ class _QuestionEdit(QPlainTextEdit):
             self._on_submit()
             return
         super().keyPressEvent(event)
+
+    def insertFromMimeData(self, source):
+        """붙여넣기(Ctrl+V)·드롭 시 이미지면 텍스트 대신 첨부한다.
+
+        - 원본 이미지(그림 캡처 등)면 그대로 첨부.
+        - 로컬 이미지 '파일'을 복사/드롭했으면(경로만 들어옴) 그 파일을 읽어 첨부.
+        둘 다 아니면 기본 동작(텍스트 삽입).
+        """
+        if self._on_image_paste is not None:
+            if source.hasImage():
+                img = source.imageData()
+                if hasattr(img, "toImage"):  # QPixmap로 올 때
+                    img = img.toImage()
+                if isinstance(img, QImage) and not img.isNull():
+                    self._on_image_paste(img)
+                    return
+            if source.hasUrls():
+                for url in source.urls():
+                    if url.isLocalFile():
+                        fimg = QImage(url.toLocalFile())
+                        if not fimg.isNull():
+                            self._on_image_paste(fimg)
+                            return
+        super().insertFromMimeData(source)
 
 
 class AiQueryDialog(QDialog):
@@ -159,7 +185,7 @@ class AiQueryDialog(QDialog):
 
         layout.addWidget(QLabel("질문을 입력하세요 (Enter 전송 · Shift+Enter 줄바꿈):"))
 
-        self._editor = _QuestionEdit(self._try_submit)
+        self._editor = _QuestionEdit(self._try_submit, on_image_paste=self._on_image_pasted)
         self._editor.setFocus()
         layout.addWidget(self._editor, 1)
 
@@ -255,13 +281,16 @@ class AiQueryDialog(QDialog):
     @staticmethod
     def _qimage_to_png(image: QImage) -> bytes | None:
         """QImage → PNG bytes. 파이프라인이 PNG를 기대하므로 원본 포맷과 무관하게 통일."""
-        if image.isNull():
+        if image is None or image.isNull():
             return None
-        buf = QBuffer(QByteArray())
+        # ⚠ QByteArray를 지역변수로 잡아 살려둔다 — QBuffer는 이걸 참조로만 쓰므로,
+        # QBuffer(QByteArray())처럼 임시객체를 넘기면 GC 후 dangling → save 시 크래시.
+        ba = QByteArray()
+        buf = QBuffer(ba)
         buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        if not image.save(buf, "PNG"):
-            return None
-        return bytes(buf.data())
+        ok = image.save(buf, "PNG")
+        buf.close()
+        return bytes(ba) if ok else None
 
     def _attach_from_clipboard(self):
         """현재 클립보드의 이미지를 첨부한다(없으면 안내)."""
@@ -287,6 +316,13 @@ class AiQueryDialog(QDialog):
             return
         self._image = png
         self._refresh_image_preview()
+
+    def _on_image_pasted(self, image: QImage):
+        """질문칸에 Ctrl+V/드롭된 이미지를 첨부한다(_QuestionEdit 콜백)."""
+        png = self._qimage_to_png(image)
+        if png:
+            self._image = png
+            self._refresh_image_preview()
 
     def _remove_image(self):
         self._image = None
