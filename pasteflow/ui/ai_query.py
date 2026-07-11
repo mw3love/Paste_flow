@@ -69,6 +69,10 @@ class AiQueryDialog(QDialog):
         # compare_models는 (backend, model) spec dict 목록(v1.47.0 — 크로스 백엔드 비교).
         self._compare_models = [s for s in (compare_models or []) if s and s.get("model")]
         self.setWindowTitle("AI에게 질문")
+        # 창-모달 — exec()의 기본값 application-modal은 부모 없는 최상위 오버레이(영역 캡처
+        # Alt+F2·AI OCR)까지 입력을 막는다. 창-모달로 좁히면 부모(패널)만 잠기고 오버레이는
+        # 그대로 동작해, 질문창이 열린 채로도 캡처해서 Ctrl+V로 붙여넣을 수 있다.
+        self.setWindowModality(Qt.WindowModality.WindowModal)
         self.setMinimumSize(420, 240)
         self.setStyleSheet(f"""
             QDialog {{
