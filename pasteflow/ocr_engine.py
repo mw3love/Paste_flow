@@ -672,20 +672,40 @@ class OcrEngine:
                     client, messages, _FALLBACK_DEFAULT, image_png, tools_enabled)
             raise
 
-    def _system_text(self) -> str:
-        """AI 질의용 시스템 프롬프트 + 오늘 날짜.
+    def _system_text(self, search_available: bool = False) -> str:
+        """AI 질의용 시스템 프롬프트 + 오늘 날짜 (+검색 도구가 붙었으면 검색 지시).
 
         날짜를 박아 주는 이유: 모델은 '오늘'이 며칠인지 모른다(학습 시점에 얼려져 있다).
         날짜가 없으면 검색 결과를 받아 놓고도 "현재 날짜를 알 수 없어 '내일'이 언제인지
         모르겠다"고 답한다 — 2026-07-11 gemini-2.5-flash에서 실제로 재현된 증상이다.
+
+        `search_available`(웹 검색 도구가 실제로 붙는 경로에서만 True)면 "검색 도구가
+        있으니 실시간 질문은 포기 말고 검색하라"는 지시를 덧붙인다. 페르소나(AI_SYSTEM_PROMPT)
+        의 '정직' 원칙이 "최신 정보는 한계를 밝히고 확인을 권하라"고 해, **모델이 스스로
+        도구를 골라야 하는 chat.completions 도구-왕복 경로(claude·grok·solar 등)**에서
+        모델이 검색 대신 "실시간 정보에 접근할 수 없다"고 포기하는 것을 막는다(2026-07-11
+        실측: 게이트웨이 claude-haiku가 날씨 질문에 검색 없이 기상청을 안내함). 서버측 검색을
+        쓰는 gpt(Responses)·gemini(grounding)는 페르소나와 무관하게 검색하지만, 지시를
+        얹어도 무해하다. 도구가 없는 경로(공유 검색 `tools_enabled=False`·OCR)에는 붙이지
+        않아 도구 없이 검색을 종용하는 모순을 피하고 자유질문의 환각 억제 원칙을 보존한다.
         """
         base = self.system_prompt or AI_SYSTEM_PROMPT
         today = _dt.date.today()
         weekday = "월화수목금토일"[today.weekday()]
+        search_note = ""
+        if search_available:
+            search_note = (
+                "\n\n[웹 검색] 당신에게는 web_search 도구가 있습니다. '오늘·내일·최근·현재·"
+                "최신·가격·환율·날씨·뉴스·일정'처럼 학습 시점 이후이거나 실시간으로 바뀌는 "
+                "정보를 묻는 질문에는, 학습 지식으로 추측하거나 '실시간 정보에 접근할 수 "
+                "없다'며 넘기지 말고 반드시 web_search로 먼저 조회한 뒤 그 결과를 근거로 "
+                "답하세요. 검색 결과의 수치는 그대로 쓰고 지어내지 마세요."
+            )
         return (
             f"{base}\n\n"
             f"[참고] 오늘은 {today.year}년 {today.month}월 {today.day}일 ({weekday}요일)입니다. "
             f"'오늘·내일·어제·최근·현재' 같은 표현은 이 날짜를 기준으로 해석하세요."
+            f"{search_note}"
         )
 
     def _run_tool_call(self, tool_call: dict) -> dict:
@@ -741,7 +761,7 @@ class OcrEngine:
             raise RuntimeError("openai 패키지 미설치: pip install openai")
         client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
 
-        out = [{"role": "system", "content": self._system_text()}]
+        out = [{"role": "system", "content": self._system_text(search_available=tools_enabled)}]
         first_user_done = False
         for m in messages:
             role, content = m["role"], m["content"]
@@ -835,8 +855,8 @@ class OcrEngine:
             inp.append({"role": role, "content": content})
 
         resp = client.responses.create(
-            model=model, instructions=self._system_text(), input=inp,
-            tools=[{"type": "web_search"}] if tools_enabled else [])
+            model=model, instructions=self._system_text(search_available=tools_enabled),
+            input=inp, tools=[{"type": "web_search"}] if tools_enabled else [])
         return (getattr(resp, "output_text", "") or "").strip()
 
     def _ask_google_genai(
