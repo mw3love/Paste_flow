@@ -1097,6 +1097,7 @@ class PasteFlowApp:
 
         def _run():
             try:
+                import time
                 from pasteflow.ocr_engine import OcrEngine
                 api_key, base_url, model_id = self._resolve_gemini_cfg(
                     model_override=model, backend_override=backend)
@@ -1107,15 +1108,17 @@ class PasteFlowApp:
                 # "멈춘 게 아니라 검색 중"임을 진행 칩에 보여준다(첫 턴 한정 — 후속·비교
                 # 창은 팝업 자체가 '생각 중'을 표시하므로 슬롯이 무시한다).
                 engine.on_tool_progress = self._bridge.ai_searching.emit
+                t0 = time.monotonic()
                 answer = engine.ask_messages(messages, images=images,
                                              tools_enabled=tools_enabled)
+                elapsed = time.monotonic() - t0  # 이 답변에 걸린 실제 시간(답변창 상단 표시)
                 if engine.last_fallback_from and engine.last_used_model:
                     self._bridge.ocr_fallback.emit(engine.last_fallback_from, engine.last_used_model)
                 new_conv = conversation + [{"role": "assistant", "content": answer}]
                 self._bridge.ai_turn_done.emit({
                     "popup": popup, "answer": answer,
                     "conversation": new_conv, "images": images,
-                    "model": model, "backend": backend,
+                    "model": model, "backend": backend, "elapsed": elapsed,
                 })
             except Exception as e:
                 self._bridge.ai_error.emit({"popup": popup, "msg": str(e)})
@@ -2086,6 +2089,9 @@ class PasteFlowApp:
         # 다를 수 있으므로 backend도 함께 기억한다.
         popup._ai_model = payload.get("model")
         popup._ai_backend = payload.get("backend")
+        elapsed = payload.get("elapsed")
+        if elapsed is not None:
+            popup.set_elapsed(elapsed)  # 이 답변에 걸린 시간을 답변창 상단에 표시
 
     def _on_ai_followup(self, popup, text: str):
         """답변창 하단 입력칸 Enter → 이전 문답을 인지한 상태로 후속 질의.

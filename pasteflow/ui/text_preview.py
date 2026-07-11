@@ -359,11 +359,13 @@ class TextPreviewPopup(QWidget):
         # 목적: 대화가 이어져도 한 화면에 한 문답만 보여 스크롤이 무한정 길어지지 않게(사용자
         # 요청). 모델은 여전히 전체 대화를 인지하며, 탭은 표시만 나눈다.
         self._turns: list[tuple[str, str]] = []   # [(질문 원문, 답변 or _PENDING), ...]
+        self._turn_secs: list = []   # 각 턴의 답변 소요 시간(초, 모르면 None) — _turns와 평행
         self._current_tab: int = 0
         self._think_timer: QTimer | None = None   # 펜딩 탭 "생각 중" 경과시간 갱신 타이머
         self._tab_btns: list[QPushButton] = []
         self._tabbar: QWidget | None = None
         self._tab_layout: QHBoxLayout | None = None
+        self._elapsed_label: QLabel | None = None
         if markdown:
             self._tabbar = QWidget()
             self._tabbar.setFixedHeight(34)
@@ -372,6 +374,11 @@ class TextPreviewPopup(QWidget):
             # 4버튼×26 + 3×6(gap) + 6(m) ≈ 128.
             self._tab_layout.setContentsMargins(4, 4, 128, 2)
             self._tab_layout.setSpacing(4)
+            # 상단 바 우측(탭·모델명 다음)에 이 답변에 걸린 시간을 흐리게 표시. 부차 정보라
+            # 코랄/텍스트색이 아닌 중간 회색으로 두어 답변에서 시선을 안 뺏는다.
+            self._elapsed_label = QLabel("")
+            self._elapsed_label.setStyleSheet(
+                "QLabel{color:#9399a2;font-size:11px;padding:2px 6px;}")
             self._tabbar.setVisible(False)
             container_layout.addWidget(self._tabbar)
 
@@ -782,6 +789,8 @@ class TextPreviewPopup(QWidget):
             self.set_thinking(False)
             return
         self._turns.pop()
+        if self._turn_secs:
+            self._turn_secs.pop()
         self._current_tab = max(0, len(self._turns) - 1)
         self._rebuild_tabs()
         self._marks = []
@@ -793,6 +802,7 @@ class TextPreviewPopup(QWidget):
     def _append_turn_data(self, question: str, answer: str):
         """대화 턴 데이터 추가 + 탭 바 갱신(현재 탭=최신). 렌더는 호출자가 한다."""
         self._turns.append((question, answer))
+        self._turn_secs.append(None)   # 소요 시간은 답 도착 시 set_elapsed가 채운다
         self._current_tab = len(self._turns) - 1
         self._rebuild_tabs()
 
@@ -838,6 +848,7 @@ class TextPreviewPopup(QWidget):
         self._marks = []
         self._render_current_turn()
         self._update_tab_styles()
+        self._refresh_elapsed_label()   # 탭마다 그 턴의 소요 시간을 보여준다
         # 펜딩 탭(생각 중)은 본문이 짧아 재산정하면 창이 확 줄어든다 → 이전 크기 유지
         # (begin_followup과 동일 정책). 완성된 탭으로 갈 때만 그 내용에 맞춰 재산정.
         if not self._manual_size and self._turns[idx][1] is not _PENDING:
@@ -874,10 +885,44 @@ class TextPreviewPopup(QWidget):
                 lay.addWidget(b)
                 self._tab_btns.append(b)
         lay.addStretch(1)
+        # 소요 시간 라벨은 우측(버튼 행 왼쪽)에 상시 배치 — 값이 있을 때만 보인다.
+        if self._elapsed_label is not None:
+            lay.addWidget(self._elapsed_label)
+        self._refresh_elapsed_label()
         self._update_tab_styles()
-        # 한 턴이면 숨김(첫 답변은 예전 모습). 두 번째부터 탭 노출.
-        # 단 비교 창(_model_title)은 모델명을 보여야 하므로 한 턴에도 바를 노출한다.
-        self._tabbar.setVisible(bool(self._model_title) or len(self._turns) > 1)
+        # 한 턴이면 숨김(첫 답변은 예전 모습). 두 번째부터 탭 노출. 단 비교 창(_model_title)은
+        # 모델명을, 소요 시간이 있으면 그 시간을 보여야 하므로 그때도 바를 노출한다.
+        self._tabbar.setVisible(self._topbar_visible())
+
+    def _topbar_visible(self) -> bool:
+        """상단 바를 띄울지 — 모델명 / 두 턴 이상 / 소요 시간이 하나라도 있으면 True."""
+        return (bool(self._model_title) or len(self._turns) > 1
+                or any(s is not None for s in self._turn_secs))
+
+    def _refresh_elapsed_label(self):
+        """현재 탭의 소요 시간을 상단 바 라벨에 반영한다(없으면 숨김)."""
+        lbl = self._elapsed_label
+        if lbl is None:
+            return
+        secs = (self._turn_secs[self._current_tab]
+                if 0 <= self._current_tab < len(self._turn_secs) else None)
+        lbl.setText(f"⏱ {secs:.1f}초" if secs is not None else "")
+        lbl.setVisible(secs is not None)
+
+    def set_elapsed(self, secs: float):
+        """이번(현재 탭) 답변에 걸린 시간을 상단 바에 표시한다. main이 답 도착 시 호출.
+
+        첫 단일 답변은 상단 바가 숨겨져 있다가 여기서 처음 나타나므로, 그때는 늘어난 상단
+        예약만큼 창 크기를 다시 잡는다(수동 리사이즈 중이면 유지).
+        """
+        if self._tabbar is None:
+            return
+        if 0 <= self._current_tab < len(self._turn_secs):
+            self._turn_secs[self._current_tab] = secs
+        was_visible = self._tabbar.isVisible()
+        self._rebuild_tabs()   # 라벨 반영 + 상단 바 표시 여부 갱신
+        if not self._manual_size and self._tabbar.isVisible() and not was_visible:
+            self._resize_to_content()
 
     def _update_tab_styles(self):
         """현재 탭=코랄 강조, 나머지=중립. (앱 2톤 체계와 동일)"""
@@ -893,9 +938,9 @@ class TextPreviewPopup(QWidget):
                     f"font-size:12px;}}QPushButton:hover{{background:{_SURFACE2};}}")
 
     def _top_reserve(self) -> int:
-        """상단 턴 탭 바가 차지하는 높이(두 턴 이상 또는 비교 창 — 자동 크기 산정에서 예약)."""
+        """상단 바가 차지하는 높이(두 턴 이상·비교 창·소요 시간 표시 — 자동 크기 산정에서 예약)."""
         tb = getattr(self, "_tabbar", None)
-        if tb is not None and (self._model_title or len(self._turns) > 1):
+        if tb is not None and self._topbar_visible():
             return tb.height()
         return 0
 
