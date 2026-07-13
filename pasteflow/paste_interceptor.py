@@ -35,6 +35,8 @@ _GMEM_MOVEABLE = 0x0002
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
 WM_SYSKEYDOWN = 0x0104  # Alt 조합 키(Alt+F1 등) — Alt 누른 채 다른 키 누를 때
+WM_KEYUP = 0x0101
+WM_SYSKEYUP = 0x0105    # Alt 조합 키의 keyup
 VK_V = 0x56
 VK_C = 0x43
 VK_CONTROL = 0x11
@@ -257,6 +259,8 @@ class PasteInterceptor:
         self._running = False
         self._last_paste_time = 0.0
         self._direct_paste_active = False  # direct_paste 중 훅 무시 플래그
+        # keydown을 suppress한 키의 vk — 그 짝 keyup도 함께 막기 위해 기억한다(_suppress 참고)
+        self._suppressed_vks: set[int] = set()
         # 패널 토글 단축키 (파싱된 상태로 저장)
         self._panel_vk: int = 0
         self._panel_need_ctrl: bool = False
@@ -433,16 +437,42 @@ class PasteInterceptor:
             _user32.TranslateMessage(ctypes.byref(msg))
             _user32.DispatchMessageW(ctypes.byref(msg))
 
+    def _suppress(self, vk_code: int) -> int:
+        """이 keydown을 앱에 전달하지 않는다(return 1) + **그 짝 keyup도 막도록 기억**한다.
+
+        keydown만 막고 keyup을 흘리면, 웹 페이지의 포커스된 버튼이 **Space keyup에서 클릭
+        처리**되어 우리가 막은 단축키가 그대로 발동한다(2026-07-13 실측: 유튜브 재생 버튼에
+        포커스가 있을 때 Space keyup *하나만* 보내도 재생/멈춤이 토글 — Ctrl+Space 패널 토글이
+        가끔 유튜브를 정지시키던 원인). keyup은 물리 키라면 포커스와 무관하게 항상 저수준
+        훅에 도달하므로 이 집합에 찌꺼기가 남지 않는다(키 반복은 keydown이 여러 번, keyup은
+        한 번 — 집합이라 중복 무해).
+
+        수정키(Ctrl/Shift/Alt)의 keyup은 절대 막지 않는다 — 앱이 알아야 하는 상태다.
+        """
+        self._suppressed_vks.add(vk_code)
+        return 1
+
     def _low_level_keyboard_proc(self, nCode, wParam, lParam):
         """저수준 키보드 훅 프로시저
 
-        Ctrl+Shift+V / 패널 토글 / OCR 단축키만 가로채고 suppress(return 1)한다.
+        Ctrl+Shift+V / 패널 토글 / OCR 단축키만 가로채고 suppress(_suppress → return 1)한다.
         일반 Ctrl+C / Ctrl+V 에는 개입하지 않는다.
 
         중요: ctypes 콜백 안에서 예외가 C 레벨로 전파되면 프로세스 크래시.
         반드시 모든 예외를 잡아야 한다.
         """
         try:
+            # keydown을 막은 키의 keyup도 함께 막는다 (_suppress 참고)
+            # ⚠ **주입된 keyup은 막지 않는다** — Ctrl+Shift+V는 V의 물리 keydown을 막은 직후
+            # 스스로 Ctrl+V를 SendInput으로 주입하는데, 그 주입된 V의 keyup까지 삼키면 대상
+            # 앱이 'V가 눌린 채'로 남는다. 물리 키(비주입)만 걸러내면 이 자기충돌이 없다.
+            if nCode >= 0 and wParam in (WM_KEYUP, WM_SYSKEYUP):
+                kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                if (kbd.vkCode in self._suppressed_vks
+                        and not (kbd.flags & LLKHF_INJECTED)):
+                    self._suppressed_vks.discard(kbd.vkCode)
+                    return 1
+
             if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
                 vk_code = ctypes.cast(
                     lParam, ctypes.POINTER(ctypes.c_ulong)
@@ -459,7 +489,8 @@ class PasteInterceptor:
                     if vk_code == VK_V and debounce_ok:
                         self._last_paste_time = now
                         self._on_ctrl_shift_v()
-                        return 1  # suppress — Ctrl+Shift+V를 앱에 전달하지 않음
+                        # suppress — Ctrl+Shift+V를 앱에 전달하지 않음(V의 물리 keyup까지)
+                        return self._suppress(vk_code)
 
                 # 일반 Ctrl+V 관찰 (suppress 안 함 — 그대로 통과)
                 # PasteFlow 자체 주입(SendInput)은 LLKHF_INJECTED 플래그로 제외해
@@ -485,7 +516,7 @@ class PasteInterceptor:
                             self.on_toggle_panel()
                         except Exception:
                             pass
-                    return 1  # suppress
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
 
                 # OCR 단축키 감지
                 if (self._ocr_vk and vk_code == self._ocr_vk
@@ -499,7 +530,7 @@ class PasteInterceptor:
                             self.on_ocr_trigger()
                         except Exception:
                             pass
-                    return 1  # suppress
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
 
                 # 이미지→경로 단축키 감지
                 if (self._img2path_vk and vk_code == self._img2path_vk
@@ -511,7 +542,7 @@ class PasteInterceptor:
                             self.on_image_to_path()
                         except Exception:
                             pass
-                    return 1  # suppress
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
 
                 # 순차 경로 붙여넣기 단축키 감지 (기본 Ctrl+Shift+[) — 이미지→경로의 큐 버전
                 if (self._seqimg2path_vk and vk_code == self._seqimg2path_vk
@@ -523,7 +554,7 @@ class PasteInterceptor:
                             self.on_seq_image_to_path()
                         except Exception:
                             pass
-                    return 1  # suppress
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
 
                 # 화면에 핀(이미지 띄우기) 단축키 감지 (기본 Alt+F3)
                 if (self._pin_vk and vk_code == self._pin_vk
@@ -537,7 +568,7 @@ class PasteInterceptor:
                             self.on_pin_image()
                         except Exception:
                             pass
-                    return 1  # suppress
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
 
                 # 영역 캡처 단축키 감지 (기본 Alt+F2)
                 if (self._capture_vk and vk_code == self._capture_vk
@@ -551,7 +582,7 @@ class PasteInterceptor:
                             self.on_capture()
                         except Exception:
                             pass
-                    return 1  # suppress
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
 
                 # AI 자유질문 단축키 감지 (기본 Alt+`)
                 if (self._ask_ai_vk and vk_code == self._ask_ai_vk
@@ -565,7 +596,7 @@ class PasteInterceptor:
                             self.on_ask_ai()
                         except Exception:
                             pass
-                    return 1  # suppress
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
         except Exception as e:
             print(f"[Hook] 훅 프로시저 예외 (무시): {e}")
 
