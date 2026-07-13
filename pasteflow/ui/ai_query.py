@@ -150,9 +150,23 @@ class AiQueryDialog(QDialog):
             QPushButton:hover {{
                 background-color: {COLORS['surface2']};
             }}
+            QPushButton#history {{
+                padding: 3px 10px;
+                font-size: 11px;
+                color: {COLORS['subtext0']};
+            }}
             QPushButton[text="질문"] {{
                 background-color: {COLORS['peach']};
                 color: {COLORS['base']};
+            }}
+            /* 비교 체크 시 흐려지는 모델 행 — 스타일시트로 색을 명시하면 Qt 기본 회색화가
+               적용되지 않으므로 disabled 색을 직접 준다. */
+            QLabel:disabled {{
+                color: {COLORS['surface2']};
+            }}
+            QComboBox:disabled {{
+                color: {COLORS['surface2']};
+                border: 1px solid {COLORS['surface1']};
             }}
             QPushButton[text="질문"]:hover {{
                 background-color: {PEACH_HOVER};
@@ -237,10 +251,28 @@ class AiQueryDialog(QDialog):
             ctx_label.setWordWrap(True)
             layout.addWidget(ctx_label)
 
-        layout.addWidget(QLabel(
-            "질문을 입력하세요 (Enter 전송 · Shift+Enter 줄바꿈 · 이미지는 Ctrl+V/드래그로 첨부):"))
+        # 질문칸 머리 행 — 오른쪽 끝에 '기록' 버튼. 안내문은 아래 입력칸의 placeholder로
+        # 옮겼다(빈 칸일 때만 보이고 타이핑하면 사라진다 — 항상 한 줄을 먹던 라벨 제거).
+        head_row = QHBoxLayout()
+        head_row.setContentsMargins(0, 0, 0, 0)
+        head_row.addStretch(1)
+        if self._open_history is not None:
+            history_btn = QPushButton("기록")
+            history_btn.setObjectName("history")
+            history_btn.setToolTip("저장된 AI 대화 기록 보기")
+            history_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            history_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            # 이 질문창의 프레임을 넘겨 기록창이 그 옆에 이어 붙게 한다(main._on_ai_history_
+            # requested가 compute_preview_pos로 배치) — 겹쳐서 옮겨야 하던 문제 해결.
+            # clicked(bool)의 checked 인자는 버리고 프레임만 넘긴다.
+            history_btn.clicked.connect(
+                lambda _checked=False: self._open_history(self.frameGeometry()))
+            head_row.addWidget(history_btn)
+        layout.addLayout(head_row)
 
         self._editor = _QuestionEdit(self._try_submit, on_image_paste=self._on_image_pasted)
+        self._editor.setPlaceholderText(
+            "질문을 입력하세요 — Enter 전송 · Shift+Enter 줄바꿈 · 이미지는 Ctrl+V/드래그로 첨부")
         self._editor.setFocus()
         layout.addWidget(self._editor, 1)
 
@@ -250,7 +282,8 @@ class AiQueryDialog(QDialog):
         model_row = QHBoxLayout()
         model_row.setContentsMargins(0, 0, 0, 0)
         model_row.setSpacing(6)
-        model_row.addWidget(QLabel("모델:"))
+        self._model_label = QLabel("모델:")
+        model_row.addWidget(self._model_label)
         self._model_combo = QComboBox()
         self._model_combo.setToolTip("이 질문을 보낼 모델을 고릅니다(비워 두면 기본 모델 1 사용).")
         self._fill_model_combo(self._model_options)
@@ -276,25 +309,18 @@ class AiQueryDialog(QDialog):
         self._compare_check: QCheckBox | None = None
         if len(self._compare_models) >= 2:
             self._compare_check = QCheckBox(
-                f"🔀 여러 모델로 비교 ({len(self._compare_models)}개)")
+                f"여러 모델로 비교 ({len(self._compare_models)}개)")
             self._compare_check.setToolTip(
                 "이 질문을 아래 모델들로 동시에 질의해 답변을 나란히 비교합니다:\n"
                 + "\n".join(
                     f"· {s['model']} ({BACKEND_LABEL.get(s.get('backend', ''), s.get('backend', ''))})"
                     for s in self._compare_models))
+            # 비교를 켜면 단일 모델 선택은 무시된다 — 그 규칙을 콤보 비활성화로 눈에 보이게 한다
+            # (예전엔 코드 주석에만 있어, 모델을 골라 놓고도 비교로 나가는지 알 수 없었다).
+            self._compare_check.toggled.connect(self._on_compare_toggled)
             layout.addWidget(self._compare_check)
 
         btn_row = QHBoxLayout()
-        if self._open_history is not None:
-            history_btn = QPushButton("🕘 기록")
-            history_btn.setToolTip("저장된 AI 대화 기록 보기")
-            history_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            # 이 질문창의 프레임을 넘겨 기록창이 그 옆에 이어 붙게 한다(main._on_ai_history_
-            # requested가 compute_preview_pos로 배치) — 겹쳐서 옮겨야 하던 문제 해결.
-            # clicked(bool)의 checked 인자는 버리고 프레임만 넘긴다.
-            history_btn.clicked.connect(
-                lambda _checked=False: self._open_history(self.frameGeometry()))
-            btn_row.addWidget(history_btn)
         btn_row.addStretch()
         cancel_btn = QPushButton("취소")
         cancel_btn.clicked.connect(self.reject)
@@ -359,6 +385,16 @@ class AiQueryDialog(QDialog):
 
     def get_question(self) -> str:
         return self._editor.toPlainText().strip()
+
+    def _on_compare_toggled(self, checked: bool):
+        """'여러 모델로 비교' on/off — 켜면 단일 모델 선택 행을 흐리게(비활성) 한다.
+
+        비교가 켜져 있으면 `main._start_compare_query`가 설정된 모델 1·2·3으로 나가고 이
+        콤보의 선택은 쓰이지 않는다. 흐려진 행이 그 사실을 그 자리에서 말해 준다.
+        """
+        self._model_label.setEnabled(not checked)
+        self._model_combo.setEnabled(not checked)
+        self._model_refresh_btn.setEnabled(not checked)
 
     def is_compare(self) -> bool:
         """'여러 모델로 비교' 체크 여부. 체크박스가 없으면(모델 미설정) 항상 False."""
