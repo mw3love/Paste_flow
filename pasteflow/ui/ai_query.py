@@ -95,13 +95,14 @@ class AiQueryDialog(QDialog):
         self._model_options: list[dict] = list(self._compare_models)  # combo와 인덱스 평행
         self._models_fetched.connect(self._on_models_fetched)
         self.setWindowTitle("AI에게 질문")
-        # 비모달(v1.49.4 — 이전엔 창-모달) — exec()의 기본값 application-modal은 부모 없는
-        # 최상위 오버레이(영역 캡처 Alt+F2·AI OCR)까지 입력을 막아 창-모달로 좁혔었는데,
-        # 창-모달도 그 "부모"(패널) 자체는 계속 잠가서 질문창이 열린 동안 패널의 '−'(숨기기)
-        # 버튼조차 눌리지 않는 문제가 있었다(사용자 보고). 패널을 잠글 이유가 실질적으로
-        # 없어(질문 내용은 이 다이얼로그가 다 들고 있음) 아예 모달을 걷어냈다 — 오버레이는
-        # 물론이고 패널도 온전히 조작 가능하다. 대신 포커스를 뺏기며 패널이 자동으로 숨는
-        # 것은 panel.py의 changeEvent 예외 목록(AiQueryDialog 추가)으로 막는다.
+        # 비모달 — 질문창이 떠 있어도 패널·영역 캡처(Alt+F2)·AI 기록창을 그대로 쓸 수 있어야
+        # 한다(질문 내용은 이 다이얼로그가 다 들고 있어 다른 창을 잠글 이유가 없다).
+        # ⚠ 이 설정만으로는 부족하다 — **호출자가 `exec()`가 아니라 `show()`로 띄워야 한다.**
+        # `exec()`는 창을 모달로 표시하는데, 모달리티가 NonModal이고 부모도 없으면 Qt가
+        # ApplicationModal로 승격시켜 이 줄을 무력화한다(2026-07-13 PyQt6 실측). 그래서
+        # main은 `_open_ai_dialog`에서 show() + finished 콜백으로 띄운다.
+        # 포커스를 뺏기며 패널이 자동으로 숨는 것은 panel.py의 changeEvent 예외 목록
+        # (AiQueryDialog 포함)이 막는다.
         self.setWindowModality(Qt.WindowModality.NonModal)
         self.setMinimumSize(420, 240)
         self.setStyleSheet(f"""

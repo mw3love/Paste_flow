@@ -1635,33 +1635,7 @@ class PasteFlowApp:
         전송' 경로를 탄다(우클릭 "AI에게 질문"의 텍스트 분기와 동일 배관, 컨텍스트만 비움).
         답변 표시·위치(커서 모니터 정중앙)는 항목 질의와 동일한 `_on_ai_turn_done`을 공유한다.
         """
-        from PyQt6.QtWidgets import QDialog
-        from pasteflow.ui.ai_query import AiQueryDialog
-
-        compare_models = self._resolve_compare_models()
-        # parent=None — self.panel을 부모로 주면 Windows가 이 창을 패널의 "소유 창"으로 취급해
-        # 패널 위에 항상 떠 있게 고정한다(모달 여부와 무관한 별개의 Z-order 규칙이라, 비모달로
-        # 바꿔도 패널을 클릭할 수 없던 문제의 실제 원인이었다). 미리보기 팝업·AI 기록창과 같은
-        # 독립 최상위 창 패턴으로 통일한다.
-        dialog = AiQueryDialog("", None, compare_models=compare_models,
-                               fetch_all_models=self._fetch_all_ai_models,
-                               open_history=self._on_ai_history_requested)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        # 답변창은 입력창이 "닫힐 때" 있던 자리(모니터) 기준으로 띄운다 — 입력 중 다른
-        # 모니터로 끌어다 놓았을 수 있어 트리거 시점 커서 위치로는 부정확하다.
-        self._ai_anchor = dialog.frameGeometry()
-        question = dialog.get_question()
-        if not question:
-            return
-        images = dialog.get_images()  # 사용자가 첨부한 이미지들(없으면 [])
-        if dialog.is_compare():
-            self._start_compare_query(question, "", images, compare_models)
-        else:
-            sel = dialog.get_selected_model()  # 모델 드롭다운 선택(없으면 기본 모델 1)
-            self._start_ai_worker(question, "", images=images,
-                                  model=sel["model"] if sel else None,
-                                  backend=sel["backend"] if sel else None)
+        self._open_ai_dialog()
 
     def _on_pin_hotkey(self):
         """화면에 핀 단축키(기본 Alt+F3) — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다.
@@ -2034,14 +2008,71 @@ class PasteFlowApp:
         if item:
             self._ai_query_for_item(item)
 
+    def _open_ai_dialog(self, context_text: str = "", image_png: "bytes | None" = None):
+        """AI 질문 입력창을 **비모달로** 띄우고, 질문이 제출되면 그대로 AI 워커에 넘긴다.
+
+        자유질문(Alt+`)·텍스트 항목 질의·이미지 항목 질의가 공유하는 단일 경로 — 셋의 차이는
+        `context_text`(질문에 함께 실을 클립보드 텍스트)와 `image_png`(첫 첨부 이미지)뿐이다.
+
+        ⚠ **`exec()`를 쓰지 않는다.** `QDialog.exec()`는 내부적으로 창을 모달로 표시하는데,
+        모달리티가 `NonModal`이고 부모도 없으면 Qt가 이를 **ApplicationModal로 승격**시킨다
+        (2026-07-13 PyQt6 실측: `setWindowModality(NonModal)` 후 `exec()` →
+        `QWindow.modality == ApplicationModal`, `show()`만 NonModal 유지). 그래서 v1.49.4의
+        `setWindowModality(NonModal)`은 무력했고, 질문창이 떠 있는 동안 **패널 클릭·영역
+        캡처(Alt+F2)·AI 기록창이 전부 앱 모달에 막혀 있었다**(사용자 보고). 결과 수신을
+        `finished` 콜백으로 바꿔 `show()`로 띄운다.
+
+        `_ai_history_dialog`와 같은 재진입 가드를 둔다 — 비모달이라 질문창이 떠 있는 채로
+        단축키·우클릭이 다시 들어올 수 있고, 그때 창을 또 만들면 앵커·워커가 뒤엉킨다.
+        """
+        from PyQt6.QtWidgets import QDialog
+        from pasteflow.ui.ai_query import AiQueryDialog
+
+        existing = getattr(self, "_ai_dialog", None)
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            return
+
+        compare_models = self._resolve_compare_models()
+        # parent=None — self.panel을 부모로 주면 Windows가 이 창을 패널의 "소유 창"으로 취급해
+        # 패널 위에 항상 떠 있게 고정한다(모달과 무관한 별개의 Z-order 규칙) — 미리보기 팝업·
+        # AI 기록창과 같은 독립 최상위 창 패턴으로 통일한다.
+        dialog = AiQueryDialog(context_text, None, context_image=image_png,
+                               compare_models=compare_models,
+                               fetch_all_models=self._fetch_all_ai_models,
+                               open_history=self._on_ai_history_requested)
+        self._ai_dialog = dialog
+
+        def _finished(code: int):
+            self._ai_dialog = None
+            if code == QDialog.DialogCode.Accepted:
+                question = dialog.get_question()
+                if question:
+                    # 답변창은 입력창이 "닫힐 때" 있던 자리(모니터) 기준으로 띄운다 — 입력 중
+                    # 다른 모니터로 끌어다 놓았을 수 있어 트리거 시점 커서로는 부정확하다.
+                    self._ai_anchor = dialog.frameGeometry()
+                    images = dialog.get_images()  # 첨부(제거·추가·교체 결과를 존중)
+                    if dialog.is_compare():
+                        self._start_compare_query(question, context_text, images, compare_models)
+                    else:
+                        sel = dialog.get_selected_model()  # 없으면 기본 모델 1
+                        self._start_ai_worker(question, context_text, images=images,
+                                              model=sel["model"] if sel else None,
+                                              backend=sel["backend"] if sel else None)
+            dialog.deleteLater()
+
+        dialog.finished.connect(_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     def _ai_query_for_item(self, item: ClipboardItem):
         """항목을 컨텍스트로 질문 입력 다이얼로그 표시 → AI 워커.
 
         텍스트 항목은 텍스트를 컨텍스트로, 이미지 항목은 이미지를 멀티모달로 전송(시각 질의).
         DB id가 없는 임시 항목(화면 핀 등)도 받을 수 있도록 ClipboardItem을 직접 받는다.
         """
-        from PyQt6.QtWidgets import QDialog
-        from pasteflow.ui.ai_query import AiQueryDialog
         from pasteflow.ui.toast import ToastNotification
 
         if item.content_type == "image":
@@ -2053,50 +2084,11 @@ class PasteFlowApp:
             except Exception as e:
                 ToastNotification(f"이미지 변환 실패 — {e}", icon="🤖")
                 return
-            compare_models = self._resolve_compare_models()
-            # parent=None — 이유는 아래 텍스트 분기와 동일(패널을 소유 창으로 묶지 않음).
-            dialog = AiQueryDialog("", None, context_image=image_png,
-                                   compare_models=compare_models,
-                                   fetch_all_models=self._fetch_all_ai_models,
-                                   open_history=self._on_ai_history_requested)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
-            self._ai_anchor = dialog.frameGeometry()  # 입력창이 닫힐 때 있던 모니터 기준
-            question = dialog.get_question()
-            if not question:
-                return
-            images = dialog.get_images()  # 사용자가 제거·추가·교체했으면 그 결과를 존중
-            if dialog.is_compare():
-                self._start_compare_query(question, "", images, compare_models)
-            else:
-                sel = dialog.get_selected_model()
-                self._start_ai_worker(question, "", images=images,
-                                      model=sel["model"] if sel else None,
-                                      backend=sel["backend"] if sel else None)
+            # 이미지는 첨부로 싣고 텍스트 컨텍스트는 비운다(질문+이미지 멀티모달 질의).
+            self._open_ai_dialog("", image_png)
             return
 
-        context_text = item.text_content or item.preview_text or ""
-        compare_models = self._resolve_compare_models()
-        # parent=None — self.panel을 부모로 주면 Windows가 이 창을 패널의 "소유 창"으로 취급해
-        # 패널 위에 항상 떠 있게 고정한다(모달 여부와 무관한 Z-order 규칙이라, 비모달로 바꿔도
-        # 패널을 클릭할 수 없던 문제의 실제 원인이었다) — 미리보기 팝업과 같은 독립 창으로 통일.
-        dialog = AiQueryDialog(context_text, None, compare_models=compare_models,
-                               fetch_all_models=self._fetch_all_ai_models,
-                               open_history=self._on_ai_history_requested)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._ai_anchor = dialog.frameGeometry()  # 입력창이 닫힐 때 있던 모니터 기준
-        question = dialog.get_question()
-        if not question:
-            return
-        images = dialog.get_images()  # 텍스트 컨텍스트 질의에도 이미지 첨부 가능
-        if dialog.is_compare():
-            self._start_compare_query(question, context_text, images, compare_models)
-        else:
-            sel = dialog.get_selected_model()
-            self._start_ai_worker(question, context_text, images=images,
-                                  model=sel["model"] if sel else None,
-                                  backend=sel["backend"] if sel else None)
+        self._open_ai_dialog(item.text_content or item.preview_text or "")
 
     def _on_ai_turn_done(self, payload: dict):
         """AI 대화 턴 결과 → 펜딩 탭을 실제 답변으로 채운다(첫 턴·후속 턴 공용).
@@ -2159,8 +2151,8 @@ class PasteFlowApp:
         보여주고 더블클릭으로 재열람한다.
 
         parent를 주지 않는다(미리보기 팝업과 동일한 독립 최상위 창) — AI 질문창
-        (`AiQueryDialog`)이 `self.panel`에 window-modal로 떠 있는 채로 이 버튼을 눌러도,
-        같은 부모의 형제 창이면 모달에 함께 막혀 조작이 안 될 수 있기 때문이다. 재진입
+        (`AiQueryDialog`)의 '🕘 기록' 버튼으로 열 때 같은 부모의 형제 창이면 모달 전파에
+        함께 막힐 수 있기 때문이다(질문창은 `_open_ai_dialog`에서 비모달로 띄운다). 재진입
         가드(이미 열려 있으면 새로 안 만들고 앞으로 가져오기만)로 창이 중복되지 않게 한다.
 
         `near`가 주어지면(질문창 버튼 — 그 창의 `frameGeometry()`) 이미지 미리보기가 패널
