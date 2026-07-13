@@ -57,6 +57,25 @@ class Database:
                 value TEXT NOT NULL
             )
         """)
+        # AI 질문 기록 — 답변창(TextPreviewPopup)이 '표시 전용'이라 닫으면 사라지던 것을
+        # 자동 저장해 트레이 'AI 기록'에서 다시 열람할 수 있게 한다(v1.49.2). conversation은
+        # main._run_ai_turn이 쓰는 원본 role/content(+display) 리스트를 그대로 JSON 직렬화한
+        # 것 — 재조회 시 사람이 읽는 turns(질문/답변 쌍)로 재구성하고, 후속 질문 이어가기도
+        # 그대로 지원한다(단 이미지는 저장하지 않음 — 재조회 후 후속 질문은 텍스트만 이어짐).
+        # created_at/updated_at은 SQL DEFAULT CURRENT_TIMESTAMP(초 단위) 대신 Python에서
+        # datetime.now().isoformat()(마이크로초 단위)로 채운다 — 여러 모델 비교(v1.44.0)로
+        # 같은 초에 여러 건이 저장/갱신될 수 있어 초 단위로는 "최근 갱신순" 정렬이 흔들린다.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ai_history (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                title        TEXT,
+                conversation TEXT NOT NULL,
+                model        TEXT,
+                backend      TEXT,
+                created_at   TEXT,
+                updated_at   TEXT
+            )
+        """)
         self.conn.commit()
 
     def save_item(self, item: ClipboardItem) -> ClipboardItem:
@@ -296,6 +315,60 @@ class Database:
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                 (key, value),
             )
+            self.conn.commit()
+
+    # --- AI 기록 ---
+
+    def save_ai_conversation(self, title: str, conversation_json: str,
+                             model: str, backend: str) -> int:
+        """새 AI 대화 기록 삽입(첫 턴 완료 시 1회) — 새 row id 반환."""
+        now = datetime.now().isoformat()
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """INSERT INTO ai_history
+                   (title, conversation, model, backend, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (title, conversation_json, model, backend, now, now),
+            )
+            self.conn.commit()
+            return cur.lastrowid
+
+    def update_ai_conversation(self, history_id: int, conversation_json: str):
+        """기존 AI 대화 기록 갱신(후속 질문 도착마다) — updated_at도 함께 갱신."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "UPDATE ai_history SET conversation = ?, updated_at = ? WHERE id = ?",
+                (conversation_json, datetime.now().isoformat(), history_id),
+            )
+            self.conn.commit()
+
+    def get_ai_history_list(self, limit: int = 200) -> list[dict]:
+        """AI 기록 목록(대화 본문 제외 — 목록 표시용) — 최근 갱신순."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """SELECT id, title, model, backend, created_at, updated_at
+                   FROM ai_history ORDER BY updated_at DESC LIMIT ?""",
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def get_ai_conversation(self, history_id: int) -> Optional[dict]:
+        """AI 기록 1건 전체(conversation 포함) — 재열람·후속 질문 이어가기용."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("SELECT * FROM ai_history WHERE id = ?", (history_id,))
+            row = cur.fetchone()
+        return dict(row) if row else None
+
+    def delete_ai_conversation(self, history_id: int):
+        """AI 기록 1건 삭제."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("DELETE FROM ai_history WHERE id = ?", (history_id,))
             self.conn.commit()
 
     def _migrate_history_order(self, cur):

@@ -478,6 +478,15 @@ class TextPreviewPopup(QWidget):
 
         # viewport 클릭/휠 → popup이 처리 (전체 창 드래그·휠 줌)
         self._editor.viewport().installEventFilter(self)
+        if self._tabbar is not None:
+            # 상단 바 배경(탭·버튼이 없는 빈 여백) 좌클릭 드래그로 창 이동 — AI 답변은 본문
+            # 좌클릭이 텍스트 선택에 쓰여(_is_move_button이 markdown일 때 좌클릭 이동을 막음)
+            # 휠(가운데)클릭만 되던 것을, 텍스트가 없는 상단 바에서는 좌클릭으로도 옮길 수
+            # 있게 한다(사용자 요청). ⚠ self._editor가 생긴 *뒤에* 걸어야 한다 — eventFilter가
+            # self._editor를 무조건 참조하는데, 이 필터를 _tabbar 생성 직후(= self._editor
+            # 생기기 전)에 걸면 addWidget 중 Qt가 즉시 이벤트를 필터에 넣어 __init__ 도중
+            # AttributeError로 팝업 생성 자체가 죽는다(2026-07-13 실측 재현).
+            self._tabbar.installEventFilter(self)
 
         # AI 답변(마크다운) 전용 오버레이: 우상단 형광펜/선택 토글 버튼 + 우하단 리사이즈 그립.
         self._hl_btn: QPushButton | None = None
@@ -576,26 +585,62 @@ class TextPreviewPopup(QWidget):
                     return True
                 # 링크 위에선 손모양, 그 외엔 I빔 — 뷰포트 커서를 IBeam으로 고정해 둬서
                 # Qt의 자동 링크 호버 커서가 안 떠, 마우스 이동마다 직접 토글한다(드래그 중 제외).
+                # 펜딩 중엔 좌클릭=이동이라 I빔(선택 암시)이 아니라 이동 커서로 안내한다.
                 if self._markdown:
-                    href = self._editor.anchorAt(event.position().toPoint())
-                    self._editor.viewport().setCursor(
-                        Qt.CursorShape.PointingHandCursor if href
-                        else Qt.CursorShape.IBeamCursor)
+                    if self._is_current_pending():
+                        self._editor.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
+                    else:
+                        href = self._editor.anchorAt(event.position().toPoint())
+                        self._editor.viewport().setCursor(
+                            Qt.CursorShape.PointingHandCursor if href
+                            else Qt.CursorShape.IBeamCursor)
             elif et == QEvent.Type.MouseButtonRelease:
-                if self._drag_pos is not None and self._is_move_button(event.button()):
+                # _drag_pos가 있다는 것 자체가 press 시점에 이동 버튼으로 인정됐다는 뜻이라
+                # (⚠ release 시점에 _is_move_button을 다시 물으면, 펜딩 중 드래그를 시작했는데
+                # 그 사이 답이 도착해 펜딩이 풀려버린 경우 조건이 뒤바뀌어 드래그가 안 풀리는
+                # 레이스가 생긴다) 여기선 버튼 종류만 재확인하고 바로 정리한다.
+                if self._drag_pos is not None and event.button() in (
+                        Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
                     self._drag_pos = None
                     return True
                 if self._markdown and event.button() == Qt.MouseButton.LeftButton:
                     # 선택 확정 후(QTextEdit release 처리 뒤) 형광펜 토글·해제 적용
                     QTimer.singleShot(0, self._on_left_select_release)
                     return False
+        elif obj is self._tabbar:
+            # 상단 바 배경(탭·버튼이 없는 빈 여백)은 텍스트가 없으므로 좌클릭도 이동으로 쓴다.
+            et = event.type()
+            if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self.activateWindow()
+                self._drag_pos = (
+                    event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                )
+                return True
+            if et == QEvent.Type.MouseMove:
+                if self._drag_pos is not None and event.buttons():
+                    self.move(event.globalPosition().toPoint() - self._drag_pos)
+                    return True
+            elif et == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                if self._drag_pos is not None:
+                    self._drag_pos = None
+                    return True
         return super().eventFilter(obj, event)
 
     def _is_move_button(self, btn) -> bool:
-        """창 이동 트리거 버튼인지 — 휠(가운데)클릭은 항상, 좌클릭은 일반 미리보기에서만."""
+        """창 이동 트리거 버튼인지 — 휠(가운데)클릭은 항상, 좌클릭은 일반 미리보기이거나
+        AI 답변이 아직 '생각 중'(펜딩)일 때만(사용자 요청) — 펜딩 중엔 본문에 선택할 실제
+        텍스트가 없으므로 좌클릭을 이동으로 써도 무방하다. 답이 도착하면 다시 선택 우선으로
+        돌아간다.
+        """
         if btn == Qt.MouseButton.MiddleButton:
             return True
-        return btn == Qt.MouseButton.LeftButton and not self._markdown
+        if btn != Qt.MouseButton.LeftButton:
+            return False
+        return not self._markdown or self._is_current_pending()
+
+    def _is_current_pending(self) -> bool:
+        """현재 탭이 아직 답을 못 받은 '생각 중' 상태인지."""
+        return bool(self._turns) and self._turns[self._current_tab][1] is _PENDING
 
     # ------------------------------------------------------------------
     # 본체에서 직접 발생한 마우스 이벤트 (자식이 안 잡은 영역: 컨테이너 테두리 등)

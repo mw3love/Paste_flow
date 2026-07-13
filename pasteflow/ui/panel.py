@@ -22,6 +22,7 @@ _SWP_NOSIZE = 0x0001
 _SWP_NOACTIVATE = 0x0010
 
 from pasteflow.models import ClipboardItem
+from pasteflow.ui.ai_query import AiQueryDialog
 from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.text_preview import TextPreviewPopup
 from pasteflow.ui.theme import COLORS, PEACH_HOVER
@@ -1429,8 +1430,10 @@ class ClipboardPanel(QWidget):
     def changeEvent(self, event):
         """창 비활성화 시 자동 닫기 (핀 비활성 상태이고 사용자가 직접 연 경우만).
 
-        새 활성 윈도우가 미리보기 팝업이면 패널을 닫지 않는다 — 미리보기 드래그·스크롤·
-        클릭 중에 패널이 사라지면 사용성이 망가진다.
+        새 활성 윈도우가 미리보기 팝업·AI 질문창이면 패널을 닫지 않는다 — 미리보기
+        드래그·스크롤·클릭 중이거나 AI에게 질문을 작성하는 중에 패널이 사라지면 사용성이
+        망가진다. `AiQueryDialog`는 v1.49.4부터 비모달이라(패널을 잠그지 않음) 이 예외가
+        없으면 질문창에 포커스가 넘어가는 순간 패널이 곧장 자동으로 숨어 버린다.
         """
         if (event.type() == QEvent.Type.ActivationChange
                 and self._auto_close
@@ -1439,7 +1442,7 @@ class ClipboardPanel(QWidget):
                 and not self._ext_drag_active
                 and not self.isActiveWindow()):
             active = QApplication.activeWindow()
-            if not isinstance(active, (ImagePreviewPopup, TextPreviewPopup)):
+            if not isinstance(active, (ImagePreviewPopup, TextPreviewPopup, AiQueryDialog)):
                 self._user_activated = False
                 self.hide()
         super().changeEvent(event)
@@ -1451,10 +1454,10 @@ class ClipboardPanel(QWidget):
         QTimer.singleShot(0, self.setFocus)
 
     def hideEvent(self, event):
+        # 패널이 숨겨져도 미리보기 팝업은 독립 창이라 그대로 둔다 — 패널만 최소화하고
+        # 이미지를 계속 보고 싶은 경우(자체 ✕/ESC로 닫는 것과 별개) 대비.
         self._cursor_timer.stop()
         self.unsetCursor()
-        ImagePreviewPopup.close_all()
-        TextPreviewPopup.close_all()
         super().hideEvent(event)
         self.panel_hidden.emit()
 

@@ -23,6 +23,7 @@ class TrayIcon(QObject):
     """시스템 트레이 아이콘"""
 
     panel_toggle_requested = pyqtSignal()
+    ai_history_requested = pyqtSignal()
     settings_requested = pyqtSignal()
     quit_requested = pyqtSignal()
 
@@ -47,6 +48,7 @@ class TrayIcon(QObject):
             }}
         """)
         menu.addAction("📋 패널 열기", self.panel_toggle_requested.emit)
+        menu.addAction("🕘 AI 기록", self.ai_history_requested.emit)
         menu.addSeparator()
         menu.addAction("⚙️ 설정", self.settings_requested.emit)
         menu.addAction("❌ PasteFlow 종료", self.quit_requested.emit)

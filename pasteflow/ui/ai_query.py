@@ -5,14 +5,19 @@
 Enter로 전송, Shift+Enter 줄바꿈, Esc 취소.
 """
 
+import threading
+from typing import Callable
+
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
-    QPushButton, QCheckBox, QFileDialog, QWidget,
+    QPushButton, QCheckBox, QComboBox, QWidget,
 )
-from PyQt6.QtCore import Qt, QBuffer, QByteArray, QIODevice, QSize
+from PyQt6.QtCore import Qt, QBuffer, QByteArray, QIODevice, QSize, pyqtSignal
 from PyQt6.QtGui import QCursor, QPixmap, QImage, QIcon
 
 from pasteflow.ui.theme import COLORS, PEACH_HOVER
+
+BACKEND_LABEL = {"official": "AI Studio", "gateway": "Mindlogic"}
 
 
 class _QuestionEdit(QPlainTextEdit):
@@ -34,11 +39,13 @@ class _QuestionEdit(QPlainTextEdit):
         super().keyPressEvent(event)
 
     def insertFromMimeData(self, source):
-        """붙여넣기(Ctrl+V)·드롭 시 이미지면 텍스트 대신 첨부한다.
+        """붙여넣기(Ctrl+V)·드롭 시 이미지면 텍스트 대신 첨부한다 — 이 다이얼로그의
+        유일한 첨부 경로(전용 버튼 없음, v1.49.1).
 
         - 원본 이미지(그림 캡처 등)면 그대로 첨부.
-        - 로컬 이미지 '파일'을 복사/드롭했으면(경로만 들어옴) 그 파일을 읽어 첨부.
-        둘 다 아니면 기본 동작(텍스트 삽입).
+        - 로컬 이미지 '파일'을 복사/드롭했으면(경로만 들어옴) 전부 읽어 첨부한다
+          (여러 파일을 한 번에 드롭/붙여넣기 가능 — 첫 장에서 멈추지 않음).
+        어느 쪽도 아니면 기본 동작(텍스트 삽입).
         """
         if self._on_image_paste is not None:
             if source.hasImage():
@@ -49,12 +56,15 @@ class _QuestionEdit(QPlainTextEdit):
                     self._on_image_paste(img)
                     return
             if source.hasUrls():
+                attached = False
                 for url in source.urls():
                     if url.isLocalFile():
                         fimg = QImage(url.toLocalFile())
                         if not fimg.isNull():
                             self._on_image_paste(fimg)
-                            return
+                            attached = True
+                if attached:
+                    return
         super().insertFromMimeData(source)
 
 
@@ -63,16 +73,36 @@ class AiQueryDialog(QDialog):
 
     _CTX_PREVIEW_CHARS = 300
 
+    # 새로고침(↻)으로 전체 모델을 불러온 결과 — (models, error, backend). 백그라운드
+    # 스레드에서 메인 스레드로 안전하게 넘기기 위한 내부 시그널(settings_dialog와 동일 패턴).
+    _models_fetched = pyqtSignal(list, str, str)
+
     def __init__(self, context_text: str, parent=None, context_image: bytes | None = None,
-                 compare_models: list[dict] | None = None):
+                 compare_models: list[dict] | None = None,
+                 fetch_all_models: "Callable[[], tuple[str, list[str]]] | None" = None,
+                 open_history: "Callable[[QRect], None] | None" = None):
         super().__init__(parent)
+        # open_history(frame_geometry)는 트레이 'AI 기록'과 동일한 목록창을 여는 콜백(main
+        # 제공) — 질문칸에서 바로 지난 대화를 훑어볼 수 있게 버튼 하나로 노출한다(v1.49.3).
+        # 이 창의 프레임을 넘겨 기록창을 그 옆에(겹치지 않게) 열 수 있게 한다.
+        self._open_history = open_history
         # compare_models는 (backend, model) spec dict 목록(v1.47.0 — 크로스 백엔드 비교).
+        # 모델 선택 드롭다운의 기본 후보(설정된 모델 1·2·3)로도 그대로 재사용한다.
         self._compare_models = [s for s in (compare_models or []) if s and s.get("model")]
+        # fetch_all_models()는 (backend, 전체 모델명 리스트)를 동기 반환하는 콜백(main이 제공,
+        # DB/시크릿 접근은 main 쪽에 남긴다) — ↻ 클릭 시 백그라운드 스레드에서 호출한다.
+        self._fetch_all_models = fetch_all_models
+        self._model_options: list[dict] = list(self._compare_models)  # combo와 인덱스 평행
+        self._models_fetched.connect(self._on_models_fetched)
         self.setWindowTitle("AI에게 질문")
-        # 창-모달 — exec()의 기본값 application-modal은 부모 없는 최상위 오버레이(영역 캡처
-        # Alt+F2·AI OCR)까지 입력을 막는다. 창-모달로 좁히면 부모(패널)만 잠기고 오버레이는
-        # 그대로 동작해, 질문창이 열린 채로도 캡처해서 Ctrl+V로 붙여넣을 수 있다.
-        self.setWindowModality(Qt.WindowModality.WindowModal)
+        # 비모달(v1.49.4 — 이전엔 창-모달) — exec()의 기본값 application-modal은 부모 없는
+        # 최상위 오버레이(영역 캡처 Alt+F2·AI OCR)까지 입력을 막아 창-모달로 좁혔었는데,
+        # 창-모달도 그 "부모"(패널) 자체는 계속 잠가서 질문창이 열린 동안 패널의 '−'(숨기기)
+        # 버튼조차 눌리지 않는 문제가 있었다(사용자 보고). 패널을 잠글 이유가 실질적으로
+        # 없어(질문 내용은 이 다이얼로그가 다 들고 있음) 아예 모달을 걷어냈다 — 오버레이는
+        # 물론이고 패널도 온전히 조작 가능하다. 대신 포커스를 뺏기며 패널이 자동으로 숨는
+        # 것은 panel.py의 changeEvent 예외 목록(AiQueryDialog 추가)으로 막는다.
+        self.setWindowModality(Qt.WindowModality.NonModal)
         self.setMinimumSize(420, 240)
         self.setStyleSheet(f"""
             QDialog {{
@@ -136,15 +166,34 @@ class AiQueryDialog(QDialog):
                 background-color: {COLORS['peach']};
                 border-color: {COLORS['peach']};
             }}
+            QComboBox {{
+                background-color: {COLORS['surface0']};
+                color: {COLORS['text']};
+                border: 1px solid {COLORS['surface2']};
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-size: 12px;
+            }}
+            QComboBox:focus {{
+                border: 1px solid {COLORS['peach']};
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {COLORS['surface0']};
+                color: {COLORS['text']};
+                selection-background-color: {COLORS['surface2']};
+                selection-color: {COLORS['text']};
+                border: 1px solid {COLORS['surface2']};
+                outline: none;
+            }}
         """)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        # 첨부 이미지들(PNG bytes) — 우클릭 이미지 항목의 컨텍스트로 시작하거나, 아래 첨부
-        # 버튼(클립보드/파일)·질문칸 Ctrl+V·드롭으로 여러 장 붙일 수 있다. 질의 시 images로
-        # 멀티모달 전송된다(여러 장이면 전부 첫 user 턴에 실린다).
+        # 첨부 이미지들(PNG bytes) — 우클릭 이미지 항목의 컨텍스트로 시작하거나, 질문칸
+        # Ctrl+V·드롭으로 여러 장 붙일 수 있다. 질의 시 images로 멀티모달 전송된다
+        # (여러 장이면 전부 첫 user 턴에 실린다).
         self._images: list[bytes] = [context_image] if context_image else []
 
         ctx = (context_text or "").strip()
@@ -157,22 +206,14 @@ class AiQueryDialog(QDialog):
         layout.addWidget(self._img_caption)
         layout.addWidget(self._img_strip)
 
-        # 첨부 버튼 행 — 클립보드 이미지 붙이기 / 파일에서 고르기 / 모두 제거.
+        # 첨부 이미지 제거 행 — 첨부 자체는 버튼 없이 질문칸 Ctrl+V/드래그로만 한다
+        # (v1.49.1 — 전용 버튼 2개 제거). 여러 장 붙었을 때 한 번에 지우는 버튼만 남긴다.
         attach_row = QHBoxLayout()
         attach_row.setContentsMargins(0, 0, 0, 0)
         attach_row.setSpacing(6)
-        self._attach_clip_btn = QPushButton("📋 클립보드 이미지")
-        self._attach_clip_btn.setToolTip("현재 클립보드의 이미지를 질문에 첨부합니다(여러 장 누적).")
-        self._attach_clip_btn.clicked.connect(self._attach_from_clipboard)
-        self._attach_file_btn = QPushButton("📁 파일…")
-        self._attach_file_btn.setToolTip("이미지 파일을 골라 질문에 첨부합니다(여러 장 선택 가능).")
-        self._attach_file_btn.clicked.connect(self._attach_from_file)
         self._remove_img_btn = QPushButton("✕ 모두 제거")
+        self._remove_img_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._remove_img_btn.clicked.connect(self._remove_all_images)
-        for b in (self._attach_clip_btn, self._attach_file_btn, self._remove_img_btn):
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-        attach_row.addWidget(self._attach_clip_btn)
-        attach_row.addWidget(self._attach_file_btn)
         attach_row.addWidget(self._remove_img_btn)
         attach_row.addStretch(1)
         layout.addLayout(attach_row)
@@ -189,27 +230,64 @@ class AiQueryDialog(QDialog):
             ctx_label.setWordWrap(True)
             layout.addWidget(ctx_label)
 
-        layout.addWidget(QLabel("질문을 입력하세요 (Enter 전송 · Shift+Enter 줄바꿈):"))
+        layout.addWidget(QLabel(
+            "질문을 입력하세요 (Enter 전송 · Shift+Enter 줄바꿈 · 이미지는 Ctrl+V/드래그로 첨부):"))
 
         self._editor = _QuestionEdit(self._try_submit, on_image_paste=self._on_image_pasted)
         self._editor.setFocus()
         layout.addWidget(self._editor, 1)
 
+        # 모델 선택 — 평소엔 설정된 모델 1·2·3만 보이고(하이브리드, v1.49.1), ↻를 누르면
+        # 그 backend의 전체 모델을 불러와 콤보를 채운다. 후보가 하나도 없으면(모델 미설정)
+        # 콤보가 비어 보이지만 행 자체는 남겨 둔다 — ↻가 유일한 채움 경로이므로 숨기면 안 된다.
+        model_row = QHBoxLayout()
+        model_row.setContentsMargins(0, 0, 0, 0)
+        model_row.setSpacing(6)
+        model_row.addWidget(QLabel("모델:"))
+        self._model_combo = QComboBox()
+        self._model_combo.setToolTip("이 질문을 보낼 모델을 고릅니다(비워 두면 기본 모델 1 사용).")
+        self._fill_model_combo(self._model_options)
+        model_row.addWidget(self._model_combo, 1)
+        self._model_refresh_btn = QPushButton()
+        self._model_refresh_btn.setIcon(
+            self.style().standardIcon(self.style().StandardPixmap.SP_BrowserReload))
+        self._model_refresh_btn.setToolTip("전체 모델 목록 불러오기")
+        self._model_refresh_btn.setFixedSize(24, 24)
+        self._model_refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._model_refresh_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._model_refresh_btn.setVisible(self._fetch_all_models is not None)
+        self._model_refresh_btn.clicked.connect(self._on_refresh_models_clicked)
+        model_row.addWidget(self._model_refresh_btn)
+        layout.addLayout(model_row)
+        self._model_status = QLabel("")
+        self._model_status.setVisible(False)
+        layout.addWidget(self._model_status)
+
         # 여러 모델 비교 체크박스 — 비교 모델이 2개 이상 설정됐을 때만 노출한다(1개면 무의미).
-        # 켜면 이 질문을 설정된 모델들로 동시에 던져 답변창을 나란히 띄운다.
+        # 켜면 이 질문을 설정된 모델들로 동시에 던져 답변창을 나란히 띄운다(위 단일 모델
+        # 선택과는 별개 경로 — 켜져 있으면 단일 선택은 무시된다).
         self._compare_check: QCheckBox | None = None
         if len(self._compare_models) >= 2:
             self._compare_check = QCheckBox(
                 f"🔀 여러 모델로 비교 ({len(self._compare_models)}개)")
-            _blabel = {"official": "공식", "gateway": "게이트웨이"}
             self._compare_check.setToolTip(
                 "이 질문을 아래 모델들로 동시에 질의해 답변을 나란히 비교합니다:\n"
                 + "\n".join(
-                    f"· {s['model']} ({_blabel.get(s.get('backend', ''), s.get('backend', ''))})"
+                    f"· {s['model']} ({BACKEND_LABEL.get(s.get('backend', ''), s.get('backend', ''))})"
                     for s in self._compare_models))
             layout.addWidget(self._compare_check)
 
         btn_row = QHBoxLayout()
+        if self._open_history is not None:
+            history_btn = QPushButton("🕘 기록")
+            history_btn.setToolTip("저장된 AI 대화 기록 보기")
+            history_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            # 이 질문창의 프레임을 넘겨 기록창이 그 옆에 이어 붙게 한다(main._on_ai_history_
+            # requested가 compute_preview_pos로 배치) — 겹쳐서 옮겨야 하던 문제 해결.
+            # clicked(bool)의 checked 인자는 버리고 프레임만 넘긴다.
+            history_btn.clicked.connect(
+                lambda _checked=False: self._open_history(self.frameGeometry()))
+            btn_row.addWidget(history_btn)
         btn_row.addStretch()
         cancel_btn = QPushButton("취소")
         cancel_btn.clicked.connect(self.reject)
@@ -279,6 +357,50 @@ class AiQueryDialog(QDialog):
         """'여러 모델로 비교' 체크 여부. 체크박스가 없으면(모델 미설정) 항상 False."""
         return self._compare_check is not None and self._compare_check.isChecked()
 
+    def get_selected_model(self) -> dict | None:
+        """모델 드롭다운에서 고른 (backend, model). 후보가 없으면 None(=main이 기본값 사용)."""
+        idx = self._model_combo.currentIndex()
+        if 0 <= idx < len(self._model_options):
+            return self._model_options[idx]
+        return None
+
+    # ── 모델 선택 ──────────────────────────────────────────────────────────────
+    def _fill_model_combo(self, options: list[dict]):
+        """콤보를 options(각 {backend, model})로 채운다 — 인덱스가 self._model_options와 평행."""
+        self._model_options = options
+        self._model_combo.clear()
+        for spec in options:
+            label = f"{spec['model']} ({BACKEND_LABEL.get(spec.get('backend', ''), spec.get('backend', ''))})"
+            self._model_combo.addItem(label)
+
+    def _on_refresh_models_clicked(self):
+        """↻ — 활성 backend의 전체 모델 목록을 백그라운드에서 불러와 콤보를 채운다."""
+        if self._fetch_all_models is None:
+            return
+        self._model_refresh_btn.setEnabled(False)
+        self._model_status.setText("모델 목록을 불러오는 중…")
+        self._model_status.setVisible(True)
+
+        def _worker():
+            try:
+                backend, models = self._fetch_all_models()
+                self._models_fetched.emit(models, "", backend)
+            except Exception as e:
+                self._models_fetched.emit([], str(e), "")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_models_fetched(self, models: list, err: str, backend: str):
+        self._model_refresh_btn.setEnabled(True)
+        if err:
+            self._model_status.setText(f"모델 목록을 불러오지 못했습니다 — {err}")
+            self._model_status.setVisible(True)
+            return
+        options = [{"backend": backend, "model": m} for m in sorted(models)]
+        self._fill_model_combo(options)
+        self._model_status.setText(f"모델 {len(options)}종을 불러왔습니다.")
+        self._model_status.setVisible(True)
+
     def get_images(self) -> list[bytes]:
         """질문과 함께 보낼 이미지들(PNG bytes 리스트). 없으면 빈 리스트."""
         return list(self._images)
@@ -305,27 +427,6 @@ class AiQueryDialog(QDialog):
         self._images.append(png)
         self._refresh_image_preview()
         return True
-
-    def _attach_from_clipboard(self):
-        """현재 클립보드의 이미지를 첨부한다(없으면 안내)."""
-        image = QApplication.clipboard().image()
-        png = self._qimage_to_png(image) if image is not None else None
-        if not self._add_image(png):
-            self._img_caption.setText("클립보드에 이미지가 없습니다.")
-            self._img_caption.setVisible(True)
-
-    def _attach_from_file(self):
-        """이미지 파일을 골라 첨부한다(여러 장 선택 가능, PNG로 정규화)."""
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "이미지 파일 선택", "",
-            "이미지 (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;모든 파일 (*.*)")
-        added = False
-        for path in paths:
-            if self._add_image(self._qimage_to_png(QImage(path))):
-                added = True
-        if paths and not added:
-            self._img_caption.setText("이미지를 읽지 못했습니다.")
-            self._img_caption.setVisible(True)
 
     def _on_image_pasted(self, image: QImage):
         """질문칸에 Ctrl+V/드롭된 이미지를 첨부한다(_QuestionEdit 콜백)."""
