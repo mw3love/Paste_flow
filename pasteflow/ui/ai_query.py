@@ -95,6 +95,12 @@ class AiQueryDialog(QDialog):
         self._model_options: list[dict] = list(self._compare_models)  # combo와 인덱스 평행
         self._models_fetched.connect(self._on_models_fetched)
         self.setWindowTitle("AI에게 질문")
+        # 항상 위 — 패널이 TOPMOST라(panel._set_always_on_top) 일반 창은 Windows Z-order상
+        # 패널 아래에 깔려 클릭해도 앞으로 나오지 못한다(부모를 패널로 두던 시절엔 '소유 창은
+        # 소유자 위'라는 별개 규칙에 얹혀 가려지지 않았지만, 그 소유 관계가 바로 패널을 못 누르게
+        # 하던 원인이라 끊었다). 미리보기 팝업과 같은 TOPMOST 그룹에 올리면 그룹 안에서는
+        # 활성화 순서가 통해 '클릭한 창이 앞으로' 온다.
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         # 비모달 — 질문창이 떠 있어도 패널·영역 캡처(Alt+F2)·AI 기록창을 그대로 쓸 수 있어야
         # 한다(질문 내용은 이 다이얼로그가 다 들고 있어 다른 창을 잠글 이유가 없다).
         # ⚠ 이 설정만으로는 부족하다 — **호출자가 `exec()`가 아니라 `show()`로 띄워야 한다.**

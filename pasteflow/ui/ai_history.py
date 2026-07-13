@@ -25,6 +25,10 @@ class AiHistoryDialog(QDialog):
         super().__init__(parent)
         self._db = db
         self.setWindowTitle("AI 기록")
+        # 항상 위 — 패널이 TOPMOST라(panel._set_always_on_top) 일반 창은 Windows Z-order상
+        # 패널 아래로 밀려 클릭해도 앞으로 못 나온다. 미리보기 팝업과 같은 그룹에 올려야
+        # "클릭한 창이 앞으로" 온다(같은 TOPMOST 그룹 안에서는 활성화 순서가 통한다).
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setMinimumSize(420, 480)
         self.setStyleSheet(f"""
             QDialog {{
