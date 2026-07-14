@@ -311,6 +311,7 @@ class SettingsDialog(QDialog):
     KEY_IMAGE_TO_PATH_HOTKEY = "hotkey_image_to_path"
     KEY_SEQ_IMAGE_TO_PATH_HOTKEY = "hotkey_seq_image_to_path"
     KEY_PIN_IMAGE_HOTKEY = "hotkey_pin_image"
+    KEY_SEQ_PIN_HOTKEY = "hotkey_seq_pin"
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
     KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
     KEY_CAPTURE_FOLDER = "capture_save_folder"
@@ -507,6 +508,15 @@ class SettingsDialog(QDialog):
             "띄운 창에서 Space를 누르면 주석 편집 모드로 들어갑니다."
         )
         hotkey_form.addRow("•  영역 캡처 핀:", self._pin_image_hotkey)
+
+        self._seq_pin_hotkey = HotkeyEdit()
+        self._seq_pin_hotkey.setToolTip(
+            "화면 핀(영역 캡처 핀)의 '순차 버전'. 순차 붙여넣기(Ctrl+Shift+V)와 같은 큐를\n"
+            "공유하며, 큐에서 다음 항목을 꺼내 화면에 핀합니다.\n"
+            "예: 영역 캡처(Alt+F2)를 여러 장 찍은 뒤 이 키를 차례로 눌러 캡처1·캡처2… 순서대로 핀.\n"
+            "이미지가 아닌 항목은 이미지로 렌더해 핀합니다."
+        )
+        hotkey_form.addRow("•  순차 핀:", self._seq_pin_hotkey)
         hotkey_form.addRow(_hk_sep())
 
         # ④ AI 호출(alt+`) / AI OCR
@@ -1033,6 +1043,9 @@ class SettingsDialog(QDialog):
         self._pin_image_hotkey.set_value(
             self._settings.get(self.KEY_PIN_IMAGE_HOTKEY, "alt+f3")
         )
+        self._seq_pin_hotkey.set_value(
+            self._settings.get(self.KEY_SEQ_PIN_HOTKEY, "alt+shift+f3")
+        )
         self._capture_hotkey.set_value(
             self._settings.get(self.KEY_CAPTURE_HOTKEY, "alt+f2")
         )
@@ -1391,6 +1404,7 @@ class SettingsDialog(QDialog):
             self.KEY_IMAGE_TO_PATH_HOTKEY: self._image_to_path_hotkey.value() or "ctrl+shift+p",
             self.KEY_SEQ_IMAGE_TO_PATH_HOTKEY: self._seq_image_to_path_hotkey.value() or "ctrl+shift+[",
             self.KEY_PIN_IMAGE_HOTKEY: self._pin_image_hotkey.value() or "alt+f3",
+            self.KEY_SEQ_PIN_HOTKEY: self._seq_pin_hotkey.value() or "alt+shift+f3",
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
             self.KEY_ASK_AI_HOTKEY: self._ask_ai_hotkey.value() or "alt+`",
             self.KEY_CAPTURE_FOLDER: self._capture_folder_edit.text(),
