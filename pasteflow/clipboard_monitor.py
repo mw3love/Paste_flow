@@ -48,6 +48,46 @@ _HWP_NATIVE_FORMATS = {
     "hwp_native_info",
 }
 
+# PIL이 시그니처만으로 바로 여는 파일 포맷들. raw CF_DIB(BITMAPINFOHEADER)는 이 중
+# 무엇으로도 시작하지 않으므로(biSize=12/40/108/124) 이 판별로 둘을 가를 수 있다.
+_ENCODED_IMAGE_SIGNATURES = (
+    b'\x89PNG',           # PNG
+    b'\xff\xd8\xff',      # JPEG
+    b'GIF8',              # GIF
+    b'RIFF',              # WebP (RIFF....WEBP)
+    b'BM',                # BMP (파일 헤더 포함)
+    b'II*\x00',           # TIFF (little endian)
+    b'MM\x00*',           # TIFF (big endian)
+    b'\x00\x00\x01\x00',  # ICO
+)
+
+
+def is_encoded_image(data: bytes) -> bool:
+    """파일 포맷 이미지(PNG·JPEG·…)인가? False면 raw CF_DIB로 본다."""
+    return any(data.startswith(sig) for sig in _ENCODED_IMAGE_SIGNATURES)
+
+
+def _dib_to_bmp(dib_data: bytes) -> bytes:
+    """raw CF_DIB(BITMAPINFOHEADER) → BMP 파일 바이트 (14바이트 파일 헤더 부착)."""
+    import struct
+    if len(dib_data) < 40:
+        raise ValueError("DIB too short")
+    bi_size = struct.unpack_from('<I', dib_data, 0)[0]
+    bi_bit_count = struct.unpack_from('<H', dib_data, 14)[0]
+    bi_compression = struct.unpack_from('<I', dib_data, 16)[0]
+    bi_clr_used = struct.unpack_from('<I', dib_data, 32)[0]
+    # 색상 테이블 크기 계산 (24/32bpp는 0)
+    if bi_clr_used == 0 and bi_bit_count in (1, 4, 8):
+        bi_clr_used = 1 << bi_bit_count
+    # BI_BITFIELDS(3): BITMAPINFOHEADER(40) 뒤에 RGB 마스크 3×DWORD가 붙는다.
+    # 이걸 빠뜨리면 픽셀 시작점이 12바이트 밀려 색이 뒤집혀 읽힌다(실측: 빨강→파랑).
+    # 마스크를 헤더에 포함하는 V4/V5(108/124)는 해당 없음.
+    mask_bytes = 12 if (bi_compression == 3 and bi_size == 40) else 0
+    pixel_offset = 14 + bi_size + mask_bytes + bi_clr_used * 4
+    file_size = 14 + len(dib_data)
+    bmp_header = b'BM' + struct.pack('<IHHI', file_size, 0, 0, pixel_offset)
+    return bmp_header + dib_data
+
 
 class ClipboardMonitor:
     """WM_CLIPBOARDUPDATE 기반 클립보드 감시
@@ -279,30 +319,18 @@ class ClipboardMonitor:
                     pass
 
     def _create_thumbnail(self, dib_data: bytes) -> Optional[bytes]:
-        """DIB 또는 PNG 데이터에서 썸네일 생성
+        """이미지 데이터에서 썸네일 생성
 
-        PNG는 그대로 열고, DIB(raw BITMAPINFOHEADER)는 BMP 파일 헤더를 추가해 PIL이
-        인식할 수 있도록 변환한다.
+        PIL이 직접 여는 파일 포맷(PNG·JPEG·GIF·WebP·BMP…)은 그대로 열고, 못 여는
+        raw DIB(BITMAPINFOHEADER)만 BMP 파일 헤더를 조립해 인식시킨다.
+        "PNG가 아니면 DIB"로 갈랐던 옛 로직은 탐색기에서 복사한 JPEG(CF_HDROP 경로가
+        파일 바이트를 그대로 싣는다)에 가짜 BMP 헤더를 붙여 썸네일 생성이 실패했다.
         """
-        import struct
         try:
-            if dib_data[:4] == b'\x89PNG':
-                img_bytes = dib_data
-            else:
-                # DIB → BMP: 14바이트 BMP 파일 헤더 추가
-                if len(dib_data) < 40:
-                    return None
-                bi_size = struct.unpack_from('<I', dib_data, 0)[0]
-                bi_bit_count = struct.unpack_from('<H', dib_data, 14)[0]
-                bi_clr_used = struct.unpack_from('<I', dib_data, 32)[0]
-                # 색상 테이블 크기 계산 (24/32bpp는 0)
-                if bi_clr_used == 0 and bi_bit_count in (1, 4, 8):
-                    bi_clr_used = 1 << bi_bit_count
-                pixel_offset = 14 + bi_size + bi_clr_used * 4
-                file_size = 14 + len(dib_data)
-                bmp_header = b'BM' + struct.pack('<IHHI', file_size, 0, 0, pixel_offset)
-                img_bytes = bmp_header + dib_data
-            img = Image.open(io.BytesIO(img_bytes))
+            try:
+                img = Image.open(io.BytesIO(dib_data))
+            except Exception:
+                img = Image.open(io.BytesIO(_dib_to_bmp(dib_data)))
             img.thumbnail(THUMBNAIL_SIZE)
             buf = io.BytesIO()
             img.save(buf, format="PNG")

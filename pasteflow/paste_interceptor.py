@@ -21,6 +21,7 @@ import win32clipboard
 from pasteflow.models import ClipboardItem
 from pasteflow.paste_queue import PasteQueue
 from pasteflow.hotkey_manager import _SPECIAL_KEY_MAP
+from pasteflow.clipboard_monitor import is_encoded_image
 
 CF_HTML = win32clipboard.RegisterClipboardFormat("HTML Format")
 CF_RTF = win32clipboard.RegisterClipboardFormat("Rich Text Format")
@@ -194,8 +195,8 @@ def _send_ctrl_v_plain():
     ])
 
 
-def _png_to_dib(png_bytes: bytes) -> Optional[bytes]:
-    """PNG bytes → CF_DIB bytes (24bpp BMP에서 14바이트 파일 헤더 제거).
+def _image_to_dib(image_bytes: bytes) -> Optional[bytes]:
+    """파일 포맷 이미지(PNG·JPEG·…) bytes → CF_DIB bytes (24bpp BMP에서 14바이트 파일 헤더 제거).
 
     클립보드에 "PNG" 등록 포맷만 올리면 그것을 읽는 앱(크롬 계열 등)에서만 붙고
     그림판·한글 등 CF_DIB만 읽는 앱에선 붙여넣기가 무반응이라, PNG 항목은
@@ -204,7 +205,7 @@ def _png_to_dib(png_bytes: bytes) -> Optional[bytes]:
     try:
         import io
         from PIL import Image
-        img = Image.open(io.BytesIO(png_bytes))
+        img = Image.open(io.BytesIO(image_bytes))
         if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
             rgba = img.convert("RGBA")
             bg = Image.new("RGB", rgba.size, (255, 255, 255))
@@ -807,15 +808,25 @@ class PasteInterceptor:
                 except Exception:
                     pass
 
-            # 이미지 (PNG 또는 DIB — 원본 포맷 복원. PNG는 CF_DIB 병행 등재로
-            # "PNG" 포맷을 못 읽는 앱(그림판·한글 등)에서도 붙여넣기 보장)
+            # 이미지 — 원본 포맷 복원.
+            #  · PNG   : CF_PNG + 변환한 CF_DIB 병행 등재("PNG"를 못 읽는 그림판·한글 대응)
+            #  · 그 외 파일 포맷(JPEG·GIF·WebP…): raw DIB가 아니므로 CF_DIB로 그대로 올리면
+            #    받는 앱이 앞 40바이트를 BITMAPINFOHEADER로 잘못 읽어 붙여넣기가 깨진다
+            #    (탐색기에서 .jpg 복사 시 CF_HDROP 경로가 파일 바이트를 그대로 싣는다).
+            #    → DIB로 변환해 등재.
+            #  · raw CF_DIB: 그대로.
             if item.image_data:
-                is_png = item.image_data[:4] == b'\x89PNG'
-                payloads = [(CF_PNG if is_png else _CF_DIB, item.image_data)]
-                if is_png:
-                    dib = _png_to_dib(item.image_data)
+                data0 = item.image_data
+                if data0[:4] == b'\x89PNG':
+                    payloads = [(CF_PNG, data0)]
+                    dib = _image_to_dib(data0)
                     if dib:
                         payloads.append((_CF_DIB, dib))
+                elif is_encoded_image(data0):
+                    dib = _image_to_dib(data0)
+                    payloads = [(_CF_DIB, dib)] if dib else []
+                else:
+                    payloads = [(_CF_DIB, data0)]
                 for cf, data in payloads:
                     try:
                         h = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(data))
