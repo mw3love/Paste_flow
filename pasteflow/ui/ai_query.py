@@ -19,20 +19,27 @@ from pasteflow.ui.theme import COLORS, PEACH_HOVER
 
 
 class _QuestionEdit(QPlainTextEdit):
-    """Enter=전송, Shift+Enter=줄바꿈. Ctrl+V/드롭으로 이미지 첨부."""
+    """Enter=구글 AI, Ctrl+Enter=API 질의, Shift+Enter=줄바꿈. Ctrl+V/드롭으로 이미지 첨부.
+
+    Enter가 구글로 가는 이유: 실시간 검색·이미지 질의 모두 구글 AI 모드가 더 정확하다는
+    실측(web_open.py 모듈 주석) 이후 그쪽이 주 동작이 됐다. API 질의는 답변창·기록·비교가
+    필요할 때 쓰는 보조 경로로 내려 Ctrl+Enter에 남긴다(배관은 그대로 — 되돌리기 쉽게).
+    """
 
     def __init__(self, on_submit, on_image_paste=None, parent=None):
         super().__init__(parent)
+        # on_submit(mode) — mode는 "google"(주) 또는 "api"(보조).
         self._on_submit = on_submit
         self._on_image_paste = on_image_paste
         self.setAcceptDrops(True)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            mods = event.modifiers()
+            if mods & Qt.KeyboardModifier.ShiftModifier:
                 super().keyPressEvent(event)
                 return
-            self._on_submit()
+            self._on_submit("api" if mods & Qt.KeyboardModifier.ControlModifier else "google")
             return
         super().keyPressEvent(event)
 
@@ -91,6 +98,9 @@ class AiQueryDialog(QDialog):
         # DB/시크릿 접근은 main 쪽에 남긴다) — ↻ 클릭 시 백그라운드 스레드에서 호출한다.
         self._fetch_all_models = fetch_all_models
         self._model_options: list[str] = list(self._compare_models)  # combo와 인덱스 평행
+        # 브라우저로 열 대상("google"·"drive"). 평소(AI 질의)엔 빈 문자열 — main이 이 값으로
+        # "API로 물을지, 크롬에서 열지"를 가른다.
+        self._web_target: str = ""
         self._models_fetched.connect(self._on_models_fetched)
         self.setWindowTitle("AI에게 질문")
         # 항상 위 — 패널이 TOPMOST라(panel._set_always_on_top) 일반 창은 Windows Z-order상
@@ -153,9 +163,24 @@ class AiQueryDialog(QDialog):
                 font-size: 11px;
                 color: {COLORS['subtext0']};
             }}
-            QPushButton[text="질문"] {{
+            /* 브라우저로 여는 보조 경로 — 주 동작('질문')보다 약하게, 그러나 취소보다는 뚜렷하게. */
+            QPushButton#web {{
+                background-color: transparent;
+                border: 1px solid {COLORS['surface2']};
+                color: {COLORS['subtext0']};
+                padding: 5px 12px;
+            }}
+            QPushButton#web:hover {{
+                border-color: {COLORS['peach']};
+                color: {COLORS['text']};
+            }}
+            /* 주 동작 — 코랄(테마 규칙: 코랄=활성·주목). 지금은 '구글 AI'가 이 자리다. */
+            QPushButton#primary {{
                 background-color: {COLORS['peach']};
                 color: {COLORS['base']};
+            }}
+            QPushButton#primary:hover {{
+                background-color: {PEACH_HOVER};
             }}
             /* 비교 체크 시 흐려지는 모델 행 — 스타일시트로 색을 명시하면 Qt 기본 회색화가
                적용되지 않으므로 disabled 색을 직접 준다. */
@@ -165,9 +190,6 @@ class AiQueryDialog(QDialog):
             QComboBox:disabled {{
                 color: {COLORS['surface2']};
                 border: 1px solid {COLORS['surface1']};
-            }}
-            QPushButton[text="질문"]:hover {{
-                background-color: {PEACH_HOVER};
             }}
             QCheckBox {{
                 color: {COLORS['subtext0']};
@@ -268,9 +290,10 @@ class AiQueryDialog(QDialog):
             head_row.addWidget(history_btn)
         layout.addLayout(head_row)
 
-        self._editor = _QuestionEdit(self._try_submit, on_image_paste=self._on_image_pasted)
+        self._editor = _QuestionEdit(self._on_editor_submit, on_image_paste=self._on_image_pasted)
         self._editor.setPlaceholderText(
-            "질문을 입력하세요 — Enter 전송 · Shift+Enter 줄바꿈 · 이미지는 Ctrl+V/드래그로 첨부")
+            "질문을 입력하세요 — Enter 구글 AI · Ctrl+Enter 질문(API) · Shift+Enter 줄바꿈 · "
+            "이미지는 Ctrl+V/드래그로 첨부")
         self._editor.setFocus()
         layout.addWidget(self._editor, 1)
 
@@ -316,15 +339,37 @@ class AiQueryDialog(QDialog):
             self._compare_check.toggled.connect(self._on_compare_toggled)
             layout.addWidget(self._compare_check)
 
+        # 버튼 위계 — **구글 AI가 주 동작**(코랄·오른쪽 끝·Enter)이고, API 질의(`질문`)는
+        # 보조로 내렸다. 실시간 검색도 이미지 질의도 구글 AI 모드가 더 정확하다는 실측
+        # (web_open.py) 이후의 기본값 변경이다. 코드는 그대로 남긴다 — 답변창·기록·비교가
+        # 필요할 때 쓰고, 주입 경로가 실패했을 때 돌아갈 폴백이기도 하다.
+        # ⚠ 라벨에 이모지를 넣지 않는다 — 이 다이얼로그는 Qt 컬러 이모지 폴백으로 깨진다.
         btn_row = QHBoxLayout()
-        btn_row.addStretch()
+        drive_btn = QPushButton("드라이브")
+        drive_btn.setObjectName("web")
+        drive_btn.setToolTip("이 텍스트로 내 구글 드라이브를 검색해 브라우저에서 엽니다.")
+        drive_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        drive_btn.clicked.connect(lambda: self._submit_web("drive"))
+        ask_btn = QPushButton("질문 (API)")
+        ask_btn.setObjectName("web")
+        ask_btn.setToolTip("PasteFlow 답변창으로 답을 받습니다 (Ctrl+Enter)\n"
+                           "— 기록·형광펜·이미지로 복사·여러 모델 비교가 필요할 때.")
+        ask_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ask_btn.clicked.connect(self._try_submit)
+        google_btn = QPushButton("구글 AI")
+        google_btn.setObjectName("primary")
+        google_btn.setToolTip("이 질문을 구글 검색 AI 모드로 브라우저에서 엽니다 (Enter)\n"
+                              "— 실시간 수치·최신 정보가 정확하고, 첨부 이미지도 함께 보냅니다.")
+        google_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        google_btn.setDefault(True)
+        google_btn.clicked.connect(lambda: self._submit_web("google"))
         cancel_btn = QPushButton("취소")
         cancel_btn.clicked.connect(self.reject)
-        ask_btn = QPushButton("질문")
-        ask_btn.setProperty("text", "질문")
-        ask_btn.clicked.connect(self._try_submit)
-        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(drive_btn)
         btn_row.addWidget(ask_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(google_btn)
         layout.addLayout(btn_row)
 
     def showEvent(self, event):
@@ -375,12 +420,35 @@ class AiQueryDialog(QDialog):
         except Exception:
             pass
 
+    def _on_editor_submit(self, mode: str):
+        """입력칸의 Enter 계열 키 — 주 동작(구글) / 보조(API)를 가른다."""
+        if mode == "api":
+            self._try_submit()
+        else:
+            self._submit_web("google")
+
     def _try_submit(self):
         if self._editor.toPlainText().strip():
+            self._web_target = ""
             self.accept()
+
+    def _submit_web(self, target: str):
+        """'구글 AI'·'드라이브' 버튼 — 질문을 API가 아니라 브라우저로 보낸다.
+
+        같은 accept() 경로를 타고, 무엇을 눌렀는지는 `get_web_target()`으로 알린다
+        (main이 그 값을 보고 AI 워커 대신 `web_open`으로 분기한다).
+        """
+        if not self._editor.toPlainText().strip():
+            return
+        self._web_target = target
+        self.accept()
 
     def get_question(self) -> str:
         return self._editor.toPlainText().strip()
+
+    def get_web_target(self) -> str:
+        """브라우저로 열 대상 — `"google"`·`"drive"`, 평소(AI 질의)엔 `""`."""
+        return self._web_target
 
     def _on_compare_toggled(self, checked: bool):
         """'여러 모델로 비교' on/off — 켜면 단일 모델 선택 행을 흐리게(비활성) 한다.

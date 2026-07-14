@@ -1972,6 +1972,13 @@ class PasteFlowApp:
             if code == QDialog.DialogCode.Accepted:
                 question = dialog.get_question()
                 if question:
+                    target = dialog.get_web_target()
+                    if target:
+                        # 브라우저 경로 — API에 묻지 않고 크롬에서 연다(web_open.py 참조).
+                        # 첨부 이미지가 있으면 URL로 못 실으므로 주입 경로로 갈린다.
+                        self._open_in_browser(target, question, dialog.get_images())
+                        dialog.deleteLater()
+                        return
                     # 답변창은 입력창이 "닫힐 때" 있던 자리(모니터) 기준으로 띄운다 — 입력 중
                     # 다른 모니터로 끌어다 놓았을 수 있어 트리거 시점 커서로는 부정확하다.
                     self._ai_anchor = dialog.frameGeometry()
@@ -1988,6 +1995,89 @@ class PasteFlowApp:
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _open_in_browser(self, target: str, question: str,
+                         images: "list[bytes] | None" = None):
+        """질문을 브라우저에서 연다 — 구글 검색 AI 모드 또는 내 구글 드라이브 검색.
+
+        API 검색 경로(`web_search.py`)가 구조적으로 못 잡는 것을 위한 우회로다: 실시간
+        시세는 페이지 본문에 없어 크롤링 텍스트를 읽는 검색 도구가 영영 볼 수 없는데,
+        브라우저로 열면 구글이 금융 피드를 직접 물고 있어 정확한 값이 나온다(web_open.py
+        모듈 주석의 2026-07-14 실측 참조).
+
+        **이미지 첨부가 있으면 주입 경로로 갈린다.** 이미지는 URL에 실을 수 없지만 구글
+        입력칸이 Ctrl+V로 이미지를 받으므로, AI 모드 빈 화면을 열고 클립보드+키를 주입한다
+        (`_inject_to_google`). 텍스트만이면 견고한 URL 경로를 그대로 쓴다 — 주입은 타이밍에
+        의존해 본질적으로 약하므로 필요할 때만 내려간다.
+
+        답은 브라우저에 뜨고 끝난다 — PasteFlow가 그 텍스트를 읽지 못하므로 답변창·비교·
+        이미지 복사는 이 경로에 적용되지 않는다(의도된 트레이드오프).
+        """
+        from pasteflow import web_open
+        from pasteflow.ui.toast import ToastNotification
+
+        if target == "google" and images:
+            self._inject_to_google(question, images)
+            return
+
+        if target == "drive":
+            url, label = web_open.drive_search_url(question), "내 드라이브에서 검색"
+        else:
+            url, label = web_open.google_ai_url(question), "구글 AI 모드로 검색"
+
+        if web_open.open_url(url):
+            ToastNotification(f"{label} — 브라우저에서 여는 중", icon="🌐")
+        else:
+            ToastNotification("브라우저를 열지 못했습니다", icon="🌐")
+
+    # 페이지가 뜨고 입력칸에 포커스가 갈 때까지 기다리는 시간. 프로그램은 로드 완료 시점을
+    # 알 수 없어(브라우저 밖에서 DOM을 못 본다) 고정 지연에 기댈 수밖에 없다 — 주입 경로가
+    # URL 경로보다 본질적으로 약한 지점이다. 넉넉히 잡는 대신, 주입 직전 포그라운드가
+    # 브라우저인지 검사해 엉뚱한 창에 쏘는 사고를 막는다.
+    _BROWSER_LOAD_MS = 2500
+    _INJECT_STEP_MS = 700   # 붙여넣기 사이 간격(구글이 첨부 칩을 만들 시간)
+
+    def _inject_to_google(self, question: str, images: "list[bytes]"):
+        """AI 모드 빈 화면을 열고 이미지 → 질문 → Enter를 순서대로 주입한다.
+
+        클립보드를 두 번(이미지·텍스트) 갈아끼우는 방식이다 — 한 글자씩 타이핑하는 것보다
+        단순하고, `_set_clipboard`가 `_self_triggered`를 세워 주므로 이 임시 클립보드가
+        히스토리에 쌓이지도 않는다(금지 조항 5와 같은 경로).
+
+        각 단계는 QTimer로 이어 붙인다(sleep으로 UI를 막지 않는다). 매 단계 직전
+        포그라운드가 브라우저인지 확인하고, 아니면 즉시 중단한다 — 사용자가 그 사이 다른
+        창을 클릭했다면 우리가 쏜 Ctrl+V·Enter가 그 창에 들어가 버리기 때문이다.
+        """
+        from PyQt6.QtCore import QTimer
+        from pasteflow import web_open
+        from pasteflow.paste_interceptor import VK_RETURN, VK_V
+        from pasteflow.ui.toast import ToastNotification
+
+        if not web_open.open_url(web_open.google_ai_home_url()):
+            ToastNotification("브라우저를 열지 못했습니다", icon="🌐")
+            return
+        ToastNotification(f"구글 AI 모드로 검색 — 이미지 {len(images)}장 첨부 중", icon="🌐")
+
+        # 붙여넣을 것들을 순서대로 — 이미지들 다음에 질문 텍스트.
+        pastes: list[ClipboardItem] = [
+            ClipboardItem(content_type="image", image_data=png) for png in images
+        ]
+        pastes.append(ClipboardItem(content_type="text", text_content=question))
+
+        def _step(i: int):
+            if not web_open.is_browser_foreground():
+                # 사용자가 다른 창으로 갔다 — 남은 키를 쏘지 않고 조용히 멈춘다.
+                ToastNotification("브라우저가 앞에 없어 중단했습니다 — 직접 붙여넣어 주세요",
+                                  icon="🌐")
+                return
+            if i < len(pastes):
+                self.interceptor._set_clipboard(pastes[i])
+                self.interceptor._send_clean_key(VK_V)
+                QTimer.singleShot(self._INJECT_STEP_MS, lambda: _step(i + 1))
+            else:
+                self.interceptor.send_plain_key(VK_RETURN)
+
+        QTimer.singleShot(self._BROWSER_LOAD_MS, lambda: _step(0))
 
     def _ai_query_for_item(self, item: ClipboardItem):
         """항목을 컨텍스트로 질문 입력 다이얼로그 표시 → AI 워커.

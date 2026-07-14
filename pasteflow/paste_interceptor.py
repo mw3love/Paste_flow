@@ -44,6 +44,7 @@ VK_CONTROL = 0x11
 VK_SHIFT = 0x10
 VK_MENU = 0x12  # Alt
 VK_MASK = 0xE8  # 미할당 가상 키 — Ctrl+Shift 조합을 더럽혀 입력기 전환 팝업 방지
+VK_RETURN = 0x0D
 LLKHF_INJECTED = 0x10  # KBDLLHOOKSTRUCT.flags 비트 — SendInput 등으로 주입된 키
 
 
@@ -729,6 +730,15 @@ class PasteInterceptor:
         if VK_MENU in held_keys:
             time.sleep(0.02)
             _send_inputs([_make_key_input(VK_MENU)])
+
+    def send_plain_key(self, vk: int):
+        """수정키 없이 키 하나를 눌렀다 뗀다(SendInput) — 브라우저 주입의 Enter용.
+
+        `_send_clean_key`는 Ctrl+{key} 조합을 보내므로 단독 키(Enter)에는 못 쓴다.
+        포그라운드 창에 그대로 들어가므로 호출자가 대상 창을 먼저 확인해야 한다
+        (main._inject_to_google이 크롬이 앞에 있는지 검사한 뒤 부른다).
+        """
+        _send_inputs([_make_key_input(vk), _make_key_input(vk, KEYEVENTF_KEYUP)])
 
     def send_ctrl_v_to(self, target_hwnd):
         """대상 윈도우에 포커스 이동 후 Ctrl+V 전송"""
