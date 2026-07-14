@@ -13,3 +13,7 @@ desktop.ini
 logs/
 settings.json
 _icons_preview.png
+# 구글 OAuth 클라이언트 JSON(client_secret) — 저장소에 절대 들어가면 안 되는 시크릿.
+# 앱은 이 값을 설정창에서 입력받아 DPAPI로 암호화해 로컬 DB에만 저장한다(pasteflow/crypto.py).
+client_secret*.json
+.playwright-mcp/

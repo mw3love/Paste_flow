@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer, QObject, pyqtSignal, QBuffer, QRect, Qt
 
 from pasteflow import web_search
+from pasteflow import gdrive
 from pasteflow.database import Database
 from pasteflow.models import ClipboardItem
 from pasteflow.paste_queue import PasteQueue
@@ -535,6 +536,10 @@ def _resolve_db_path() -> str:
 # 읽기/쓰기 시 자동 복호화/암호화. 다른 PC 복호화 불가(설계상 — 동기화 폐지됨).
 _SECRET_KEYS = frozenset({
     "ocr_gemini_api_key_gateway",
+    # 구글 드라이브 OAuth — client_secret과 refresh_token은 비밀이다.
+    # client_id(`gdrive_client_id`)는 비밀이 아니라 평문으로 둔다(구글도 공개 취급).
+    "gdrive_client_secret",
+    "gdrive_refresh_token",
 })
 
 # 과거 빌드의 잔재로 DB에 남았으나 현재 코드 어디서도 참조하지 않는 고아 키.
@@ -793,6 +798,10 @@ class PasteFlowApp:
         # 직전 이미지→경로(Ctrl+Shift+P·Ctrl+Shift+[)로 클립보드에 올린 임시 PNG 경로.
         # Alt+F3 핀이 이 경로가 클립보드에 남아 있으면 경로 문자열이 아니라 원본 이미지를 핀한다.
         self._last_pasted_image_path: str | None = None
+
+        # 구글 드라이브 액세스 토큰 캐시(만료 2분 전 자동 갱신 + 락).
+        # 자격증명을 값이 아니라 콜러블로 넘긴다 — 설정창에서 재연결하면 다음 호출에 자동 반영.
+        self._gdrive_tokens = gdrive.TokenCache(self._gdrive_creds)
 
         # DB에서 설정 로드 및 적용
         self._apply_settings_from_db()
@@ -1096,8 +1105,11 @@ class PasteFlowApp:
                 api_key, base_url, model_id = self._resolve_gemini_cfg(
                     model_override=model)
                 system_prompt = self.db.get_setting("ai_system_prompt", "")
+                # 드라이브 토큰(연결 안 했으면 "") — 있으면 검색 도구에 드라이브가 함께 실린다.
+                # 만료 2분 전 자동 갱신, 갱신 실패도 ""라 AI 질의 자체는 절대 안 깨진다.
                 engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url,
-                                   model=model_id, system_prompt=system_prompt)
+                                   model=model_id, system_prompt=system_prompt,
+                                   gdrive_token=self._gdrive_tokens.access_token())
                 # 웹 검색이 끼면 응답이 2~3배 느려진다(LLM 왕복 2회 + 검색 2~4초).
                 # "멈춘 게 아니라 검색 중"임을 진행 칩에 보여준다(첫 턴 한정 — 후속·비교
                 # 창은 팝업 자체가 '생각 중'을 표시하므로 슬롯이 무시한다).
@@ -1211,7 +1223,8 @@ class PasteFlowApp:
             if facts is None:
                 api_key, base_url, _ = self._resolve_gemini_cfg()
                 res = web_search.prefetch(question, api_key=api_key, base_url=base_url,
-                                          images=images)
+                                          images=images,
+                                          gdrive_token=self._gdrive_tokens.access_token())
                 available, facts = res.available, res.facts
                 if available:
                     cache[question] = facts   # ""(검색 불필요)도 캐시 — 재판정 비용 절약
@@ -2335,6 +2348,19 @@ class PasteFlowApp:
         from pasteflow.crypto import unprotect
         return unprotect(self.db.get_setting(key, default) or default)
 
+    def _gdrive_creds(self) -> tuple[str, str, str]:
+        """드라이브 OAuth 자격증명 (client_id, client_secret, refresh_token).
+
+        TokenCache가 **매 토큰 요청마다** 호출한다 — 값이 아니라 함수를 넘기는 이유가 이것이다.
+        설정창에서 재연결하면 다음 호출이 곧바로 새 자격증명을 본다(앱 재시작 불필요).
+        DB 접근은 Database._lock으로 직렬화되어 워커 스레드에서 호출해도 안전하다.
+        """
+        return (
+            self.db.get_setting("gdrive_client_id", ""),
+            self._get_secret("gdrive_client_secret"),
+            self._get_secret("gdrive_refresh_token"),
+        )
+
     def _save_annot_last_values(self, width, font, badge):
         """주석 편집기 마지막 값(두께·글자·번호 크기)을 DB에 저장 — 재시작 후에도 유지.
         _EditorMixin._persist_cb로 등록돼 값 변경(주석 위 휠) 시 호출된다."""
@@ -2411,6 +2437,10 @@ class PasteFlowApp:
             "ai_compare_model_a": self.db.get_setting("ai_compare_model_a", ""),
             "ai_compare_model_b": self.db.get_setting("ai_compare_model_b", ""),
             "ai_system_prompt": self.db.get_setting("ai_system_prompt", ""),
+            # 구글 드라이브 OAuth — secret 2종은 DPAPI 복호화, client_id는 평문.
+            "gdrive_client_id": self.db.get_setting("gdrive_client_id", ""),
+            "gdrive_client_secret": self._get_secret("gdrive_client_secret"),
+            "gdrive_refresh_token": self._get_secret("gdrive_refresh_token"),
             "notify_on_copy": self.db.get_setting("notify_on_copy", "1"),
             "queue_idle_reset_sec": self.db.get_setting("queue_idle_reset_sec", "10"),
         }

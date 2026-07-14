@@ -91,10 +91,35 @@ _QUOTED_BOLD_RE = re.compile(r"""\*\*(['"‘’“”])(.+?)\1\*\*""")
 _CODE_BOLD_RE = re.compile(r"`\*\*(.+?)\*\*`")     # `**X**` → `X`
 _BOLD_CODE_RE = re.compile(r"\*\*(`[^`]+`)\*\*")   # **`X`** → `X`
 
+# 모델은 URL을 백틱으로 감싸 보내는 일이 잦다(실측: 검색 결과의 `출처: \`https://…\``).
+# 그러면 Qt가 링크가 아니라 **코드**로 렌더해 `anchorAt`이 빈 문자열을 돌려주고 클릭이 죽는다.
+# 그런데 코드색(#38bdf8)과 링크색(#60a5fa)이 둘 다 파랑+밑줄이라 **링크처럼 보이는데 안 눌리는**
+# 상태가 된다(사용자 보고). 백틱을 벗겨 맨 URL로 두면 Qt가 자동으로 앵커를 만든다(실측 확인).
+# `<...>` 꺾쇠 형태도 함께 받는다(마크다운 autolink 문법).
+_CODE_URL_RE = re.compile(r"`<?(https?://[^`\s>]+)>?`")
+_FENCE_RE = re.compile(r"^\s*```")
+
+
+def _autolink_code_urls(text: str) -> str:
+    """백틱으로 감싼 URL을 맨 URL로 푼다(코드블록 안은 건드리지 않는다).
+
+    코드블록(``` 펜스)은 "코드를 코드로 보여주는" 자리라 URL도 그대로 둔다 — 거기까지
+    링크로 바꾸면 복붙용 코드가 오염된다.
+    """
+    if "`" not in text:
+        return text
+    out, in_fence = [], False
+    for line in text.split("\n"):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+        out.append(line if in_fence else _CODE_URL_RE.sub(r"\1", line))
+    return "\n".join(out)
+
 
 def _fix_markdown_emphasis(text: str) -> str:
     text = _CODE_BOLD_RE.sub(r"`\1`", text)
     text = _BOLD_CODE_RE.sub(r"\1", text)
+    text = _autolink_code_urls(text)
     return _QUOTED_BOLD_RE.sub(lambda m: f"{m.group(1)}**{m.group(2)}**{m.group(1)}", text)
 
 

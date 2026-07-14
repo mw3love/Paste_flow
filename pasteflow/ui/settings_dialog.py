@@ -333,12 +333,19 @@ class SettingsDialog(QDialog):
     KEY_AI_COMPARE_MODEL_B = "ai_compare_model_b"
     # AI 질의 시스템 프롬프트(멘토 페르소나). 빈 값이면 ocr_engine.AI_SYSTEM_PROMPT로 폴백.
     KEY_AI_SYSTEM_PROMPT = "ai_system_prompt"
+    # 구글 드라이브 OAuth(선택) — 연결하면 AI가 내 드라이브 문서를 검색해 근거로 삼는다.
+    # client_secret·refresh_token은 main._SECRET_KEYS에 등록돼 DPAPI로 암호화 저장된다.
+    KEY_GDRIVE_CLIENT_ID = "gdrive_client_id"
+    KEY_GDRIVE_CLIENT_SECRET = "gdrive_client_secret"
+    KEY_GDRIVE_REFRESH_TOKEN = "gdrive_refresh_token"
     KEY_QUEUE_IDLE_RESET = "queue_idle_reset_sec"
     # 비교 콤보의 '미사용' 표시값 — 저장 시 빈 문자열로 환원한다(editable 콤보라 텍스트=값).
     _COMPARE_UNUSED = "(사용 안 함)"
 
     # 워커 스레드 → UI 안전 통신용 내부 시그널 (models, error_msg)
     _models_fetched = pyqtSignal(list, str)  # (models, error)
+    # 드라이브 동의 결과 (refresh_token, error_msg) — 워커 스레드 → UI 안전 통신.
+    _gdrive_done = pyqtSignal(str, str)
     # 연결 테스트 단계별 결과 (run_id, slot, status, detail).
     # slot: "conn" | "chat" | "ocr" | "__end__"(버튼 복구 신호)
     # status: ProbeResult.status + "run"(진행 중) / "skip"(앞 단계 실패로 건너뜀)
@@ -356,6 +363,7 @@ class SettingsDialog(QDialog):
         self._finalize_size()
         self._models_fetched.connect(self._on_models_fetched)
         self._probe_done.connect(self._on_probe_done)
+        self._gdrive_done.connect(self._on_gdrive_done)
 
     def _setup_window(self):
         self.setWindowTitle("PasteFlow 설정")
@@ -735,6 +743,54 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(ai_group)
 
+        # ── 구글 드라이브 그룹 (선택) ──
+        # 연결하면 AI 질의가 내 드라이브 문서를 검색해 근거로 삼는다(읽기 전용).
+        # 안 하면 도구가 조용히 빠질 뿐 웹 검색·AI 답변은 그대로 동작한다(우아한 열화).
+        gd_group = QGroupBox("구글 드라이브 (선택)")
+        gd_form = QFormLayout(gd_group)
+        gd_form.setVerticalSpacing(4)
+        gd_form.setContentsMargins(10, 8, 10, 8)
+
+        gd_desc = QLabel(
+            "연결하면 AI가 내 구글 드라이브 문서를 찾아 근거로 답합니다(읽기 전용). "
+            "Google Cloud Console에서 「데스크톱 앱」 OAuth 클라이언트를 만들어 아래에 입력하세요."
+        )
+        gd_desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
+        gd_desc.setWordWrap(True)
+        gd_form.addRow(gd_desc)
+
+        self._gdrive_client_id_edit = QLineEdit()
+        self._gdrive_client_id_edit.setPlaceholderText("...apps.googleusercontent.com")
+        gd_form.addRow(QLabel("•  클라이언트 ID:"), self._gdrive_client_id_edit)
+
+        self._gdrive_client_secret_edit = QLineEdit()
+        self._gdrive_client_secret_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._gdrive_client_secret_edit.setPlaceholderText("GOCSPX-...")
+        gd_form.addRow(QLabel("•  클라이언트 보안 비밀번호:"), self._gdrive_client_secret_edit)
+
+        self._gdrive_connect_btn = QPushButton("연결")
+        self._gdrive_connect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._gdrive_connect_btn.setToolTip(
+            "브라우저에서 구글 동의를 받아 드라이브 읽기 권한을 연결합니다.\n"
+            "('확인되지 않은 앱' 경고가 뜨면 [고급] → [계속]으로 넘기세요.)"
+        )
+        self._gdrive_connect_btn.clicked.connect(self._on_gdrive_connect)
+        self._gdrive_disconnect_btn = QPushButton("연결 해제")
+        self._gdrive_disconnect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._gdrive_disconnect_btn.setToolTip("저장된 구글 인증을 지웁니다(드라이브 검색 중지).")
+        self._gdrive_disconnect_btn.clicked.connect(self._on_gdrive_disconnect)
+        self._gdrive_status = QLabel("")
+        self._gdrive_status.setWordWrap(True)
+        gd_btn_row = QHBoxLayout()
+        gd_btn_row.setContentsMargins(0, 0, 0, 0)
+        gd_btn_row.setSpacing(8)
+        gd_btn_row.addWidget(self._gdrive_connect_btn)
+        gd_btn_row.addWidget(self._gdrive_disconnect_btn)
+        gd_btn_row.addWidget(self._gdrive_status, 1)
+        gd_form.addRow("", gd_btn_row)
+
+        layout.addWidget(gd_group)
+
         # ── 일반 설정 그룹 ──
         general_group = QGroupBox("일반")
         general_form = QFormLayout(general_group)
@@ -902,6 +958,57 @@ class SettingsDialog(QDialog):
         }[slot]
         self._set_probe_status(label, status, detail)
 
+    # ── 구글 드라이브 연결 ──────────────────────────────────────────────────
+    #
+    # refresh token은 `연결`이 성공한 즉시 DB에 쓰지 않고 `self._gdrive_refresh`에 들고 있다가
+    # [저장]에서 함께 emit한다 — 다른 모든 설정과 같은 규칙(취소하면 아무것도 안 바뀜).
+
+    def _on_gdrive_connect(self):
+        """`연결` — 브라우저 동의를 받아 refresh token을 얻는다(워커 스레드).
+
+        동의에 수십 초가 걸리므로 UI 스레드에서 부르면 설정창이 통째로 얼어붙는다.
+        """
+        client_id = self._gdrive_client_id_edit.text().strip()
+        client_secret = self._gdrive_client_secret_edit.text().strip()
+        if not (client_id and client_secret):
+            self._set_gdrive_status("✗ 클라이언트 ID와 보안 비밀번호를 먼저 입력하세요.", "fail")
+            return
+
+        self._gdrive_connect_btn.setEnabled(False)
+        self._set_gdrive_status("브라우저에서 구글 동의를 진행하세요…", "run")
+
+        import threading
+
+        def _worker():
+            try:
+                from pasteflow import gdrive
+                token = gdrive.authorize(client_id, client_secret)
+                self._gdrive_done.emit(token, "")
+            except Exception as e:
+                self._gdrive_done.emit("", str(e))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_gdrive_done(self, refresh_token: str, err: str):
+        """동의 결과 반영 (Qt 메인 스레드)."""
+        self._gdrive_connect_btn.setEnabled(True)
+        if err:
+            self._set_gdrive_status(f"✗ 연결 실패 — {err}", "fail")
+            return
+        self._gdrive_refresh = refresh_token
+        self._set_gdrive_status("✓ 연결됨 — [저장]을 눌러야 적용됩니다.", "ok")
+
+    def _on_gdrive_disconnect(self):
+        """`연결 해제` — 보관 중인 인증을 지운다(저장 시 DB에서도 비워진다)."""
+        self._gdrive_refresh = ""
+        self._set_gdrive_status("연결 해제됨 — [저장]을 눌러야 적용됩니다.", "run")
+
+    def _set_gdrive_status(self, message: str, status: str):
+        """드라이브 상태 줄. status는 _PROBE_STYLE 키(ok/fail/run…)와 색을 공유한다."""
+        _, color = _PROBE_STYLE.get(status, _PROBE_STYLE["run"])
+        self._gdrive_status.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self._gdrive_status.setText(message)
+
     def _pick_capture_folder(self):
         """캡처 저장 폴더 선택 다이얼로그"""
         start = self._capture_folder_edit.text() or ""
@@ -941,6 +1048,17 @@ class SettingsDialog(QDialog):
         # 모델 슬롯 4행 — 캐시된 모델 목록으로 채우고 저장값을 복원한다.
         self._init_model_slots()
         self._init_compare_slots()
+
+        # 구글 드라이브 — refresh token은 화면에 안 띄운다(비밀이고 사용자가 볼 일도 없다).
+        # 있으면 "연결됨"으로만 알린다.
+        self._gdrive_client_id_edit.setText(self._settings.get(self.KEY_GDRIVE_CLIENT_ID, ""))
+        self._gdrive_client_secret_edit.setText(
+            self._settings.get(self.KEY_GDRIVE_CLIENT_SECRET, ""))
+        self._gdrive_refresh = self._settings.get(self.KEY_GDRIVE_REFRESH_TOKEN, "")
+        if self._gdrive_refresh:
+            self._set_gdrive_status("✓ 연결됨", "ok")
+        else:
+            self._set_gdrive_status("연결되지 않음 — AI가 드라이브를 검색하지 않습니다.", "run")
 
         try:
             history_max = int(self._settings.get(self.KEY_HISTORY_MAX, "50"))
@@ -1294,6 +1412,11 @@ class SettingsDialog(QDialog):
         new_settings[self.KEY_OCR_MODEL_GATEWAY] = self._ocr_model_combo.currentText()
         new_settings[self.KEY_AI_COMPARE_MODEL_A] = self._compare_value(self._compare_model_a_combo)
         new_settings[self.KEY_AI_COMPARE_MODEL_B] = self._compare_value(self._compare_model_b_combo)
+
+        # 구글 드라이브 — secret 2종은 main._SECRET_KEYS가 DPAPI로 암호화해 저장한다.
+        new_settings[self.KEY_GDRIVE_CLIENT_ID] = self._gdrive_client_id_edit.text().strip()
+        new_settings[self.KEY_GDRIVE_CLIENT_SECRET] = self._gdrive_client_secret_edit.text().strip()
+        new_settings[self.KEY_GDRIVE_REFRESH_TOKEN] = self._gdrive_refresh
 
         # 모델 캐시(↻로 갱신된 값)는 로드값을 그대로 실어 보낸다 — 안 보내면 사라진다.
         cache_key = self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY

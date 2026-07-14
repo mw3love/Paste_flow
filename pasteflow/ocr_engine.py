@@ -335,12 +335,17 @@ class OcrEngine:
         language: str = "ko",
         model: str = "",
         system_prompt: str = "",
+        gdrive_token: str = "",
     ):
         self.kind: EngineKind = kind
         self.api_key = api_key
         self.base_url = base_url
         self.language = language
         self.model = model
+        # 구글 드라이브 액세스 토큰(선택). 있으면 AI 질의의 검색 도구에 드라이브 커넥터가
+        # 함께 실린다 — 비면 도구만 조용히 빠지고 웹 검색은 그대로다(우아한 열화).
+        # OCR(recognize) 경로에는 쓰지 않는다(글자 추출에 검색은 무의미·비용만 증가).
+        self.gdrive_token = gdrive_token
         # AI 질의(ask*) 전용 시스템 프롬프트. 빈 문자열이면 모듈 상수 AI_SYSTEM_PROMPT로
         # 폴백한다(설정창에서 사용자가 커스터마이즈 가능, 비우면 기본 멘토 페르소나 유지).
         # OCR(recognize) 경로는 이 값을 쓰지 않는다.
@@ -688,8 +693,10 @@ class OcrEngine:
             if self.on_tool_progress:
                 self.on_tool_progress(query)      # 진행 칩: "웹 검색: …"
             # 자격증명을 넘겨 GPT 검색 심부름꾼(고품질)을 쓰게 한다. 못 쓰면 web_search가
-            # 알아서 DuckDuckGo 안전망으로 내려간다.
-            result = web_search.search(query, api_key=self.api_key, base_url=self.base_url)
+            # 알아서 DuckDuckGo 안전망으로 내려간다. 드라이브 토큰이 있으면 심부름꾼이
+            # 웹과 함께 사용자의 드라이브도 뒤진다(질문이 개인 자료를 가리킬 때).
+            result = web_search.search(query, api_key=self.api_key, base_url=self.base_url,
+                                       gdrive_token=self.gdrive_token)
             if self.on_tool_progress:
                 self.on_tool_progress("")         # 검색 끝 — 다시 "AI 생각 중…"
         else:
@@ -742,7 +749,7 @@ class OcrEngine:
         def _call(messages: list[dict], with_tools: bool):
             kw: dict = {"model": model, "max_tokens": 16384, "messages": messages}
             if with_tools:
-                kw["tools"] = [web_search.SEARCH_TOOL_SPEC]
+                kw["tools"] = [web_search.search_tool_spec(bool(self.gdrive_token))]
             return client.chat.completions.create(**kw)
 
         # 도구를 아예 못 받는 모델이 있다(실측: meta-llama/Llama-4-Maverick → 405). 도구를
@@ -789,7 +796,8 @@ class OcrEngine:
                     if self.on_tool_progress:
                         self.on_tool_progress(q)
                     facts.append(web_search.search(
-                        q, api_key=self.api_key, base_url=self.base_url))
+                        q, api_key=self.api_key, base_url=self.base_url,
+                        gdrive_token=self.gdrive_token))
                     if self.on_tool_progress:
                         self.on_tool_progress("")
                 # 모델의 XML 의도는 지운 채(재누출 유도 방지) 어시스턴트 턴을 남기고, 검색
@@ -853,9 +861,12 @@ class OcrEngine:
                     content = parts
             inp.append({"role": role, "content": content})
 
+        # GPT는 서버측 내장 검색을 그대로 쓴다. 드라이브 커넥터도 같은 `tools` 배열에 한 줄
+        # 더 넣으면 게이트웨이가 중계한다(2026-07-13 실호출 검증). 토큰이 없으면 웹 검색만.
+        tools = web_search.agent_tools(self.gdrive_token) if tools_enabled else []
         resp = client.responses.create(
             model=model, instructions=self._system_text(search_available=tools_enabled),
-            input=inp, tools=[{"type": "web_search"}] if tools_enabled else [])
+            input=inp, tools=tools)
         return (getattr(resp, "output_text", "") or "").strip()
 
 

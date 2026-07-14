@@ -205,3 +205,58 @@ class TestPrefetch:
         content = create.call_args.kwargs["input"][0]["content"]
         kinds = [part["type"] for part in content]
         assert kinds.count("input_image") == 2 and "input_text" in kinds
+
+
+class TestGDriveTool:
+    """드라이브 커넥터 주입 — 토큰이 있을 때만 붙고, 없으면 웹 검색만 그대로 돈다.
+
+    ⚠ 여기서 지키는 계약 둘:
+    1) 드라이브 호출은 output 타입이 `mcp_call`이라 "search" 문자열이 없다. 웹 검색만 세면
+       **드라이브만 뒤진 질문의 자료가 통째로 버려진다**(Prefetch(True, "") = 검색 불필요 오판).
+    2) 토큰이 없으면 도구가 조용히 빠질 뿐 웹 검색은 멀쩡해야 한다(우아한 열화).
+    """
+
+    def test_토큰이_있으면_도구에_드라이브_커넥터가_붙는다(self):
+        create = MagicMock(return_value=_resp("결과", ["mcp_call", "message"]))
+        _inject_openai(create)
+
+        web_search.prefetch("내 드라이브에서 X 찾아줘", api_key="k", base_url="https://gw",
+                            gdrive_token="ya29.token")
+
+        tools = create.call_args.kwargs["tools"]
+        kinds = [t.get("type") for t in tools]
+        assert "web_search" in kinds and "mcp" in kinds
+        drive = next(t for t in tools if t.get("type") == "mcp")
+        assert drive["connector_id"] == "connector_googledrive"
+        assert drive["authorization"] == "ya29.token"
+
+    def test_토큰이_없으면_웹_검색만_붙는다(self):
+        create = MagicMock(return_value=_resp("결과", ["web_search_call", "message"]))
+        _inject_openai(create)
+
+        web_search.prefetch("오늘 날씨", api_key="k", base_url="https://gw")
+
+        assert create.call_args.kwargs["tools"] == [{"type": "web_search"}]
+
+    def test_드라이브만_검색해도_검색한_것으로_센다(self):
+        # 회귀: mcp_call을 안 세면 "내 드라이브에서 X 찾아줘"의 자료가 버려진다.
+        _inject_openai(MagicMock(return_value=_resp("파일1.md", ["mcp_list_tools", "mcp_call", "message"])))
+        res = web_search.prefetch("내 드라이브 파일", api_key="k", base_url="https://gw",
+                                  gdrive_token="t")
+        assert res.available is True and res.facts == "파일1.md"
+
+    def test_도구_목록_조회만으로는_검색으로_치지_않는다(self):
+        # mcp_list_tools는 커넥터가 늘 먼저 하는 준비 동작이지 검색이 아니다.
+        _inject_openai(MagicMock(return_value=_resp("NO_SEARCH", ["mcp_list_tools", "message"])))
+        res = web_search.prefetch("1+1은?", api_key="k", base_url="https://gw", gdrive_token="t")
+        assert res.available is True and res.facts == ""
+
+    def test_도구_설명은_드라이브_연결시에만_개인자료를_언급한다(self):
+        # 설명을 안 바꾸면 모델이 "내 드라이브에서…"를 검색 불필요로 보고 도구를 안 부른다.
+        plain = web_search.search_tool_spec(False)
+        with_drive = web_search.search_tool_spec(True)
+        assert plain is web_search.SEARCH_TOOL_SPEC
+        assert "드라이브" in with_drive["function"]["description"]
+        # 원본 스펙을 오염시키지 않는다(deepcopy) — 다음 호출이 설명을 중복으로 이어붙이면 안 된다.
+        assert "드라이브" not in web_search.SEARCH_TOOL_SPEC["function"]["description"]
+        assert with_drive["function"]["name"] == "web_search"

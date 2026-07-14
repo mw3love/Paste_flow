@@ -27,6 +27,8 @@ from __future__ import annotations
 
 from typing import NamedTuple, Optional
 
+from . import gdrive
+
 # 검색 심부름꾼 모델. 가벼울수록 좋다 — 검색은 사실 수집이지 사고가 아니다.
 # (실측: nano 2.9초 vs gpt-5-mini 51~83초. 답변 품질은 어차피 본 모델이 책임진다.)
 SEARCH_AGENT_MODEL = "gpt-5.4-nano"
@@ -38,6 +40,28 @@ _SEARCH_AGENT_INSTRUCTIONS = (
     "조언·인사·의견·추측을 덧붙이지 마라. 수치·날짜·고유명사는 찾은 그대로 옮기고, "
     "각 항목 끝에 출처 URL을 적어라. 못 찾았으면 '검색 결과 없음'이라고만 답한다."
 )
+
+# 드라이브가 연결됐을 때만 지시문에 덧붙인다. 상수에 박아 두면 드라이브를 연결하지 않은
+# 사용자에게도 "드라이브를 검색하라"고 말하는 셈이라, 도구가 없는 심부름꾼이 헛돌거나
+# "드라이브에 접근할 수 없다"는 잡음을 답에 섞는다.
+_DRIVE_NOTE = (
+    "\n사용자의 구글 드라이브를 검색하는 도구(gdrive)도 있다. 질문이 '내 드라이브·내 문서·"
+    "내 파일·내가 쓴 …'처럼 **사용자 개인 자료**를 가리키면 웹이 아니라 드라이브를 검색해 "
+    "찾은 파일명·내용을 그대로 보고한다. 웹과 드라이브 둘 다 필요하면 둘 다 쓴다."
+)
+
+
+def agent_tools(gdrive_token: str = "") -> list[dict]:
+    """심부름꾼(nano)·GPT Responses에 실을 도구 목록. 드라이브는 토큰이 있을 때만 붙는다.
+
+    비GPT 모델(claude·gemini…)은 자기가 검색하지 않고 이 심부름꾼에게 시키므로, 여기에
+    드라이브를 얹으면 **전 모델이** 드라이브를 쓰게 된다 — 모델별 도구 호환성 지뢰
+    (Llama-4-Maverick의 tools→405 등)를 다시 밟지 않는 것이 이 방식의 이득이다.
+    """
+    tools: list[dict] = [{"type": "web_search"}]
+    if gdrive_token:
+        tools.append(gdrive.drive_tool(gdrive_token))
+    return tools
 
 # 모델에 돌려줄 검색 결과 개수. 늘릴수록 근거는 풍부해지지만 프롬프트 토큰을 먹는다.
 DEFAULT_MAX_RESULTS = 5
@@ -70,8 +94,29 @@ SEARCH_TOOL_SPEC = {
 }
 
 
+def search_tool_spec(drive_connected: bool = False) -> dict:
+    """모델(비GPT)에게 줄 검색 도구 스펙. 드라이브가 연결됐으면 그 사실을 설명에 덧붙인다.
+
+    설명을 손대는 이유: 이 도구는 겉보기에 '웹 검색'이라, 설명을 그대로 두면 모델이
+    "내 드라이브에서 X 찾아줘"를 **검색이 필요 없는 질문**으로 보고 도구를 아예 안 부른다
+    (그러면 드라이브까지 가 볼 심부름꾼이 출동하지 않는다). 도구 뒤에서 드라이브도 뒤진다는
+    것을 모델이 알아야 부른다. 실행부(`_search_via_gpt`)는 토큰이 있을 때만 드라이브를 붙이므로
+    이름은 `web_search` 그대로 둔다(모델이 부르는 이름을 바꾸면 `_run_tool_call`과 어긋난다).
+    """
+    if not drive_connected:
+        return SEARCH_TOOL_SPEC
+    import copy
+    spec = copy.deepcopy(SEARCH_TOOL_SPEC)
+    spec["function"]["description"] += (
+        " 사용자의 구글 드라이브(내 문서·내 파일·내가 쓴 자료)도 이 도구로 검색된다 — "
+        "'내 드라이브에서 …', '내 문서 중에 …'처럼 개인 자료를 묻는 질문에도 호출하고, "
+        "검색어에 무엇을 찾는지 그대로 넣는다."
+    )
+    return spec
+
+
 def search(query: str, api_key: str = "", base_url: str = "",
-           max_results: int = DEFAULT_MAX_RESULTS) -> str:
+           max_results: int = DEFAULT_MAX_RESULTS, gdrive_token: str = "") -> str:
     """`query`를 웹에서 검색해 모델이 읽을 결과 텍스트를 반환한다(동기).
 
     게이트웨이 자격증명(`api_key`+`base_url`)이 있으면 GPT 검색 심부름꾼을 먼저 쓰고,
@@ -88,15 +133,18 @@ def search(query: str, api_key: str = "", base_url: str = "",
         return "검색 실패: 검색어가 비어 있습니다."
 
     if api_key and base_url:
-        result = _search_via_gpt(query, api_key, base_url)
+        result = _search_via_gpt(query, api_key, base_url, gdrive_token)
         if result is not None:
             return result
         # None = 심부름꾼을 못 썼다(모델 권한 없음·Responses 차단 등) → 안전망으로 내려간다.
+        # ⚠ 이 안전망(DDG)에는 드라이브가 없다 — 웹만 검색한다. 커넥터는 Responses 전용이라
+        #    심부름꾼을 못 쓰면 드라이브도 함께 빠지는 것이 구조상 불가피하다.
 
     return _search_via_ddg(query, max_results)
 
 
-def _search_via_gpt(query: str, api_key: str, base_url: str) -> Optional[str]:
+def _search_via_gpt(query: str, api_key: str, base_url: str,
+                    gdrive_token: str = "") -> Optional[str]:
     """GPT 검색 심부름꾼 — 성공 시 결과 텍스트, **못 쓰면 None**(폴백 신호).
 
     빈 답도 None으로 본다(검색은 됐는데 아무 말도 안 한 것 = 쓸모없음 → DDG가 낫다).
@@ -113,9 +161,9 @@ def _search_via_gpt(query: str, api_key: str, base_url: str) -> Optional[str]:
         client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
         resp = client.responses.create(
             model=SEARCH_AGENT_MODEL,
-            instructions=_SEARCH_AGENT_INSTRUCTIONS,
+            instructions=_SEARCH_AGENT_INSTRUCTIONS + (_DRIVE_NOTE if gdrive_token else ""),
             input=query,
-            tools=[{"type": "web_search"}],
+            tools=agent_tools(gdrive_token),
         )
         text = (getattr(resp, "output_text", "") or "").strip()
         return text or None
@@ -168,8 +216,23 @@ _GATEKEEPER_INSTRUCTIONS = (
 )
 
 
+def _did_search(resp) -> bool:
+    """심부름꾼이 실제로 도구를 썼는가 — 웹 검색(`web_search_call`) 또는 드라이브(`mcp_call`).
+
+    ⚠ 드라이브 호출은 타입이 `mcp_call`이라 "search" 문자열이 들어 있지 않다. 웹 검색만
+    찾으면 **드라이브만 뒤진 질문**("내 드라이브에서 X 찾아줘")이 '검색 안 함'으로 오판돼
+    애써 찾은 자료가 통째로 버려진다(Prefetch(True, "")). 도구 목록 조회(`mcp_list_tools`)는
+    실제 검색이 아니라 커넥터가 늘 먼저 하는 준비 동작이므로 세지 않는다.
+    """
+    for o in (resp.output or []):
+        kind = getattr(o, "type", "") or ""
+        if "search" in kind or kind == "mcp_call":
+            return True
+    return False
+
+
 def prefetch(question: str, api_key: str = "", base_url: str = "",
-             images: list[bytes] | None = None) -> Prefetch:
+             images: list[bytes] | None = None, gdrive_token: str = "") -> Prefetch:
     """질문에 필요한 웹 검색을 **미리 한 번만** 수행해 사실 텍스트를 돌려준다.
 
     여러 모델 비교(`main._start_compare_query`)가 쓴다. 모델마다 각자 검색하면 같은 질문에
@@ -208,16 +271,14 @@ def prefetch(question: str, api_key: str = "", base_url: str = "",
         client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
         resp = client.responses.create(
             model=SEARCH_AGENT_MODEL,
-            instructions=_GATEKEEPER_INSTRUCTIONS,
+            instructions=_GATEKEEPER_INSTRUCTIONS + (_DRIVE_NOTE if gdrive_token else ""),
             input=[{"role": "user", "content": content}],
-            tools=[{"type": "web_search"}],
+            tools=agent_tools(gdrive_token),
         )
     except Exception:
         return Prefetch(False, "")   # 못 썼다 ≠ 검색 불필요 → 호출자가 현행 동작으로 열화
 
-    searched = any("search" in (getattr(o, "type", "") or "")
-                   for o in (resp.output or []))
-    if not searched:
+    if not _did_search(resp):
         return Prefetch(True, "")    # 검색 불필요라고 판정함
     return Prefetch(True, (getattr(resp, "output_text", "") or "").strip())
 
