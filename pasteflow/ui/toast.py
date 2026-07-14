@@ -86,13 +86,15 @@ class ToastNotification(QWidget):
     def __init__(self, message: str, duration_ms: int = 3000,
                  icon: str = "✓", badge: str = None,
                  badge_position: str = "trailing",
-                 image_path: str = None,
+                 image_path: str = None, image_bytes: bytes = None,
                  anchor: QPoint = None, center: bool = False):
         """
         badge_position: "leading"(아이콘과 본문 사이) | "trailing"(본문 뒤, 기본)
         image_path: 주어지면 아이콘과 본문 사이에 그 이미지의 썸네일을 표시
                     (이미지→경로 붙여넣기 시 "의도한 이미지 맞나" 시각 확인용).
                     로드 실패 시 조용히 생략.
+        image_bytes: image_path 대신 메모리 바이트(PNG 썸네일 등)에서 썸네일을 그린다
+                    — 복사 알림처럼 디스크 파일 경로가 없는 이미지 항목용. 로드 실패 시 생략.
         anchor: 주어지면 우하단 스택 대신 그 지점을 기준으로 배치하고 클릭을 아래 앱으로
                 통과시킨다(작업 방해 0). 멀티모니터에서 시선이 닿는 모니터에 진행/결과를
                 표시하기 위한 모드(OCR·AI 진행 칩).
@@ -126,9 +128,16 @@ class ToastNotification(QWidget):
                 f"color: {COLORS['peach']}; font-size: 22px; background: transparent;")
             layout.addWidget(icon_lbl)
 
-        # 썸네일 (선택) — 아이콘과 본문 사이. 디스크의 PNG를 직접 로드한다.
+        # 썸네일 (선택) — 아이콘과 본문 사이. 디스크 경로(image_path) 또는
+        # 메모리 바이트(image_bytes, 복사 알림의 항목 썸네일)에서 로드한다.
+        pix = None
         if image_path:
             pix = QPixmap(image_path)
+        elif image_bytes:
+            _p = QPixmap()
+            if _p.loadFromData(image_bytes):
+                pix = _p
+        if pix is not None:
             if not pix.isNull():
                 thumb = QLabel()
                 thumb.setPixmap(pix.scaled(
@@ -274,12 +283,30 @@ def _elide(text: str, limit: int = 30) -> str:
 
 
 def show_copy_toast(item, queue_count: int) -> ToastNotification:
-    """복사 알림 토스트 — 누적 큐 카운트(Q{n})를 본문 앞에 배치한 미리보기."""
+    """복사 알림 토스트 — 누적 큐 카운트(Q{n})를 본문 앞에 배치한 미리보기.
+
+    이미지 항목이면 preview_text(`[이미지]`) 대신 항목 썸네일을 함께 띄운다
+    (패널·경로 붙여넣기 피드백과 시각적으로 일관되게).
+    """
     preview = _elide(getattr(item, "preview_text", None) or "클립보드 항목")
+    # 이미지면 항목 썸네일을 렌더. **원본(image_data)을 우선** — 토스트가 96px로 줄여
+    # 그리므로 원본을 축소하면 선명하다. 미리 만든 thumbnail은 80×60이라 96px로 늘리면
+    # 뭉개진다(캡처 토스트가 image_path 원본으로 선명한 것과 같은 이유). 원본이 raw DIB 등
+    # QPixmap이 못 여는 포맷이면 thumbnail로 폴백.
+    thumb_bytes = None
+    if getattr(item, "content_type", None) == "image":
+        data = getattr(item, "image_data", None)
+        if data:
+            _probe = QPixmap()
+            if _probe.loadFromData(data):
+                thumb_bytes = data
+        if thumb_bytes is None:
+            thumb_bytes = getattr(item, "thumbnail", None) or data
     return ToastNotification(
         preview,
         duration_ms=COPY_TOAST_DURATION_MS,
         icon="📋",
         badge=f"Q{queue_count}",
         badge_position="leading",
+        image_bytes=thumb_bytes,
     )
