@@ -425,6 +425,17 @@ def _read_image_from_clipboard() -> bytes | None:
             return win32clipboard.GetClipboardData(cf_png)
         if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_DIB):
             return win32clipboard.GetClipboardData(win32clipboard.CF_DIB)
+        # CF_HDROP: 탐색기에서 이미지 파일 1개 복사 — 파일 바이트를 읽어 이미지로 처리.
+        # 히스토리 캡처(clipboard_monitor)와 같은 규칙이라, 패널에 이미지로 남는 것은
+        # 핀에서도 이미지로 뜬다(경로 텍스트가 아니라).
+        if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_HDROP):
+            _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp', '.tiff', '.tif'}
+            files = win32clipboard.GetClipboardData(win32clipboard.CF_HDROP)
+            if files and len(files) == 1:
+                fpath = files[0]
+                if os.path.splitext(fpath)[1].lower() in _IMAGE_EXTS and os.path.exists(fpath):
+                    with open(fpath, 'rb') as f:
+                        return f.read()
         return None
     except Exception:
         return None
