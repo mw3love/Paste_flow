@@ -17,8 +17,6 @@ from PyQt6.QtGui import QCursor, QPixmap, QImage, QIcon
 
 from pasteflow.ui.theme import COLORS, PEACH_HOVER
 
-BACKEND_LABEL = {"official": "AI Studio", "gateway": "Mindlogic"}
-
 
 class _QuestionEdit(QPlainTextEdit):
     """Enter=전송, Shift+Enter=줄바꿈. Ctrl+V/드롭으로 이미지 첨부."""
@@ -73,26 +71,26 @@ class AiQueryDialog(QDialog):
 
     _CTX_PREVIEW_CHARS = 300
 
-    # 새로고침(↻)으로 전체 모델을 불러온 결과 — (models, error, backend). 백그라운드
+    # 새로고침(↻)으로 전체 모델을 불러온 결과 — (models, error). 백그라운드
     # 스레드에서 메인 스레드로 안전하게 넘기기 위한 내부 시그널(settings_dialog와 동일 패턴).
-    _models_fetched = pyqtSignal(list, str, str)
+    _models_fetched = pyqtSignal(list, str)
 
     def __init__(self, context_text: str, parent=None, context_image: bytes | None = None,
-                 compare_models: list[dict] | None = None,
-                 fetch_all_models: "Callable[[], tuple[str, list[str]]] | None" = None,
+                 compare_models: list[str] | None = None,
+                 fetch_all_models: "Callable[[], list[str]] | None" = None,
                  open_history: "Callable[[QRect], None] | None" = None):
         super().__init__(parent)
         # open_history(frame_geometry)는 트레이 'AI 기록'과 동일한 목록창을 여는 콜백(main
         # 제공) — 질문칸에서 바로 지난 대화를 훑어볼 수 있게 버튼 하나로 노출한다(v1.49.3).
         # 이 창의 프레임을 넘겨 기록창을 그 옆에(겹치지 않게) 열 수 있게 한다.
         self._open_history = open_history
-        # compare_models는 (backend, model) spec dict 목록(v1.47.0 — 크로스 백엔드 비교).
-        # 모델 선택 드롭다운의 기본 후보(설정된 모델 1·2·3)로도 그대로 재사용한다.
-        self._compare_models = [s for s in (compare_models or []) if s and s.get("model")]
-        # fetch_all_models()는 (backend, 전체 모델명 리스트)를 동기 반환하는 콜백(main이 제공,
+        # compare_models는 설정된 모델명 목록(모델 1·2·3). 모델 선택 드롭다운의 기본 후보로도
+        # 그대로 재사용한다.
+        self._compare_models = [m for m in (compare_models or []) if m]
+        # fetch_all_models()는 전체 모델명 리스트를 동기 반환하는 콜백(main이 제공,
         # DB/시크릿 접근은 main 쪽에 남긴다) — ↻ 클릭 시 백그라운드 스레드에서 호출한다.
         self._fetch_all_models = fetch_all_models
-        self._model_options: list[dict] = list(self._compare_models)  # combo와 인덱스 평행
+        self._model_options: list[str] = list(self._compare_models)  # combo와 인덱스 평행
         self._models_fetched.connect(self._on_models_fetched)
         self.setWindowTitle("AI에게 질문")
         # 항상 위 — 패널이 TOPMOST라(panel._set_always_on_top) 일반 창은 Windows Z-order상
@@ -277,8 +275,8 @@ class AiQueryDialog(QDialog):
         layout.addWidget(self._editor, 1)
 
         # 모델 선택 — 평소엔 설정된 모델 1·2·3만 보이고(하이브리드, v1.49.1), ↻를 누르면
-        # 그 backend의 전체 모델을 불러와 콤보를 채운다. 후보가 하나도 없으면(모델 미설정)
-        # 콤보가 비어 보이지만 행 자체는 남겨 둔다 — ↻가 유일한 채움 경로이므로 숨기면 안 된다.
+        # 전체 모델을 불러와 콤보를 채운다. 후보가 하나도 없으면(모델 미설정) 콤보가 비어
+        # 보이지만 행 자체는 남겨 둔다 — ↻가 유일한 채움 경로이므로 숨기면 안 된다.
         model_row = QHBoxLayout()
         model_row.setContentsMargins(0, 0, 0, 0)
         model_row.setSpacing(6)
@@ -312,9 +310,7 @@ class AiQueryDialog(QDialog):
                 f"여러 모델로 비교 ({len(self._compare_models)}개)")
             self._compare_check.setToolTip(
                 "이 질문을 아래 모델들로 동시에 질의해 답변을 나란히 비교합니다:\n"
-                + "\n".join(
-                    f"· {s['model']} ({BACKEND_LABEL.get(s.get('backend', ''), s.get('backend', ''))})"
-                    for s in self._compare_models))
+                + "\n".join(f"· {m}" for m in self._compare_models))
             # 비교를 켜면 단일 모델 선택은 무시된다 — 그 규칙을 콤보 비활성화로 눈에 보이게 한다
             # (예전엔 코드 주석에만 있어, 모델을 골라 놓고도 비교로 나가는지 알 수 없었다).
             self._compare_check.toggled.connect(self._on_compare_toggled)
@@ -400,24 +396,22 @@ class AiQueryDialog(QDialog):
         """'여러 모델로 비교' 체크 여부. 체크박스가 없으면(모델 미설정) 항상 False."""
         return self._compare_check is not None and self._compare_check.isChecked()
 
-    def get_selected_model(self) -> dict | None:
-        """모델 드롭다운에서 고른 (backend, model). 후보가 없으면 None(=main이 기본값 사용)."""
+    def get_selected_model(self) -> str | None:
+        """모델 드롭다운에서 고른 모델명. 후보가 없으면 None(=main이 기본값 사용)."""
         idx = self._model_combo.currentIndex()
         if 0 <= idx < len(self._model_options):
             return self._model_options[idx]
         return None
 
     # ── 모델 선택 ──────────────────────────────────────────────────────────────
-    def _fill_model_combo(self, options: list[dict]):
-        """콤보를 options(각 {backend, model})로 채운다 — 인덱스가 self._model_options와 평행."""
+    def _fill_model_combo(self, options: list[str]):
+        """콤보를 모델명 목록으로 채운다 — 인덱스가 self._model_options와 평행."""
         self._model_options = options
         self._model_combo.clear()
-        for spec in options:
-            label = f"{spec['model']} ({BACKEND_LABEL.get(spec.get('backend', ''), spec.get('backend', ''))})"
-            self._model_combo.addItem(label)
+        self._model_combo.addItems(options)
 
     def _on_refresh_models_clicked(self):
-        """↻ — 활성 backend의 전체 모델 목록을 백그라운드에서 불러와 콤보를 채운다."""
+        """↻ — 전체 모델 목록을 백그라운드에서 불러와 콤보를 채운다."""
         if self._fetch_all_models is None:
             return
         self._model_refresh_btn.setEnabled(False)
@@ -426,20 +420,19 @@ class AiQueryDialog(QDialog):
 
         def _worker():
             try:
-                backend, models = self._fetch_all_models()
-                self._models_fetched.emit(models, "", backend)
+                self._models_fetched.emit(self._fetch_all_models(), "")
             except Exception as e:
-                self._models_fetched.emit([], str(e), "")
+                self._models_fetched.emit([], str(e))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_models_fetched(self, models: list, err: str, backend: str):
+    def _on_models_fetched(self, models: list, err: str):
         self._model_refresh_btn.setEnabled(True)
         if err:
             self._model_status.setText(f"모델 목록을 불러오지 못했습니다 — {err}")
             self._model_status.setVisible(True)
             return
-        options = [{"backend": backend, "model": m} for m in sorted(models)]
+        options = sorted(models)
         self._fill_model_combo(options)
         self._model_status.setText(f"모델 {len(options)}종을 불러왔습니다.")
         self._model_status.setVisible(True)

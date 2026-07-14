@@ -12,7 +12,6 @@ from PyQt6.QtWidgets import (
     QPushButton, QVBoxLayout,
 )
 
-from pasteflow.ui.ai_query import BACKEND_LABEL
 from pasteflow.ui.theme import COLORS
 
 
@@ -96,11 +95,12 @@ class AiHistoryDialog(QDialog):
             self._list.addItem(placeholder)
             return
         for r in records:
-            backend = r.get("backend") or ""
             model = r.get("model") or "기본"
             when = (r.get("updated_at") or "")[:16].replace("T", " ")
             title = r.get("title") or "(질문 없음)"
-            text = f"{title}\n{model} ({BACKEND_LABEL.get(backend, backend)}) · {when}"
+            # backend 컬럼은 v1.50.0 이전 기록에만 값이 있다(그 시절엔 공식/게이트웨이가
+            # 갈렸다). 새 기록은 ""라 표시하지 않는다 — 지난 기록의 사실은 DB에 그대로 둔다.
+            text = f"{title}\n{model} · {when}"
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, r["id"])
             self._list.addItem(item)

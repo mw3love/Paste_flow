@@ -315,30 +315,22 @@ class SettingsDialog(QDialog):
     KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
     KEY_CAPTURE_FOLDER = "capture_save_folder"
     KEY_OCR_ENGINE = "ocr_engine"
-    # Gemini는 backend별로 키/모델/캐시 분리 — Mindlogic Gateway와 개인 AI Studio 키를 동시에 보관
-    # v1.48.0: 각 모델 행이 자기 backend를 갖는다(전면 재구성). KEY_OCR_GEMINI_BACKEND는
-    # **AI 모델 1**의 backend, KEY_OCR_BACKEND는 **OCR**의 backend(신설). 크리덴셜은 둘 다 상시 저장.
-    KEY_OCR_GEMINI_BACKEND = "ocr_gemini_backend"  # AI 모델 1의 backend "official" | "gateway"
-    KEY_OCR_BACKEND = "ocr_backend"                # OCR 모델의 backend (미설정 시 ocr_gemini_backend로 폴백 = 하위호환)
-    KEY_OCR_GEMINI_BASE_URL = "ocr_gemini_base_url"  # gateway 전용
-    KEY_OCR_GEMINI_API_KEY_OFFICIAL = "ocr_gemini_api_key_official"
+    # AI 크리덴셜 — Mindlogic 게이트웨이 한 벌(키 + Base URL)뿐이다.
+    # v1.50.0: Google AI Studio(공식) 백엔드를 제거하고 backend 개념 자체를 없앴다.
+    # 사용 빈도가 낮은 데 비해 backend 분기가 코드 전반(설정·main·엔진)에 퍼져 있었고,
+    # Gemini 모델은 게이트웨이에도 그대로 있어 잃는 것이 없다(웹 검색도 nano 심부름꾼이
+    # google_search grounding보다 낫다는 실측이 있다 — web_search.py 참조).
+    KEY_OCR_GEMINI_BASE_URL = "ocr_gemini_base_url"
     KEY_OCR_GEMINI_API_KEY_GATEWAY = "ocr_gemini_api_key_gateway"
-    KEY_OCR_GEMINI_MODEL_OFFICIAL = "ocr_gemini_model_official"
     KEY_OCR_GEMINI_MODEL_GATEWAY = "ocr_gemini_model_gateway"
-    KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL = "ocr_gemini_model_cache_official"
     KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY = "ocr_gemini_model_cache_gateway"
     # OCR 전용 모델 슬롯 — AI 질의 모델(KEY_OCR_GEMINI_MODEL_*)과 분리(v1.39.0).
     # OCR은 이미지를 보내므로 비전 가능 모델만 고를 수 있고, 저렴한 모델을 따로 둘 수 있다.
-    KEY_OCR_MODEL_OFFICIAL = "ocr_model_official"
     KEY_OCR_MODEL_GATEWAY = "ocr_model_gateway"
     # 여러 모델 비교(선택) — 기본 AI 질의 모델(모델 1)에 더해 동시에 물어볼 추가 모델 2개.
-    # 빈 값이면 미사용. **각 슬롯이 자기 backend를 갖는다**(v1.47.0 — 크로스 백엔드 비교):
-    # 모델 2·3을 활성 backend와 다른 backend에 둘 수 있어 공식 Gemini(자체 검색) + 게이트웨이
-    # GPT/Claude를 한 화면에서 비교한다. 질문창 체크박스가 켜졌을 때만 발동한다.
+    # 빈 값이면 미사용. 질문창 체크박스가 켜졌을 때만 발동한다.
     KEY_AI_COMPARE_MODEL_A = "ai_compare_model_a"
     KEY_AI_COMPARE_MODEL_B = "ai_compare_model_b"
-    KEY_AI_COMPARE_BACKEND_A = "ai_compare_backend_a"  # "official" | "gateway"
-    KEY_AI_COMPARE_BACKEND_B = "ai_compare_backend_b"
     # AI 질의 시스템 프롬프트(멘토 페르소나). 빈 값이면 ocr_engine.AI_SYSTEM_PROMPT로 폴백.
     KEY_AI_SYSTEM_PROMPT = "ai_system_prompt"
     KEY_QUEUE_IDLE_RESET = "queue_idle_reset_sec"
@@ -346,7 +338,7 @@ class SettingsDialog(QDialog):
     _COMPARE_UNUSED = "(사용 안 함)"
 
     # 워커 스레드 → UI 안전 통신용 내부 시그널 (models, error_msg)
-    _models_fetched = pyqtSignal(list, str, str)  # (models, error, backend)
+    _models_fetched = pyqtSignal(list, str)  # (models, error)
     # 연결 테스트 단계별 결과 (run_id, slot, status, detail).
     # slot: "conn" | "chat" | "ocr" | "__end__"(버튼 복구 신호)
     # status: ProbeResult.status + "run"(진행 중) / "skip"(앞 단계 실패로 건너뜀)
@@ -561,7 +553,6 @@ class SettingsDialog(QDialog):
             f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
             f"QComboBox:focus {{ border-color: {COLORS['peach']}; }}"
         )
-        self._combo_style = _combo_style  # 비교 슬롯 backend 콤보가 재사용(_make_compare_backend_combo)
 
         # ── AI 연동 그룹 (Gemini / Mindlogic API) ──
         # OCR(텍스트 인식)과 AI 답변(우클릭 'AI에게 질문')이 동일 API를 공유한다.
@@ -577,22 +568,8 @@ class SettingsDialog(QDialog):
         ai_desc.setWordWrap(True)
         ai_form.addRow(ai_desc)
 
-        # 크리덴셜 — Google AI Studio·Mindlogic 키를 **둘 다 상시 노출**한다(v1.48.0 전면
-        # 재구성). 앱이 두 backend를 동시에 쓰므로(크로스 백엔드 비교·Google 검색+Mindlogic
-        # 답변) 옛 콤보로 한쪽을 숨기지 않는다. 각 행의 ↻는 그 backend 모델 목록만 새로 불러온다.
-        # 두 제공사와 모델 섹션을 얇은 구분선으로 시각 그룹화한다(기능 단축키 그룹과 같은 방식).
-        def _mk_refresh(backend: str) -> QPushButton:
-            btn = QPushButton()
-            # Qt 내장 표준 아이콘 — 폰트 의존성 없이 모든 환경에서 보장
-            btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
-            btn.setFixedWidth(34)
-            btn.setToolTip("이 제공사에서 사용 가능한 모델 목록 가져오기")
-            # NoFocus 필수: 클릭 시 setEnabled(False)로 꺼지는데, StrongFocus면 포커스가
-            # editable 모델 콤보로 넘어가 텍스트가 전체 선택돼 조회 중 파랗게 반전돼 보인다.
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btn.clicked.connect(lambda: self._on_refresh_models(backend))
-            return btn
-
+        # 크리덴셜 — Mindlogic 게이트웨이 한 벌뿐이다(v1.50.0에서 Google AI Studio 제거).
+        # 크리덴셜 섹션과 모델 섹션은 얇은 구분선으로 나눈다(기능 단축키 그룹과 같은 방식).
         def _ai_sep() -> QFrame:
             line = QFrame()
             line.setFrameShape(QFrame.Shape.HLine)
@@ -601,30 +578,24 @@ class SettingsDialog(QDialog):
             line.setFixedHeight(1)
             return line
 
-        # ── Google AI Studio ──
-        self._official_key_edit = QLineEdit()
-        self._official_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._official_key_edit.setPlaceholderText("Google AI Studio API 키")
-        self._official_refresh_btn = _mk_refresh("official")
-        off_row = QHBoxLayout()
-        off_row.setContentsMargins(0, 0, 0, 0)
-        off_row.setSpacing(4)
-        off_row.addWidget(self._official_key_edit, 1)
-        off_row.addWidget(self._official_refresh_btn)
-        ai_form.addRow(QLabel("•  Google AI Studio 키:"), off_row)
-
-        ai_form.addRow(_ai_sep())  # Google ↔ Mindlogic 구분
-
-        # ── Mindlogic ──
         self._gateway_key_edit = QLineEdit()
         self._gateway_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._gateway_key_edit.setPlaceholderText("Mindlogic API 키")
-        self._gateway_refresh_btn = _mk_refresh("gateway")
+        self._refresh_btn = QPushButton()
+        # Qt 내장 표준 아이콘 — 폰트 의존성 없이 모든 환경에서 보장
+        self._refresh_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        self._refresh_btn.setFixedWidth(34)
+        self._refresh_btn.setToolTip("사용 가능한 모델 목록 가져오기")
+        # NoFocus 필수: 클릭 시 setEnabled(False)로 꺼지는데, StrongFocus면 포커스가
+        # editable 모델 콤보로 넘어가 텍스트가 전체 선택돼 조회 중 파랗게 반전돼 보인다.
+        self._refresh_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._refresh_btn.clicked.connect(self._on_refresh_models)
         gw_row = QHBoxLayout()
         gw_row.setContentsMargins(0, 0, 0, 0)
         gw_row.setSpacing(4)
         gw_row.addWidget(self._gateway_key_edit, 1)
-        gw_row.addWidget(self._gateway_refresh_btn)
+        gw_row.addWidget(self._refresh_btn)
         ai_form.addRow(QLabel("•  Mindlogic API 키:"), gw_row)
 
         self._base_url_edit = QLineEdit()
@@ -653,45 +624,24 @@ class SettingsDialog(QDialog):
             "이미지 입력을 받는 모델이어야 합니다 — [연결 테스트]로 확인하세요."
         )
 
-        # v1.48.0: OCR·AI 모델 1도 각자 backend를 갖는다(모델 2·3과 대칭). 왼쪽 backend
-        # 콤보가 그 backend의 모델 목록으로 콤보를 채운다. OCR을 게이트웨이(싼 모델)에,
-        # 답변을 공식(검색)에 두는 식으로 자유 조합할 수 있다.
-        self._ocr_backend_combo = self._make_compare_backend_combo()
-        self._ocr_backend_combo.setToolTip("OCR을 호출할 API 백엔드")
-        self._model_backend_combo = self._make_compare_backend_combo()
-        self._model_backend_combo.setToolTip("AI 모델 1(기본 답변)을 호출할 API 백엔드")
-        self._ocr_backend_combo.currentIndexChanged.connect(
-            lambda _i: self._on_ocr_backend_changed())
-        self._model_backend_combo.currentIndexChanged.connect(
-            lambda _i: self._on_model1_backend_changed())
-
         # 질의 모델 2·3 (선택) — 질의 모델 1에 더해 '여러 모델로 비교' 시 동시에 물어볼 모델.
-        # 질문창에서 '🔀 여러 모델로 비교'를 켜면 이 모델들로 함께 질의한다. 미설정(사용 안 함)이
+        # 질문창에서 '여러 모델로 비교'를 켜면 이 모델들로 함께 질의한다. 미설정(사용 안 함)이
         # 기본이며, 모델 1을 포함해 2개 이상 설정돼야 질문창 체크박스가 나타난다.
-        # 비교 슬롯은 각자 backend 드롭다운을 갖는다(v1.47.0 — 크로스 백엔드 비교). 모델 2·3을
-        # 활성 backend와 다른 backend에 둘 수 있어, 공식 Gemini(자체 검색)와 게이트웨이
-        # GPT/Claude를 한 화면에서 비교한다. 모델 목록은 그 backend의 캐시로 채운다.
-        _cmp_tip = ("비교 질의에 함께 쓸 모델(선택). 왼쪽에서 이 모델의 backend를 고르면\n"
-                    "그 backend의 모델 목록으로 채워집니다 — 활성 backend와 달라도 됩니다.")
+        _cmp_tip = "비교 질의에 함께 쓸 모델(선택). '여러 모델로 비교'를 켜면 함께 답합니다."
         self._compare_a_label = QLabel("•  AI 모델 2:")
-        self._compare_a_backend_combo = self._make_compare_backend_combo()
         self._compare_model_a_combo = QComboBox()
         self._compare_model_a_combo.setEditable(True)
         self._compare_model_a_combo.setStyleSheet(_combo_style)
         self._compare_model_a_combo.setToolTip(_cmp_tip)
         self._compare_b_label = QLabel("•  AI 모델 3:")
-        self._compare_b_backend_combo = self._make_compare_backend_combo()
         self._compare_model_b_combo = QComboBox()
         self._compare_model_b_combo.setEditable(True)
         self._compare_model_b_combo.setStyleSheet(_combo_style)
         self._compare_model_b_combo.setToolTip(_cmp_tip)
-        self._compare_a_backend_combo.currentIndexChanged.connect(
-            lambda _i: self._on_compare_backend_changed("a"))
-        self._compare_b_backend_combo.currentIndexChanged.connect(
-            lambda _i: self._on_compare_backend_changed("b"))
 
-        # 콤보 초기 채우기는 _load_values에서 backend가 정해진 뒤 수행한다. 캐시가 없으면
-        # 빈 콤보라, 무엇을 해야 할지 placeholder로 안내한다(빈 값은 엔진 기본 모델로 폴백).
+        # 콤보 초기 채우기는 _load_values(_init_model_slots)에서 캐시를 읽어 수행한다.
+        # 캐시가 없으면 빈 콤보라, 무엇을 해야 할지 placeholder로 안내한다(빈 값은 엔진
+        # 기본 모델로 폴백).
         for combo in (self._model_combo, self._ocr_model_combo):
             le = combo.lineEdit()
             if le is not None:
@@ -722,17 +672,13 @@ class SettingsDialog(QDialog):
         # 배치: OCR 모델을 위로, 질의 모델 1·2·3을 이어 묶어 "함께 쓰는 질의 모델군"임을
         # 시각적으로 드러낸다(모델 1=평소 답변, 2·3=비교 시 추가).
         ai_form.addRow(self._ocr_model_label, self._stack(
-            self._compare_row(self._ocr_backend_combo, self._ocr_model_combo),
-            self._ocr_model_probe_status))
+            self._ocr_model_combo, self._ocr_model_probe_status))
         ai_form.addRow(self._model_label, self._stack(
-            self._compare_row(self._model_backend_combo, self._model_combo),
-            self._model_probe_status))
+            self._model_combo, self._model_probe_status))
         ai_form.addRow(self._compare_a_label, self._stack(
-            self._compare_row(self._compare_a_backend_combo, self._compare_model_a_combo),
-            self._compare_a_probe_status))
+            self._compare_model_a_combo, self._compare_a_probe_status))
         ai_form.addRow(self._compare_b_label, self._stack(
-            self._compare_row(self._compare_b_backend_combo, self._compare_model_b_combo),
-            self._compare_b_probe_status))
+            self._compare_model_b_combo, self._compare_b_probe_status))
 
         # API 연결 테스트 — 모델명 바로 아래에 배치(설명 힌트보다 위). 힌트를 그룹 맨 아래로
         # 내려 워드랩 공간을 넉넉히 확보한다.
@@ -863,33 +809,23 @@ class SettingsDialog(QDialog):
         이제 세 단계를 순서대로 돌리고 각 결과를 제 자리(연결=상태 줄, 모델=콤보 아래)에
         따로 쓴다. 앞 단계가 실패하면 뒤 단계는 'skip'으로 남겨 원인을 흐리지 않는다.
         """
-        # 각 모델 행이 자기 backend를 가지므로(v1.48.0) 행마다 creds를 해석한다. creds는
-        # UI 스레드에서 미리 읽어 넣는다(워커에서 위젯 접근 금지).
-        ocr_backend = self._ocr_backend_combo.currentData() or "official"
-        m1_backend = self._model_backend_combo.currentData() or "official"
-        a_backend = self._compare_a_backend_combo.currentData() or "official"
-        b_backend = self._compare_b_backend_combo.currentData() or "official"
+        # creds는 UI 스레드에서 미리 읽어 넣는다(워커에서 위젯 접근 금지).
+        api_key, base_url = self._creds()
         chat_model = self._model_combo.currentText().strip()
         ocr_model = self._ocr_model_combo.currentText().strip()
         cmp_a = self._compare_value(self._compare_model_a_combo)  # 질의 모델 2 ("" = 미설정)
         cmp_b = self._compare_value(self._compare_model_b_combo)  # 질의 모델 3
 
-        # (slot, 모델, is_ocr, backend, key, base_url). OCR을 맨 앞에 둔다 — 텍스트 전용 모델
-        # 오선택으로 캡처 시 400이 가장 자주 나는 지점이라 결과를 먼저 보여준다.
-        targets: list[tuple] = [
-            ("ocr", ocr_model, True, ocr_backend, *self._creds_for(ocr_backend)),
-            ("chat", chat_model, False, m1_backend, *self._creds_for(m1_backend)),
+        # (slot, 모델, is_ocr). OCR을 맨 앞에 둔다 — 텍스트 전용 모델 오선택으로 캡처 시
+        # 400이 가장 자주 나는 지점이라 결과를 먼저 보여준다.
+        targets: list[tuple[str, str, bool]] = [
+            ("ocr", ocr_model, True),
+            ("chat", chat_model, False),
         ]
         if cmp_a:
-            targets.append(("chat2", cmp_a, False, a_backend, *self._creds_for(a_backend)))
+            targets.append(("chat2", cmp_a, False))
         if cmp_b:
-            targets.append(("chat3", cmp_b, False, b_backend, *self._creds_for(b_backend)))
-
-        # 이 테스트가 실제로 쓰는 backend별 creds — 연결 프로브를 backend당 1회만 돌린다.
-        creds_by_backend: dict[str, tuple[str, str]] = {}
-        for _s, _m, _o, b, k, base in targets:
-            creds_by_backend.setdefault(b, (k, base))
-        _blabel = {"official": "공식", "gateway": "게이트웨이"}
+            targets.append(("chat3", cmp_b, False))
 
         # 회차 번호. 테스트 도중 사용자가 모델을 바꾸거나 다시 누르면 이 값이 올라가고,
         # 뒤늦게 도착한 옛 회차의 결과는 버려진다 — 안 그러면 A 모델의 ✓가 화면에 떠 있는
@@ -912,37 +848,28 @@ class SettingsDialog(QDialog):
                 from pasteflow.ocr_engine import (
                     probe_chat_model, probe_connection, probe_ocr_model,
                 )
-                # backend별 연결 프로브 — 각 모델 프로브를 자기 backend 결과로 게이트한다.
-                conn: dict[str, tuple[str, str]] = {}  # backend -> (status, detail)
-                for b, (k, base) in creds_by_backend.items():
-                    if not k:
-                        conn[b] = ("skip", "키 없음")
-                        continue
-                    c = probe_connection(k, base)
-                    conn[b] = (c.status, c.detail)
-                overall = "ok" if all(s == "ok" for s, _ in conn.values()) else "fail"
-                summary = " · ".join(
-                    f"{_blabel.get(b, b)} {'✓' if s == 'ok' else (d or s)}"
-                    for b, (s, d) in conn.items())
-                self._probe_done.emit(run_id, "conn", overall, summary or "확인함")
+                # 연결 프로브 1회 — 실패하면 모델 프로브는 전부 skip해 원인을 흐리지 않는다.
+                if not api_key:
+                    conn_ok = False
+                    self._probe_done.emit(
+                        run_id, "conn", "fail", "API 키가 설정돼 있지 않습니다.")
+                else:
+                    c = probe_connection(api_key, base_url)
+                    conn_ok = c.status == "ok"
+                    self._probe_done.emit(run_id, "conn", c.status, c.detail)
 
-                for slot, model, is_ocr, tbackend, tkey, tbase in targets:
+                for slot, model, is_ocr in targets:
                     if not model:
                         self._probe_done.emit(
                             run_id, slot, "skip", "모델이 비어 있습니다 — ↻로 목록을 불러오세요.")
                         continue
-                    if not tkey:
+                    if not conn_ok:
                         self._probe_done.emit(
-                            run_id, slot, "skip", "이 모델 backend의 API 키가 설정돼 있지 않습니다.")
-                        continue
-                    if conn.get(tbackend, ("fail", ""))[0] != "ok":
-                        self._probe_done.emit(
-                            run_id, slot, "skip",
-                            f"{_blabel.get(tbackend, tbackend)} 연결이 안 돼 건너뛰었습니다.")
+                            run_id, slot, "skip", "연결이 안 돼 건너뛰었습니다.")
                         continue
                     self._probe_done.emit(run_id, slot, "run", f"{model} 호출 중…")
                     probe = probe_ocr_model if is_ocr else probe_chat_model
-                    result = probe(tkey, tbase, model)
+                    result = probe(api_key, base_url, model)
                     self._probe_done.emit(run_id, slot, result.status, result.detail)
             except Exception as e:
                 # 프로브 함수 밖의 예상 못 한 오류(패키지 미설치 등)
@@ -974,36 +901,6 @@ class SettingsDialog(QDialog):
             "ocr": self._ocr_model_probe_status,
         }[slot]
         self._set_probe_status(label, status, detail)
-
-    def _on_ocr_backend_changed(self):
-        """OCR 행 backend 전환 — 그 backend 캐시로 OCR 모델 콤보를 채우고 저장값 복원."""
-        backend = self._ocr_backend_combo.currentData() or "official"
-        self._fill_model_combo(self._ocr_model_combo, self._cache_models_for(backend))
-        # OCR 슬롯이 비었으면(분리 이전 사용자) 그 backend의 AI 모델을 그대로 보여준다 —
-        # main._resolve_gemini_cfg("ocr")의 폴백과 같은 규칙이라 화면과 실동작이 일치한다.
-        saved = self._current_saved_ocr_model_for(backend) or self._current_saved_model_for(backend)
-        if saved:
-            self._ocr_model_combo.setCurrentText(saved)
-        self._on_model_text_changed(self._ocr_model_probe_status)  # 낡은 프로브 결과 지움
-
-    def _on_model1_backend_changed(self):
-        """AI 모델 1 행 backend 전환 — 그 backend 캐시로 모델 콤보를 채우고 저장값 복원."""
-        backend = self._model_backend_combo.currentData() or "official"
-        self._fill_model_combo(self._model_combo, self._cache_models_for(backend))
-        saved = self._current_saved_model_for(backend)
-        if saved:
-            self._model_combo.setCurrentText(saved)
-        self._on_model_text_changed(self._model_probe_status)
-
-    def _current_saved_model_for(self, backend: str) -> str:
-        if backend == "gateway":
-            return self._settings.get(self.KEY_OCR_GEMINI_MODEL_GATEWAY, "")
-        return self._settings.get(self.KEY_OCR_GEMINI_MODEL_OFFICIAL, "")
-
-    def _current_saved_ocr_model_for(self, backend: str) -> str:
-        if backend == "gateway":
-            return self._settings.get(self.KEY_OCR_MODEL_GATEWAY, "")
-        return self._settings.get(self.KEY_OCR_MODEL_OFFICIAL, "")
 
     def _pick_capture_folder(self):
         """캡처 저장 폴더 선택 다이얼로그"""
@@ -1038,15 +935,11 @@ class SettingsDialog(QDialog):
         self._capture_folder_edit.setText(
             self._settings.get(self.KEY_CAPTURE_FOLDER, "")
         )
-        # 크리덴셜 — 공식·게이트웨이 키를 둘 다 채운다(상시 노출). base_url은 게이트웨이 전용.
-        self._official_key_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_API_KEY_OFFICIAL, ""))
         self._gateway_key_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_API_KEY_GATEWAY, ""))
         self._base_url_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, ""))
 
-        # 모델 슬롯 4행 — 각자 저장된 backend로 채운다.
-        # OCR = KEY_OCR_BACKEND(신설, 없으면 ocr_gemini_backend에서 유도), 모델1 = ocr_gemini_backend.
+        # 모델 슬롯 4행 — 캐시된 모델 목록으로 채우고 저장값을 복원한다.
         self._init_model_slots()
-        # 비교 슬롯(모델 2·3)은 자기 backend로 별도 채운다(크로스 백엔드 비교).
         self._init_compare_slots()
 
         try:
@@ -1079,85 +972,14 @@ class SettingsDialog(QDialog):
         """'기본값으로 되돌리기' — 입력칸을 기본 멘토 프롬프트로 채운다."""
         self._ai_prompt_edit.setPlainText(self._default_ai_prompt())
 
-    def _infer_saved_backend(self, key: str) -> str:
-        """저장된 backend 문자열을 읽되, 없으면 base_url 유무로 유도(레거시 호환)."""
-        b = self._settings.get(key, "")
-        if b in ("official", "gateway"):
-            return b
-        return ("gateway" if (self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, "") or "").strip()
-                else "official")
+    def _creds(self) -> tuple[str, str]:
+        """게이트웨이 (api_key, base_url) — 편집칸에서 직접 읽는다."""
+        return self._gateway_key_edit.text().strip(), self._base_url_edit.text().strip()
 
-    def _primary_backend(self) -> str:
-        """대표 backend — AI 모델 1의 backend(비교 슬롯 기본값 등에 사용)."""
-        return self._model_backend_combo.currentData() or "official"
-
-    def _init_model_slots(self):
-        """OCR·AI 모델 1 backend 콤보를 저장값으로 세팅하고 그 backend 캐시로 모델을 채운다.
-
-        모델 1 = ocr_gemini_backend, OCR = ocr_backend(신설, 없으면 모델 1 backend로 유도).
-        각 backend-변경 핸들러가 캐시 채우기·저장 모델 복원을 담당한다.
-        """
-        m1_backend = self._infer_saved_backend(self.KEY_OCR_GEMINI_BACKEND)
-        ocr_backend = self._settings.get(self.KEY_OCR_BACKEND, "")
-        if ocr_backend not in ("official", "gateway"):
-            ocr_backend = m1_backend
-        for combo, backend, handler in (
-            (self._model_backend_combo, m1_backend, self._on_model1_backend_changed),
-            (self._ocr_backend_combo, ocr_backend, self._on_ocr_backend_changed),
-        ):
-            bi = combo.findData(backend)
-            combo.blockSignals(True)
-            combo.setCurrentIndex(bi if bi >= 0 else 0)
-            combo.blockSignals(False)
-            handler()  # 그 backend 캐시로 콤보를 채우고 저장 모델을 복원
-
-    def _cache_key_for(self, backend: str) -> str:
-        return (self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY
-                if backend == "gateway"
-                else self.KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL)
-
-    # ── 크로스 백엔드 비교 슬롯(모델 2·3) ──────────────────────────────────────
-    def _make_compare_backend_combo(self) -> QComboBox:
-        """모델 행의 backend 선택 콤보 — 이 모델을 어느 API로 부를지(모든 모델 행 공용)."""
-        combo = QComboBox()
-        combo.addItem("공식", "official")
-        combo.addItem("게이트웨이", "gateway")
-        combo.setFixedWidth(104)
-        combo.setStyleSheet(getattr(self, "_combo_style", ""))
-        combo.setToolTip("이 모델을 호출할 API 백엔드")
-        return combo
-
-    def _compare_row(self, backend_combo: QComboBox, model_combo: QComboBox) -> QWidget:
-        """[backend 콤보][모델 콤보]를 한 줄에 담은 컨테이너 위젯."""
-        w = QWidget()
-        row = QHBoxLayout(w)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
-        row.addWidget(backend_combo)
-        row.addWidget(model_combo, 1)
-        return w
-
-    def _compare_slot_widgets(self, slot: str):
-        """slot='a'|'b' → (backend_combo, model_combo, probe_label)."""
-        if slot == "a":
-            return (self._compare_a_backend_combo, self._compare_model_a_combo,
-                    self._compare_a_probe_status)
-        return (self._compare_b_backend_combo, self._compare_model_b_combo,
-                self._compare_b_probe_status)
-
-    def _creds_for(self, backend: str) -> tuple[str, str]:
-        """backend의 (api_key, base_url) — 상시 노출된 편집칸에서 직접 읽는다(v1.48.0).
-
-        두 backend 키가 화면에 늘 떠 있으므로 활성/비활성 구분·stash가 없다.
-        """
-        if backend == "gateway":
-            return self._gateway_key_edit.text().strip(), self._base_url_edit.text().strip()
-        return self._official_key_edit.text().strip(), ""
-
-    def _cache_models_for(self, backend: str) -> list[str]:
-        """해당 backend 캐시(JSON list)를 파싱해 모델명 목록 반환. 없으면 빈 목록."""
+    def _cached_models(self) -> list[str]:
+        """모델 캐시(JSON list)를 파싱해 모델명 목록 반환. 없으면 빈 목록."""
         import json
-        cache_str = self._settings.get(self._cache_key_for(backend), "")
+        cache_str = self._settings.get(self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY, "")
         if not cache_str:
             return []
         try:
@@ -1166,12 +988,33 @@ class SettingsDialog(QDialog):
         except (json.JSONDecodeError, ValueError, TypeError):
             return []
 
+    def _init_model_slots(self):
+        """OCR·AI 모델 1 콤보를 캐시로 채우고 저장된 모델명을 복원한다."""
+        cached = self._cached_models()
+        self._fill_model_combo(self._model_combo, cached)
+        saved_ai = self._settings.get(self.KEY_OCR_GEMINI_MODEL_GATEWAY, "")
+        if saved_ai:
+            self._model_combo.setCurrentText(saved_ai)
+
+        self._fill_model_combo(self._ocr_model_combo, cached)
+        # OCR 슬롯이 비었으면(분리 이전 사용자) AI 모델을 그대로 보여준다 —
+        # main._resolve_gemini_cfg("ocr")의 폴백과 같은 규칙이라 화면과 실동작이 일치한다.
+        saved_ocr = self._settings.get(self.KEY_OCR_MODEL_GATEWAY, "") or saved_ai
+        if saved_ocr:
+            self._ocr_model_combo.setCurrentText(saved_ocr)
+
+    # ── 비교 슬롯(모델 2·3) ────────────────────────────────────────────────────
+    def _compare_slot_widgets(self, slot: str):
+        """slot='a'|'b' → (model_combo, probe_label)."""
+        if slot == "a":
+            return (self._compare_model_a_combo, self._compare_a_probe_status)
+        return (self._compare_model_b_combo, self._compare_b_probe_status)
+
     def _fill_compare_slot(self, slot: str, *, preserve: bool = True):
-        """슬롯 backend 콤보 값에 맞는 캐시로 모델 콤보를 채운다(선택값 보존 옵션)."""
-        backend_combo, model_combo, _ = self._compare_slot_widgets(slot)
-        backend = backend_combo.currentData() or "official"
+        """비교 슬롯 모델 콤보를 캐시로 채운다(선택값 보존 옵션)."""
+        model_combo, _ = self._compare_slot_widgets(slot)
         current = model_combo.currentText() if preserve else ""
-        self._fill_compare_combo(model_combo, self._cache_models_for(backend))
+        self._fill_compare_combo(model_combo, self._cached_models())
         if current and current != self._COMPARE_UNUSED:
             idx = model_combo.findText(current)
             if idx >= 0:
@@ -1179,37 +1022,14 @@ class SettingsDialog(QDialog):
             else:
                 model_combo.setCurrentText(current)  # 캐시에 없어도 사용자 입력 보존
 
-    def _on_compare_backend_changed(self, slot: str):
-        """비교 슬롯 backend 변경 → 그 backend 모델 목록으로 재구성.
-
-        backend를 바꾸면 이전 모델은 대개 새 backend에 없으므로 '(사용 안 함)'으로 초기화한다.
-        낡은 프로브 결과 줄도 지운다(다른 backend 이야기).
-        """
-        self._fill_compare_slot(slot, preserve=False)
-        _, _, probe = self._compare_slot_widgets(slot)
-        self._on_model_text_changed(probe)
-
     def _init_compare_slots(self):
-        """저장값으로 비교 슬롯 backend·모델을 채운다(_load_values에서 1회 호출).
-
-        각 슬롯은 자기 backend(저장값, 없으면 대표 backend)를 고르고 그 backend 캐시로
-        모델 목록을 채운 뒤 저장된 모델명을 복원한다. (_init_model_slots 다음에 호출돼야
-        _primary_backend가 유효하다.)
-        """
-        top = self._primary_backend()
-        for slot, bkey, mkey in (
-            ("a", self.KEY_AI_COMPARE_BACKEND_A, self.KEY_AI_COMPARE_MODEL_A),
-            ("b", self.KEY_AI_COMPARE_BACKEND_B, self.KEY_AI_COMPARE_MODEL_B),
+        """저장값으로 비교 슬롯 모델을 채운다(_load_values에서 1회 호출)."""
+        for slot, mkey in (
+            ("a", self.KEY_AI_COMPARE_MODEL_A),
+            ("b", self.KEY_AI_COMPARE_MODEL_B),
         ):
-            backend_combo, model_combo, _ = self._compare_slot_widgets(slot)
-            backend = self._settings.get(bkey, "") or top
-            if backend not in ("official", "gateway"):
-                backend = top
-            bi = backend_combo.findData(backend)
-            backend_combo.blockSignals(True)
-            backend_combo.setCurrentIndex(bi if bi >= 0 else 0)
-            backend_combo.blockSignals(False)
-            self._fill_compare_slot(slot, preserve=False)  # backend 캐시로 채우고 '미사용'으로
+            model_combo, _ = self._compare_slot_widgets(slot)
+            self._fill_compare_slot(slot, preserve=False)  # 캐시로 채우고 '미사용'으로
             saved = (self._settings.get(mkey, "") or "").strip()
             if saved:
                 idx = model_combo.findText(saved)
@@ -1327,10 +1147,9 @@ class SettingsDialog(QDialog):
             # 스크롤바·여백 여유분 가산
             combo.view().setMinimumWidth(widest + 40)
 
-    def _refill_slots_for_backend(self, backend: str, candidates: list[str]):
-        """새로고침으로 받은 모델 목록을 그 backend를 가리키는 모든 모델 행에 반영한다.
+    def _refill_model_slots(self, candidates: list[str]):
+        """새로고침으로 받은 모델 목록을 네 모델 행(OCR·모델 1·2·3)에 모두 반영한다.
 
-        네 행(OCR·모델 1·2·3) 중 backend 콤보가 이 backend를 가리키는 행만 다시 채우되
         현재 선택은 보존한다. 캐시가 비면 첫 실행처럼 빈 콤보(+placeholder)로 둔다.
         """
         rows = (
@@ -1339,15 +1158,7 @@ class SettingsDialog(QDialog):
             (self._compare_model_a_combo, True),
             (self._compare_model_b_combo, True),
         )
-        backend_of = {
-            id(self._ocr_model_combo): self._ocr_backend_combo,
-            id(self._model_combo): self._model_backend_combo,
-            id(self._compare_model_a_combo): self._compare_a_backend_combo,
-            id(self._compare_model_b_combo): self._compare_b_backend_combo,
-        }
         for combo, is_compare in rows:
-            if (backend_of[id(combo)].currentData() or "official") != backend:
-                continue
             current = combo.currentText()
             combo.setUpdatesEnabled(False)
             try:
@@ -1407,67 +1218,53 @@ class SettingsDialog(QDialog):
         label.setText(f"{mark} {detail}".strip())
         label.setVisible(True)
 
-    def _refresh_btn_for(self, backend: str) -> QPushButton:
-        return self._gateway_refresh_btn if backend == "gateway" else self._official_refresh_btn
-
-    def _on_refresh_models(self, backend: str):
-        """↻ 버튼 — 이 backend의 API에서 모델 목록 조회 (워커 스레드).
-
-        크리덴셜이 두 벌 상시 노출되므로 backend별 ↻가 자기 목록만 갱신한다.
-        """
-        api_key, base_url = self._creds_for(backend)
-        label = "게이트웨이" if backend == "gateway" else "공식"
+    def _on_refresh_models(self):
+        """↻ 버튼 — 게이트웨이에서 모델 목록 조회 (워커 스레드)."""
+        api_key, base_url = self._creds()
         if not api_key:
-            self._set_status(f"✗ 먼저 {label} API 키를 입력하세요.", ok=False)
+            self._set_status("✗ 먼저 API 키를 입력하세요.", ok=False)
             return
 
-        btn = self._refresh_btn_for(backend)
-        btn.setEnabled(False)
-        btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserStop))
-        self._set_status(f"{label} 모델 목록 조회 중…")
+        self._refresh_btn.setEnabled(False)
+        self._refresh_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserStop))
+        self._set_status("모델 목록 조회 중…")
 
         import threading
         def _worker():
             try:
                 from pasteflow.ocr_engine import OcrEngine
                 models = OcrEngine.list_gemini_models(api_key, base_url)
-                self._models_fetched.emit(models, "", backend)
+                self._models_fetched.emit(models, "")
             except Exception as e:
-                self._models_fetched.emit([], str(e), backend)
+                self._models_fetched.emit([], str(e))
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_models_fetched(self, models: list, err: str, backend: str):
-        """워커 스레드 결과 반영 (Qt 메인 스레드) — 이 backend를 가리키는 행만 갱신."""
-        label = "게이트웨이" if backend == "gateway" else "공식"
-        btn = self._refresh_btn_for(backend)
-        btn.setEnabled(True)
-        btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+    def _on_models_fetched(self, models: list, err: str):
+        """워커 스레드 결과 반영 (Qt 메인 스레드) — 네 모델 행을 모두 갱신."""
+        self._refresh_btn.setEnabled(True)
+        self._refresh_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
 
         if err:
-            self._set_status(f"✗ {label} 모델 조회 실패 — {err}", ok=False)
+            self._set_status(f"✗ 모델 조회 실패 — {err}", ok=False)
             return
         if not models:
-            self._set_status(f"✗ {label} 응답에 사용 가능한 모델이 없습니다. 설정을 확인하세요.", ok=False)
+            self._set_status("✗ 응답에 사용 가능한 모델이 없습니다. 설정을 확인하세요.", ok=False)
             return
 
         unique = sorted(set(models))
         import json
-        # 캐시는 backend별 분리 저장 — 공식/게이트웨이 라인업이 다르다.
-        self._settings[self._cache_key_for(backend)] = json.dumps(unique)
-        self._refill_slots_for_backend(backend, unique)
+        self._settings[self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY] = json.dumps(unique)
+        self._refill_model_slots(unique)
 
         # ↻는 '어떤 모델이 있는지'만 안다. '되는지'는 연결 테스트가 실호출로 답한다.
         self._set_status(
-            f"✓ {label} 모델 {len(unique)}종을 불러왔습니다. 고른 모델이 실제로 되는지는 "
+            f"✓ 모델 {len(unique)}종을 불러왔습니다. 고른 모델이 실제로 되는지는 "
             f"[연결 테스트]로 확인하세요.", ok=True)
 
     def _on_save(self):
-        """저장 버튼 클릭 — 레지스트리 등록은 main._on_settings_changed에서 처리.
-
-        v1.48.0: 크리덴셜(공식·게이트웨이 키)은 둘 다 화면에서 읽어 저장하고, 각 모델 행의
-        backend·모델은 그 행이 고른 값을 저장한다. 선택 안 된 backend의 모델 값은
-        self._settings에 남은 로드값을 아래 일괄 전달로 보존한다.
-        """
+        """저장 버튼 클릭 — 레지스트리 등록은 main._on_settings_changed에서 처리."""
         auto_start = self._auto_start_check.isChecked()
 
         new_settings = {
@@ -1488,41 +1285,19 @@ class SettingsDialog(QDialog):
             # AI 시스템 프롬프트 — 비우면 엔진이 기본값으로 폴백(빈 문자열 그대로 저장).
             self.KEY_AI_SYSTEM_PROMPT: self._ai_prompt_edit.toPlainText().strip(),
         }
-        # 각 모델 행의 backend. 모델 1 = ocr_gemini_backend, OCR = ocr_backend(신설).
-        m1_backend = self._model_backend_combo.currentData() or "official"
-        ocr_backend = self._ocr_backend_combo.currentData() or "official"
-        new_settings[self.KEY_OCR_GEMINI_BACKEND] = m1_backend
-        new_settings[self.KEY_OCR_BACKEND] = ocr_backend
-
-        # 크리덴셜 — 두 backend 키·URL을 화면에서 직접 읽어 저장(상시 노출).
-        new_settings[self.KEY_OCR_GEMINI_API_KEY_OFFICIAL] = self._official_key_edit.text()
+        # 크리덴셜 — 화면 편집칸에서 직접 읽어 저장.
         new_settings[self.KEY_OCR_GEMINI_API_KEY_GATEWAY] = self._gateway_key_edit.text()
         new_settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
 
-        # 각 행이 고른 backend 슬롯에 그 행의 모델을 저장. 선택 안 된 backend의 모델 값은
-        # self._settings에 남은 로드값을 아래 일괄 전달이 보존한다.
-        self._settings[f"ocr_gemini_model_{m1_backend}"] = self._model_combo.currentText()
-        self._settings[f"ocr_model_{ocr_backend}"] = self._ocr_model_combo.currentText()
-
-        # 비교 슬롯(모델 2·3) — 평면 키 + 슬롯별 backend를 직접 저장(v1.47.0 — 크로스 백엔드).
-        # 각 슬롯이 고른 backend·모델을 그대로 기록한다.
+        # 모델 4행.
+        new_settings[self.KEY_OCR_GEMINI_MODEL_GATEWAY] = self._model_combo.currentText()
+        new_settings[self.KEY_OCR_MODEL_GATEWAY] = self._ocr_model_combo.currentText()
         new_settings[self.KEY_AI_COMPARE_MODEL_A] = self._compare_value(self._compare_model_a_combo)
         new_settings[self.KEY_AI_COMPARE_MODEL_B] = self._compare_value(self._compare_model_b_combo)
-        new_settings[self.KEY_AI_COMPARE_BACKEND_A] = self._compare_a_backend_combo.currentData() or "official"
-        new_settings[self.KEY_AI_COMPARE_BACKEND_B] = self._compare_b_backend_combo.currentData() or "official"
 
-        # 양쪽 backend의 모델/캐시를 모두 같이 전달 — 일부만 보내면 다른 쪽이 사라질 위험.
-        # (크리덴셜 3종은 위에서 편집칸 값으로 직접 세팅했으므로 여기서 제외 — 넣으면 로드값이
-        #  방금 편집한 값을 덮어쓴다.)
-        for k in (
-            self.KEY_OCR_GEMINI_MODEL_OFFICIAL,
-            self.KEY_OCR_GEMINI_MODEL_GATEWAY,
-            self.KEY_OCR_MODEL_OFFICIAL,
-            self.KEY_OCR_MODEL_GATEWAY,
-            self.KEY_OCR_GEMINI_MODEL_CACHE_OFFICIAL,
-            self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY,
-        ):
-            if k in self._settings:
-                new_settings[k] = self._settings[k]
+        # 모델 캐시(↻로 갱신된 값)는 로드값을 그대로 실어 보낸다 — 안 보내면 사라진다.
+        cache_key = self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY
+        if cache_key in self._settings:
+            new_settings[cache_key] = self._settings[cache_key]
         self.settings_changed.emit(new_settings)
         self.accept()

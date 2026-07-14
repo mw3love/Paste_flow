@@ -534,17 +534,31 @@ def _resolve_db_path() -> str:
 # DPAPI(crypto.py)로 암호화해 로컬 DB에 저장하는 키 화이트리스트.
 # 읽기/쓰기 시 자동 복호화/암호화. 다른 PC 복호화 불가(설계상 — 동기화 폐지됨).
 _SECRET_KEYS = frozenset({
-    "ocr_gemini_api_key_official",
     "ocr_gemini_api_key_gateway",
 })
 
 # 과거 빌드의 잔재로 DB에 남았으나 현재 코드 어디서도 참조하지 않는 고아 키.
-# ocr_api_key는 평문 시크릿이라 P0(이미 노출), 나머지는 cruft 정리.
+# ocr_api_key·ocr_gemini_api_key는 평문 시크릿이라 P0(이미 노출), 나머지는 cruft 정리.
+#
+# ⚠ 아래 `ocr_gemini_*`(접미사 없는 옛 단일 키) 3종과 `ai_compare_model_*_{backend}` 4종은
+# v1.50.0에서 삭제된 두 마이그레이션(`_migrate_split_gemini_keys`·`_migrate_compare_backend`)이
+# 이전 후 지우던 것들이다. 그 마이그레이션이 사라진 지금 **아무도 안 지우므로** 여기서 purge한다.
+# 특히 `ocr_gemini_api_key`는 암호화 이전 시절의 **평문 API 키**라 그냥 두면 DB에 영구히 남는다.
+# (이미 마이그레이션된 DB에는 없는 키들이라 DELETE가 0행 — 무해.)
 _ORPHAN_KEYS = (
     "ocr_api_key",
     "ocr_base_url",
     "hotkey_settings",
     "panel_always_on_top",
+    # v1.39.0 이전의 단일 Gemini 키/모델/캐시 (backend별 슬롯으로 이전됐던 것)
+    "ocr_gemini_api_key",
+    "ocr_gemini_model",
+    "ocr_gemini_model_cache",
+    # v1.47.0 이전의 backend별 비교 모델 키 (평면 키로 이전됐던 것)
+    "ai_compare_model_a_official",
+    "ai_compare_model_a_gateway",
+    "ai_compare_model_b_official",
+    "ai_compare_model_b_gateway",
 )
 
 
@@ -571,109 +585,71 @@ def _migrate_secrets(db):
         db.conn.commit()
 
 
-def _migrate_split_gemini_keys(db):
-    """1회 마이그레이션: 단일 ocr_gemini_api_key / model / model_cache를 backend별 분리 키로 이전.
-
-    base_url 유무로 official/gateway 결정. 새 키가 이미 채워져 있으면 옛 값으로 덮어쓰지 않음
-    (이미 마이그레이션됐거나 사용자가 새 설정을 입력한 경우). 마지막에 옛 키를 db에서 삭제하며,
-    이후 settings.json 화이트리스트에서도 제외되어 있어 다시 db로 들어오지 않는다.
-    """
-    old_api = db.get_setting("ocr_gemini_api_key", "") or ""
-    old_model = db.get_setting("ocr_gemini_model", "") or ""
-    old_cache = db.get_setting("ocr_gemini_model_cache", "") or ""
-    if not (old_api or old_model or old_cache):
-        return  # 마이그레이션 대상 없음
-
-    base_url = (db.get_setting("ocr_gemini_base_url", "") or "").strip()
-    backend = "gateway" if base_url else "official"
-
-    if backend == "gateway":
-        new_api_key, new_model_key, new_cache_key = (
-            "ocr_gemini_api_key_gateway",
-            "ocr_gemini_model_gateway",
-            "ocr_gemini_model_cache_gateway",
-        )
-    else:
-        new_api_key, new_model_key, new_cache_key = (
-            "ocr_gemini_api_key_official",
-            "ocr_gemini_model_official",
-            "ocr_gemini_model_cache_official",
-        )
-
-    if old_api and not db.get_setting(new_api_key, ""):
-        from pasteflow.crypto import protect
-        db.set_setting(new_api_key, protect(old_api))
-    if old_model and not db.get_setting(new_model_key, ""):
-        db.set_setting(new_model_key, old_model)
-    if old_cache and not db.get_setting(new_cache_key, ""):
-        db.set_setting(new_cache_key, old_cache)
-    if not db.get_setting("ocr_gemini_backend", ""):
-        db.set_setting("ocr_gemini_backend", backend)
-
-    with db._lock:
-        db.conn.execute(
-            "DELETE FROM settings WHERE key IN (?, ?, ?)",
-            ("ocr_gemini_api_key", "ocr_gemini_model", "ocr_gemini_model_cache"),
-        )
-        db.conn.commit()
-    print(f"[Migrate] ocr_gemini 키 분리 완료: backend={backend}")
-
-
 def _migrate_split_ocr_ai_model(db):
-    """1회 마이그레이션: OCR 모델 슬롯(`ocr_model_*`)을 기존 AI 모델값으로 초기화.
+    """1회 마이그레이션: OCR 모델 슬롯(`ocr_model_gateway`)을 기존 AI 모델값으로 초기화.
 
     v1.39.0에서 OCR과 AI 질의가 모델 설정을 나눠 가지게 됐다. 기존 사용자는 모델 하나만
     갖고 있으므로 그 값을 OCR 슬롯에도 복사해 **동작 변화 0에서 시작**한다(둘 다 예전 모델).
     이후 사용자가 설정창에서 OCR 모델만 싼 것으로 바꾸면 그때부터 갈린다.
 
-    옛 키(`ocr_gemini_model_*`)는 AI 질의가 계속 쓰므로 삭제하지 않는다.
+    옛 키(`ocr_gemini_model_gateway`)는 AI 질의가 계속 쓰므로 삭제하지 않는다.
     새 키가 이미 있으면 건드리지 않아 idempotent.
     """
-    copied = []
-    for backend in ("official", "gateway"):
-        src = db.get_setting(f"ocr_gemini_model_{backend}", "") or ""
-        dst_key = f"ocr_model_{backend}"
-        if src and not db.get_setting(dst_key, ""):
-            db.set_setting(dst_key, src)
-            copied.append(f"{backend}={src}")
-    if copied:
-        print(f"[Migrate] OCR 모델 슬롯 초기화: {', '.join(copied)}")
+    src = db.get_setting("ocr_gemini_model_gateway", "") or ""
+    if src and not db.get_setting("ocr_model_gateway", ""):
+        db.set_setting("ocr_model_gateway", src)
+        print(f"[Migrate] OCR 모델 슬롯 초기화: {src}")
 
 
-def _migrate_compare_backend(db):
-    """1회 마이그레이션: 비교 모델(모델 2·3)을 backend별 키 → 평면 키+backend로 이전.
+# v1.50.0에서 제거된 official(Google AI Studio) 백엔드가 DB에 남긴 키들.
+# 크리덴셜·모델·캐시 + backend 선택값 전부. 한 번 지우면 어느 코드도 다시 쓰지 않는다.
+_OFFICIAL_KEYS = (
+    "ocr_gemini_api_key_official",
+    "ocr_gemini_model_official",
+    "ocr_gemini_model_cache_official",
+    "ocr_model_official",
+    "ocr_gemini_backend",
+    "ocr_backend",
+    "ai_compare_backend_a",
+    "ai_compare_backend_b",
+)
 
-    v1.44.0의 비교 모델은 `ai_compare_model_{a,b}_{backend}`로 backend별 분리 저장했다(같은
-    backend 안에서만 비교 가능했던 시절). v1.47.0에서 각 슬롯이 자기 backend를 갖게 되면서
-    평면 키 `ai_compare_model_{a,b}` + `ai_compare_backend_{a,b}`로 바꿨다.
 
-    옛 값이 official·gateway 양쪽에 있을 수 있는데 슬롯당 하나만 옮길 수 있으므로, 저장된
-    활성 backend를 우선하고 없으면 비어있지 않은 쪽을 택한다. 새 키가 이미 있으면 건드리지
-    않아 idempotent. 옛 키는 이전 후 삭제한다(다시 안 들어옴).
+def _migrate_drop_official_backend(db):
+    """1회 마이그레이션: official(Google AI Studio) 백엔드 잔재 제거. Idempotent.
+
+    v1.50.0에서 backend 개념 자체를 없앴다(게이트웨이 단일). 남은 official 키는 어느
+    코드도 읽지 않으므로 지운다.
+
+    ⚠ **비교 모델(2·3)이 official을 가리키고 있었다면 그 모델명도 함께 비운다.** 그냥 두면
+    official 전용 모델명이 게이트웨이로 날아가 404가 나는데, 사용자는 "왜 안 되지"만 보게
+    된다. 비우면 그 슬롯이 '(사용 안 함)'이 되어 설정창에서 다시 고르면 된다(조용한 실패
+    대신 눈에 보이는 빈칸).
+
+    backend 키를 지우고 나면 다음 실행에선 `slot_backend`가 "" 라 아무것도 안 지운다.
     """
-    top = db.get_setting("ocr_gemini_backend", "") or ""
-    if top not in ("official", "gateway"):
-        top = "gateway" if (db.get_setting("ocr_gemini_base_url", "") or "").strip() else "official"
-    order = [top] + [b for b in ("official", "gateway") if b != top]
-    migrated = []
+    cleared = []
     for slot in ("a", "b"):
-        new_model_key = f"ai_compare_model_{slot}"
-        old_keys = [f"ai_compare_model_{slot}_{b}" for b in ("official", "gateway")]
-        has_old = any(db.get_setting(k, "") for k in old_keys)
-        if not db.get_setting(new_model_key, "") and has_old:
-            for b in order:
-                val = (db.get_setting(f"ai_compare_model_{slot}_{b}", "") or "").strip()
-                if val:
-                    db.set_setting(new_model_key, val)
-                    db.set_setting(f"ai_compare_backend_{slot}", b)
-                    migrated.append(f"{slot}={val}({b})")
-                    break
-        # 옛 키 정리 — 새 키 존재 여부와 무관하게 제거(재유입 방지)
-        for k in old_keys:
-            if db.get_setting(k, ""):
-                db.set_setting(k, "")
-    if migrated:
-        print(f"[Migrate] 비교 모델 평면화: {', '.join(migrated)}")
+        slot_backend = db.get_setting(f"ai_compare_backend_{slot}", "") or ""
+        model = (db.get_setting(f"ai_compare_model_{slot}", "") or "").strip()
+        if slot_backend == "official" and model:
+            db.set_setting(f"ai_compare_model_{slot}", "")
+            cleared.append(f"{slot}={model}")
+
+    with db._lock:
+        placeholders = ",".join("?" * len(_OFFICIAL_KEYS))
+        cur = db.conn.execute(
+            f"DELETE FROM settings WHERE key IN ({placeholders})",
+            _OFFICIAL_KEYS,
+        )
+        db.conn.commit()
+        removed = cur.rowcount
+
+    if removed > 0 or cleared:
+        msg = f"[Migrate] official 백엔드 제거: 키 {removed}개 삭제"
+        if cleared:
+            msg += f", 비교 모델 초기화({', '.join(cleared)})"
+        print(msg)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1004,76 +980,47 @@ class PasteFlowApp:
             ToastNotification("캡처를 클립보드에 복사했습니다", icon="📷")
 
     def _resolve_gemini_cfg(self, purpose: str = "ai",
-                            model_override: str | None = None,
-                            backend_override: str | None = None) -> tuple[str, str, str]:
-        """게이트웨이/공식 백엔드 설정을 해석해 (api_key, base_url, model) 반환.
+                            model_override: str | None = None) -> tuple[str, str, str]:
+        """게이트웨이 설정을 해석해 (api_key, base_url, model) 반환.
 
         OCR 워커와 AI 질의 워커가 공유하되 **모델만 용도별로 갈린다**(v1.39.0):
-        - purpose="ocr" → `ocr_model_{backend}`   (비전 가능 모델만 고를 수 있는 슬롯)
-        - purpose="ai"  → `ocr_gemini_model_{backend}` (전 모델. 기존 키 승계)
+        - purpose="ocr" → `ocr_model_gateway`   (비전 가능 모델만 고를 수 있는 슬롯)
+        - purpose="ai"  → `ocr_gemini_model_gateway` (전 모델. 기존 키 승계)
 
         분리 이유: 두 용도가 한 모델을 공유하면 AI 답변용으로 고른 비싼 모델(claude-opus 등)이
         OCR에도 그대로 쓰여 텍스트 추출 한 번에 과금이 커지고, 반대로 텍스트 전용 모델
         (solar-pro2 등)을 AI용으로 고르면 OCR이 400으로 깨진다.
 
         model_override가 주어지면 설정의 모델 슬롯 대신 그 모델을 쓴다(여러 모델 비교).
-        backend_override가 주어지면 활성 backend 대신 그 backend의 키/URL을 쓴다(v1.47.0 —
-        **크로스 백엔드 비교**: AI 모델 2·3이 활성 backend와 다른 backend에 있을 수 있다.
-        공식은 자체 Google 검색, 게이트웨이 GPT는 OpenAI 검색을 쓰므로 검색 메커니즘까지
-        비교된다). 두 backend의 키는 모두 DB에 상주하므로(설정 저장 시 양쪽 emit) 여기서
-        각각 꺼낼 수 있다. 공식 API는 base_url을 무시하므로 ""로 강제한다.
-        backend 명시값 우선, 미설정 시 base_url 유무로 추론(레거시 호환).
         DB 접근은 _lock으로 직렬화되어 워커 스레드에서 호출해도 안전.
         """
         base_url_saved = self.db.get_setting("ocr_gemini_base_url", "")
-        if backend_override in ("official", "gateway"):
-            backend = backend_override
-        else:
-            # v1.48.0: OCR은 자기 backend(ocr_backend), AI는 모델 1 backend(ocr_gemini_backend).
-            # ocr_backend 미설정(업그레이드 직후)이면 모델 1 backend로 폴백 → 옛 '공유 backend'
-            # 동작을 그대로 유지한다(별도 DB 마이그레이션 불필요, 이 폴백이 곧 하위호환).
-            key = "ocr_backend" if purpose == "ocr" else "ocr_gemini_backend"
-            backend = self.db.get_setting(key, "")
-            if backend not in ("official", "gateway"):
-                backend = self.db.get_setting("ocr_gemini_backend", "")
-                if backend not in ("official", "gateway"):
-                    backend = "gateway" if (base_url_saved or "").strip() else "official"
 
         if model_override is not None:
             model = model_override
         else:
             model_key = (
-                f"ocr_model_{backend}" if purpose == "ocr"
-                else f"ocr_gemini_model_{backend}"
+                "ocr_model_gateway" if purpose == "ocr" else "ocr_gemini_model_gateway"
             )
             model = self.db.get_setting(model_key, "")
         if model_override is None and purpose == "ocr" and not model:
             # OCR 슬롯이 아직 비었으면(마이그레이션 전/초기화됨) AI 모델을 그대로 쓴다.
-            # 빈 문자열이면 OcrEngine이 backend별 기본 모델로 폴백하므로 여기서 강제하지 않는다.
-            model = self.db.get_setting(f"ocr_gemini_model_{backend}", "")
+            # 빈 문자열이면 OcrEngine이 기본 모델로 폴백하므로 여기서 강제하지 않는다.
+            model = self.db.get_setting("ocr_gemini_model_gateway", "")
 
-        if backend == "gateway":
-            return (self._get_secret("ocr_gemini_api_key_gateway"), base_url_saved, model)
-        return (self._get_secret("ocr_gemini_api_key_official"), "", model)
+        return (self._get_secret("ocr_gemini_api_key_gateway"), base_url_saved, model)
 
-    def _fetch_all_ai_models(self) -> tuple[str, list[str]]:
-        """AI 질문창 모델 드롭다운의 ↻가 백그라운드 스레드에서 호출 — 모델 1과 같은
-        활성 backend의 전체 모델 목록을 반환한다(네트워크 호출, DB 접근은 _lock으로
-        스레드 안전). backend 판정은 `_resolve_gemini_cfg`의 no-override 분기와 동일하게
-        맞춘다 — 반환값에 backend가 없어 여기서 한 번 더 판정이 필요하다.
+    def _fetch_all_ai_models(self) -> list[str]:
+        """AI 질문창 모델 드롭다운의 ↻가 백그라운드 스레드에서 호출 — 전체 모델 목록을
+        반환한다(네트워크 호출, DB 접근은 _lock으로 스레드 안전).
         """
         from pasteflow.ocr_engine import OcrEngine
-        base_url_saved = self.db.get_setting("ocr_gemini_base_url", "")
-        backend = self.db.get_setting("ocr_gemini_backend", "")
-        if backend not in ("official", "gateway"):
-            backend = "gateway" if (base_url_saved or "").strip() else "official"
         api_key, base_url, _ = self._resolve_gemini_cfg("ai")
-        models = OcrEngine.list_gemini_models(api_key, base_url)
-        return backend, models
+        return OcrEngine.list_gemini_models(api_key, base_url)
 
     def _start_ai_worker(self, question: str, context_text: str,
                          images: list[bytes] | None = None,
-                         model: str | None = None, backend: str | None = None):
+                         model: str | None = None):
         """AI 질의(첫 턴) — 답변창을 '생각 중' 상태로 즉시 띄우고 워커에 넘긴다.
 
         여러 모델 비교(`_start_compare_query`)와 동일한 흐름이다(v1.49.3 — 예전엔 커서
@@ -1093,8 +1040,8 @@ class PasteFlowApp:
         표시용 원문 질문은 `display`에 따로 담는다(트랜스크립트 렌더는 display를 쓴다).
         이후 후속 질문은 `_on_ai_followup`이 같은 히스토리에 쌓아 재질의한다.
         `images`는 여러 장 첨부 가능(첫 user 턴에만 멀티모달로 실림).
-        `model`/`backend`는 AI 질문창의 모델 드롭다운에서 고른 값(v1.49.1) — None이면
-        기본(모델 1) 사용, `_run_ai_turn`이 그대로 override로 넘긴다.
+        `model`은 AI 질문창의 모델 드롭다운에서 고른 값(v1.49.1) — None이면 기본(모델 1)
+        사용, `_run_ai_turn`이 그대로 override로 넘긴다.
         """
         from pasteflow.ocr_engine import build_ask_prompt
         from PyQt6.QtWidgets import QApplication
@@ -1121,18 +1068,17 @@ class PasteFlowApp:
         popup.followup_requested.connect(
             lambda text, p=popup: self._on_ai_followup(p, text))
 
-        self._run_ai_turn(conversation, images, popup=popup, model=model, backend=backend)
+        self._run_ai_turn(conversation, images, popup=popup, model=model)
 
     def _run_ai_turn(self, conversation: list, images: list[bytes] | None, popup,
-                     model: str | None = None, tools_enabled: bool = True,
-                     backend: str | None = None):
+                     model: str | None = None, tools_enabled: bool = True):
         """대화 한 턴을 백그라운드에서 질의한다(첫 질문·후속 질문·비교 질의 공용).
 
         `tools_enabled=False`는 **공유 검색 모드**(여러 모델 비교) — 검색은 앞단에서 이미
         한 번 끝났고 그 자료가 프롬프트에 주입돼 있으므로, 모델이 또 검색하지 못하게 도구를
         뗀다. 그래야 세 모델이 같은 자료를 본다.
 
-        OCR과 동일한 게이트웨이/공식 배관(`OcrEngine.ask_messages`)을 재사용한다. OCR 엔진
+        OCR과 동일한 게이트웨이 배관(`OcrEngine.ask_messages`)을 재사용한다. OCR 엔진
         설정과 무관하게 항상 gemini 경로. `images`(여러 장 가능)는 첫 user 턴에만 실린다.
         `model`이 주어지면 설정 모델 대신 그 모델로 질의한다(비교 창은 자기 모델로 이어감).
         `popup`은 항상 이미 떠 있는(pending 또는 라이브) 답변창이다(v1.49.3 — 모든 호출자가
@@ -1148,7 +1094,7 @@ class PasteFlowApp:
                 import time
                 from pasteflow.ocr_engine import OcrEngine
                 api_key, base_url, model_id = self._resolve_gemini_cfg(
-                    model_override=model, backend_override=backend)
+                    model_override=model)
                 system_prompt = self.db.get_setting("ai_system_prompt", "")
                 engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url,
                                    model=model_id, system_prompt=system_prompt)
@@ -1166,62 +1112,42 @@ class PasteFlowApp:
                 self._bridge.ai_turn_done.emit({
                     "popup": popup, "answer": answer,
                     "conversation": new_conv, "images": images,
-                    "model": model, "backend": backend, "elapsed": elapsed,
+                    "model": model, "elapsed": elapsed,
                 })
             except Exception as e:
                 self._bridge.ai_error.emit({"popup": popup, "msg": str(e)})
 
         threading.Thread(target=_run, daemon=True, name="ai-worker").start()
 
-    def _resolve_compare_models(self) -> list[dict]:
-        """여러 모델 비교에 쓸 (backend, model) spec 목록 반환.
+    def _resolve_compare_models(self) -> list[str]:
+        """여러 모델 비교에 쓸 모델명 목록 반환.
 
-        [기본 AI 모델(모델 1), 비교 A(모델 2), 비교 B(모델 3)] 중 비어있지 않은 것을 반환하되,
-        **각 spec은 자기 backend를 싣는다**(v1.47.0 — 크로스 백엔드 비교):
-        - 모델 1 = 활성 backend + `ocr_gemini_model_{backend}` (OCR·기본답변과 backend 공유)
-        - 모델 2·3 = 평면 키 `ai_compare_model_{a,b}` + `ai_compare_backend_{a,b}` (자기 backend)
-
-        (backend, model) 쌍 기준으로 중복 제거한다 — 같은 모델명이라도 backend가 다르면
-        다른 대상이다. 2개 미만이면 비교가 무의미하므로 호출부가 그때 체크박스를 숨긴다.
+        [기본 AI 모델(모델 1), 비교 A(모델 2), 비교 B(모델 3)] 중 비어있지 않은 것을 순서대로,
+        중복 제거해 반환한다. 2개 미만이면 비교가 무의미하므로 호출부가 그때 체크박스를 숨긴다.
         """
-        base_url_saved = self.db.get_setting("ocr_gemini_base_url", "")
-        top = self.db.get_setting("ocr_gemini_backend", "")
-        if top not in ("official", "gateway"):
-            top = "gateway" if (base_url_saved or "").strip() else "official"
-
         raw = [
-            (top, self.db.get_setting(f"ocr_gemini_model_{top}", "")),
-            (self.db.get_setting("ai_compare_backend_a", top),
-             self.db.get_setting("ai_compare_model_a", "")),
-            (self.db.get_setting("ai_compare_backend_b", top),
-             self.db.get_setting("ai_compare_model_b", "")),
+            self.db.get_setting("ocr_gemini_model_gateway", ""),
+            self.db.get_setting("ai_compare_model_a", ""),
+            self.db.get_setting("ai_compare_model_b", ""),
         ]
-        specs: list[dict] = []
-        seen: set[tuple[str, str]] = set()
-        for backend, model in raw:
+        models: list[str] = []
+        for model in raw:
             model = (model or "").strip()
-            backend = backend if backend in ("official", "gateway") else top
-            key = (backend, model)
-            if model and key not in seen:
-                seen.add(key)
-                specs.append({"backend": backend, "model": model})
-        return specs
+            if model and model not in models:
+                models.append(model)
+        return models
 
     def _start_compare_query(self, question: str, context_text: str,
-                             images: list[bytes] | None, specs: list[dict]):
+                             images: list[bytes] | None, models: list[str]):
         """질문을 여러 모델로 동시에 질의하고 답변창을 모니터 N등분 타일로 나란히 띄운다.
 
         각 창은 '생각 중' 펜딩 상태로 먼저 뜨고(어느 모델이 아직인지 보임) 각자 답이 도착하면
-        채워진다. 창마다 자기 (backend, 모델)을 기억해 '이어서 질문'도 그대로 이어간다.
+        채워진다. 창마다 자기 모델을 기억해 '이어서 질문'도 그 모델로 이어간다.
 
-        **검색 분기(v1.47.0)**:
-        - 모든 spec이 같은 backend → 옛 동작(공유 검색): 한 번 검색해 같은 자료를 전 모델에
-          물려 "같은 사실 위 누가 더 잘 정리하나"를 비교한다.
-        - backend가 섞임 → 공유 검색을 하지 않고 **각 모델이 자기 검색을 쓴다**
-          (`tools_enabled=True`). 공식은 Google 네이티브 grounding, 게이트웨이 GPT는 OpenAI
-          내장 검색, 그 외는 nano 심부름꾼 — 검색 메커니즘 자체가 비교 대상이 된다. 이때
-          수치가 갈리는 것은 오염이 아니라 의도된 비교다. `_shared_cache`를 안 달아 후속
-          질문도 각자 검색으로 이어간다.
+        **검색은 앞단에서 한 번만 한다**(`_start_shared_search` → `web_search.prefetch`).
+        모델별로 각자 검색하게 두면 같은 질문에도 서로 다른 수치가 나와, 비교가 "누가 더 잘
+        정리하나"가 아니라 "각자 뭘 찾았나"로 오염된다(2026-07-11 실측: 같은 날씨 질문에
+        36/25 · 36/24 · "인터넷 없어서 모름" 3인3색 → 공유 후 셋 다 36/24 일치).
         """
         from pasteflow.ocr_engine import build_ask_prompt
         from pasteflow.ui.text_preview import TextPreviewPopup
@@ -1233,52 +1159,36 @@ class PasteFlowApp:
         pt = anchor.topLeft() if anchor else QCursor.pos()
         screen = QApplication.screenAt(pt) or QApplication.primaryScreen()
         avail = screen.availableGeometry()
-        n = len(specs)
+        n = len(models)
         gap = 12
         margin_v = max(24, int(avail.height() * 0.08))
         tile_h = avail.height() - margin_v * 2
         col_w = max(280, (avail.width() - gap * (n + 1)) // n)
 
-        mixed = len({s["backend"] for s in specs}) > 1
-        _label = {"official": "공식", "gateway": "게이트웨이"}
-
         prompt = build_ask_prompt(question, context_text)
-        # 동일 backend 그룹만 공유하는 검색 자료 캐시(질문 → 검색 결과). 혼합 그룹은 각자
-        # 검색하므로 캐시를 쓰지 않는다.
+        # 비교 그룹이 공유하는 검색 자료 캐시(질문 → 검색 결과). 후속 질문(Q2+)도 이 캐시를
+        # 타야 "그럼 모레는?" 한 마디에 모델들이 각자 검색해 수치가 갈리는 것을 막는다.
         cache: dict[str, str] = {}
         jobs = []
-        for i, spec in enumerate(specs):
-            model, backend = spec["model"], spec["backend"]
+        for i, model in enumerate(models):
             x = avail.left() + gap + i * (col_w + gap)
             rect = QRect(x, avail.top() + margin_v, col_w, tile_h)
             item = ClipboardItem(content_type="text", text_content="",
                                  preview_text=question[:200])
-            # 혼합 그룹은 같은 모델명이 두 backend에 있을 수 있어 backend를 제목에 덧붙인다.
-            title = f"{model} ({_label.get(backend, backend)})" if mixed else model
             popup = TextPreviewPopup.open_new(
                 item, QRect(pt.x(), pt.y(), 1, 1), editable=False, markdown=True,
-                model_title=title, pending_question=question, place_rect=rect)
+                model_title=model, pending_question=question, place_rect=rect)
             popup.copy_requested.connect(self._on_copy_item)
             popup.copy_as_image_requested.connect(self._on_answer_image_copy)
             popup.copy_text_requested.connect(self._on_copy_selected_text)
             popup.followup_requested.connect(
                 lambda text, p=popup: self._on_ai_followup(p, text))
-            popup._ai_backend = backend   # 후속 질문이 이 창의 backend로 이어가도록
-            if not mixed:
-                popup._shared_cache = cache   # 동일 backend 그룹만 공유 검색 경로
+            popup._shared_cache = cache   # 후속 질문도 공유 검색 경로로
             conversation = [{"role": "user", "content": prompt, "display": question}]
-            jobs.append({"popup": popup, "model": model, "backend": backend,
-                         "conversation": conversation})
+            jobs.append({"popup": popup, "model": model, "conversation": conversation})
 
-        if mixed:
-            # 각 모델이 자기 backend·자기 검색으로 답한다(검색 메커니즘 비교).
-            for job in jobs:
-                self._run_ai_turn(job["conversation"], images, popup=job["popup"],
-                                  model=job["model"], backend=job["backend"],
-                                  tools_enabled=True)
-        else:
-            # 한 번 검색해 같은 자료를 전 모델에게 물린다(정리력 비교).
-            self._start_shared_search(question, jobs, images, cache)
+        # 한 번 검색해 같은 자료를 전 모델에게 물린다(정리력 비교).
+        self._start_shared_search(question, jobs, images, cache)
 
     def _start_shared_search(self, question: str, jobs: list[dict],
                              images: list[bytes] | None, cache: dict):
@@ -1329,7 +1239,7 @@ class PasteFlowApp:
             # 심부름꾼이 돌았으면 모델 도구를 뗀다(공유 자료만 보게). 못 썼으면 현행대로
             # 모델이 자기 도구로 검색하게 둔다 — 안 그러면 실시간 질문에 답할 길이 사라진다.
             self._run_ai_turn(conv, images, popup=job["popup"], model=job["model"],
-                              tools_enabled=not available, backend=job.get("backend"))
+                              tools_enabled=not available)
 
     def _start_cursor_progress(self, prefix: str, icon: str, anchor):
         """진행 칩 — 지속형 토스트(클릭 통과) + 0.5초 간격 경과시간 갱신.
@@ -2058,8 +1968,7 @@ class PasteFlowApp:
                     else:
                         sel = dialog.get_selected_model()  # 없으면 기본 모델 1
                         self._start_ai_worker(question, context_text, images=images,
-                                              model=sel["model"] if sel else None,
-                                              backend=sel["backend"] if sel else None)
+                                              model=sel or None)
             dialog.deleteLater()
 
         dialog.finished.connect(_finished)
@@ -2115,11 +2024,8 @@ class PasteFlowApp:
         # 대화 상태를 답변창에 보관 — 다음 후속 질문에 사용(이미지는 첫 턴에만 실림).
         popup._conversation = conversation
         popup._images = images
-        # 이 창이 후속 질문 시 쓸 모델·backend(비교 창은 자기 모델·backend로 이어감,
-        # 단일 창은 None=활성 backend 기본). 크로스 백엔드 비교(v1.47.0)에서 창마다 backend가
-        # 다를 수 있으므로 backend도 함께 기억한다.
+        # 이 창이 후속 질문 시 쓸 모델(비교 창은 자기 모델로 이어감, 단일 창은 None=기본).
         popup._ai_model = payload.get("model")
-        popup._ai_backend = payload.get("backend")
         elapsed = payload.get("elapsed")
         if elapsed is not None:
             popup.set_elapsed(elapsed)  # 이 답변에 걸린 시간을 답변창 상단에 표시
@@ -2140,8 +2046,10 @@ class PasteFlowApp:
         hid = getattr(popup, "_ai_history_id", None)
         if hid is None:
             title = (conversation[0].get("display") or conversation[0].get("content") or "")[:100]
+            # backend 컬럼은 v1.50.0에서 backend 개념이 사라져 늘 ""로 저장한다. 컬럼 자체는
+            # 남긴다 — 옛 기록의 값은 그 시절의 사실이므로 덮어쓰지 않는다.
             hid = self.db.save_ai_conversation(
-                title, conv_json, popup._ai_model or "", popup._ai_backend or "")
+                title, conv_json, popup._ai_model or "", "")
             popup._ai_history_id = hid
         else:
             self.db.update_ai_conversation(hid, conv_json)
@@ -2189,9 +2097,9 @@ class PasteFlowApp:
 
         저장된 conversation(role/content/display 리스트)을 문답 쌍으로 재구성해 첫 턴은
         `initial_turn`으로, 나머지는 `add_turn`으로 채운다. `_conversation`/`_ai_model`/
-        `_ai_backend`/`_ai_history_id`도 그대로 복원해 이어서 질문(follow-up)이 실시간
-        답변창과 동일하게 동작한다 — 단 이미지는 저장하지 않았으므로(`_sync_ai_history`
-        참고) 원래 이미지 질의였어도 후속 질문은 텍스트만으로 이어간다.
+        `_ai_history_id`도 그대로 복원해 이어서 질문(follow-up)이 실시간 답변창과 동일하게
+        동작한다 — 단 이미지는 저장하지 않았으므로(`_sync_ai_history` 참고) 원래 이미지
+        질의였어도 후속 질문은 텍스트만으로 이어간다.
         """
         row = self.db.get_ai_conversation(history_id)
         if row is None:
@@ -2217,7 +2125,6 @@ class PasteFlowApp:
         popup._conversation = conversation
         popup._images = None
         popup._ai_model = row.get("model") or None
-        popup._ai_backend = row.get("backend") or None
         popup._ai_history_id = history_id
         popup.copy_requested.connect(self._on_copy_item)
         popup.copy_as_image_requested.connect(self._on_answer_image_copy)
@@ -2236,21 +2143,18 @@ class PasteFlowApp:
             return
         images = getattr(popup, "_images", None)
         model = getattr(popup, "_ai_model", None)      # 비교 창은 자기 모델로 이어감
-        backend = getattr(popup, "_ai_backend", None)  # 크로스 백엔드 비교 창은 자기 backend로
         new_conv = conversation + [{"role": "user", "content": text, "display": text}]
 
         cache = getattr(popup, "_shared_cache", None)
         if cache is not None:
-            # 동일 backend 비교 창 — 후속 질문도 공유 검색 경로로 보낸다. 첫 턴만 공유하고
-            # 후속을 모델에 맡기면 "그럼 모레는?" 한 마디에 세 모델이 각자 검색해 수치 분기가
-            # 되살아난다. 같은 후속 질문을 다른 창에도 던지면 캐시가 같은 자료를 재사용한다.
-            # (혼합 backend 비교 창은 _shared_cache가 없어 이 분기를 안 타고 각자 검색한다.)
-            job = {"popup": popup, "model": model, "backend": backend,
-                   "conversation": new_conv}
+            # 비교 창 — 후속 질문도 공유 검색 경로로 보낸다. 첫 턴만 공유하고 후속을 모델에
+            # 맡기면 "그럼 모레는?" 한 마디에 세 모델이 각자 검색해 수치 분기가 되살아난다.
+            # 같은 후속 질문을 다른 창에도 던지면 캐시가 같은 자료를 재사용한다.
+            job = {"popup": popup, "model": model, "conversation": new_conv}
             self._start_shared_search(text, [job], images, cache)
             return
 
-        self._run_ai_turn(new_conv, images, popup=popup, model=model, backend=backend)
+        self._run_ai_turn(new_conv, images, popup=popup, model=model)
 
     def _on_copy_selected_text(self, text: str):
         """AI 답변창 '선택→복사' 모드 — 드래그로 선택한 부분 텍스트를 클립보드+히스토리에 저장.
@@ -2440,15 +2344,13 @@ class PasteFlowApp:
 
     def _apply_settings_from_db(self):
         """DB에서 설정 로드 → UI/동작에 적용."""
-        # Gemini 키/모델 분리 마이그레이션 (옛 단일 키 → backend별 분리 키). 1회성·idempotent.
-        _migrate_split_gemini_keys(self.db)
-
-        # OCR/AI 모델 분리 마이그레이션 (기존 모델을 OCR 슬롯에 복사). 순서 주의:
-        # 위 backend별 분리가 끝나야 ocr_gemini_model_{backend}가 채워져 있다.
+        # OCR/AI 모델 분리 마이그레이션 (기존 모델을 OCR 슬롯에 복사). 1회성·idempotent.
         _migrate_split_ocr_ai_model(self.db)
 
-        # 비교 모델 평면화 (backend별 키 → 평면 키+backend, v1.47.0). 1회성·idempotent.
-        _migrate_compare_backend(self.db)
+        # official(Google AI Studio) 백엔드 잔재 제거 (v1.50.0). 순서 주의: 위 OCR 슬롯
+        # 초기화가 읽는 ocr_gemini_model_gateway는 안 건드리지만, 비교 슬롯의 backend 키를
+        # 지우므로 그걸 읽는 마이그레이션보다 뒤에 와야 한다.
+        _migrate_drop_official_backend(self.db)
 
         # 시크릿 암호화 + 고아 키 purge. Idempotent.
         _migrate_secrets(self.db)
@@ -2499,23 +2401,15 @@ class PasteFlowApp:
             "capture_save_folder": self.db.get_setting("capture_save_folder", "") or _default_capture_folder(),
             "ocr_language": self.db.get_setting("ocr_language", "ko"),
             "ocr_engine": self.db.get_setting("ocr_engine", "gemini"),  # OCR은 항상 AI API(엔진 선택 제거)
-            "ocr_gemini_backend": self.db.get_setting("ocr_gemini_backend", ""),
             "ocr_gemini_base_url": self.db.get_setting("ocr_gemini_base_url", ""),
-            "ocr_gemini_api_key_official": self._get_secret("ocr_gemini_api_key_official"),
             "ocr_gemini_api_key_gateway": self._get_secret("ocr_gemini_api_key_gateway"),
-            "ocr_gemini_model_official": self.db.get_setting("ocr_gemini_model_official", ""),
             "ocr_gemini_model_gateway": self.db.get_setting("ocr_gemini_model_gateway", ""),
-            "ocr_gemini_model_cache_official": self.db.get_setting("ocr_gemini_model_cache_official", ""),
             "ocr_gemini_model_cache_gateway": self.db.get_setting("ocr_gemini_model_cache_gateway", ""),
             # OCR 전용 모델 슬롯 (AI 질의 모델과 분리 — 비전 가능 모델만 고를 수 있다)
-            "ocr_model_official": self.db.get_setting("ocr_model_official", ""),
             "ocr_model_gateway": self.db.get_setting("ocr_model_gateway", ""),
             # 여러 모델 비교(선택) — 기본 AI 모델에 더해 동시에 물어볼 모델 2개.
-            # v1.47.0: 각 슬롯이 자기 backend를 갖는다(크로스 백엔드 비교). 평면 키로 저장.
             "ai_compare_model_a": self.db.get_setting("ai_compare_model_a", ""),
             "ai_compare_model_b": self.db.get_setting("ai_compare_model_b", ""),
-            "ai_compare_backend_a": self.db.get_setting("ai_compare_backend_a", ""),
-            "ai_compare_backend_b": self.db.get_setting("ai_compare_backend_b", ""),
             "ai_system_prompt": self.db.get_setting("ai_system_prompt", ""),
             "notify_on_copy": self.db.get_setting("notify_on_copy", "1"),
             "queue_idle_reset_sec": self.db.get_setting("queue_idle_reset_sec", "10"),

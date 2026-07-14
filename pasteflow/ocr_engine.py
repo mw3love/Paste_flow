@@ -72,8 +72,7 @@ def _normalize_base_url(base_url: str) -> str:
 # `연결 테스트`가 **그 자리에서 실호출**해 확인한다(`probe_*` 함수들).
 #
 # 이 사슬만 상수로 남기는 이유: 폴백은 사용자가 볼 수 없는 자리에서 일어나므로 후보를
-# 실호출로 정할 기회가 없다. gemini flash 계열은 official·gateway 양쪽에 모두 있어
-# backend를 나눌 필요가 없다.
+# 실호출로 정할 기회가 없다.
 _FALLBACK_DEFAULT = "gemini-2.5-flash"
 _FALLBACK_CHAIN = (_FALLBACK_DEFAULT, "gemini-2.0-flash")
 
@@ -131,9 +130,8 @@ def group_models(candidates: list[str]) -> list[tuple[str, list[str]]]:
 def _is_model_not_found(exc: Exception) -> bool:
     """OCR 호출 예외가 '존재하지 않는 모델'을 의미하는지 휴리스틱 판정.
 
-    OpenAI 호환 게이트웨이는 404 본문에 'model ... not found'를 담아 보내고,
-    공식 google.generativeai는 NotFound·INVALID_ARGUMENT 형태로 던진다. SDK·게이트웨이
-    버전마다 예외 타입이 달라 메시지 내용 기반 판정이 가장 안정적.
+    OpenAI 호환 게이트웨이는 404 본문에 'model ... not found'를 담아 보낸다. 게이트웨이·
+    SDK 버전마다 예외 타입이 달라 메시지 내용 기반 판정이 가장 안정적.
     """
     msg = str(exc).lower()
     if "not found" in msg:
@@ -149,9 +147,9 @@ def _is_model_not_found(exc: Exception) -> bool:
 def _is_quota_error(exc: Exception) -> bool:
     """호출 예외가 할당량 초과(429 RESOURCE_EXHAUSTED)를 의미하는지 휴리스틱 판정.
 
-    AI 질의는 google_search(grounding)를 항상 붙이는데, 일부 모델(gemini-3.1-flash-lite
-    등)은 검색 도구에 무료 할당량이 없어 grounding 호출이 429난다. 이때 검색이 되는
-    안전망 모델로 폴백할지 판단하는 데 쓴다. SDK·버전마다 예외 타입이 달라 메시지 기반.
+    프로브(`_classify_probe_error`)가 이걸로 `retry`(서버 사정으로 **판정 불가**)와
+    `fail`(이 모델·키로는 안 됨)을 가른다 — 섞으면 멀쩡한 모델을 나쁜 모델로 표시한다.
+    게이트웨이·SDK 버전마다 예외 타입이 달라 메시지 기반 판정이 가장 안정적.
     """
     msg = str(exc).lower()
     return "429" in msg or "resource_exhausted" in msg or "quota" in msg
@@ -160,8 +158,7 @@ def _is_quota_error(exc: Exception) -> bool:
 def select_fallback_model(failed_model: str) -> Optional[str]:
     """호출이 실패한 모델을 대신할 폴백 후보 1개. 남은 후보가 없으면 None.
 
-    `_FALLBACK_CHAIN`에서 실패 모델이 아닌 첫 항목. backend를 구분하지 않는다 —
-    사슬의 gemini flash 계열은 공식 API와 게이트웨이 양쪽에 모두 존재한다.
+    `_FALLBACK_CHAIN`에서 실패 모델이 아닌 첫 항목.
     """
     for candidate in _FALLBACK_CHAIN:
         if candidate != failed_model:
@@ -251,7 +248,7 @@ def _ocr_prompt(language: str) -> str:
 # 이 앱의 AI 질의는 자유질문·항목 질문 등 도메인 무관한 범용 창구라 특정 분야(개발 등)로
 # 못 박지 않는다. 설정창에서 사용자가 커스터마이즈 가능하며, 비우면 이 기본값으로 폴백한다.
 # OCR(recognize) 경로에는 적용하지 않는다(텍스트 추출에 페르소나가 끼면 안 됨).
-# 게이트웨이는 messages의 system 역할로, 공식 API는 GenerativeModel(system_instruction)로 주입.
+# 게이트웨이 chat.completions는 messages의 system 역할로, Responses는 instructions로 주입.
 AI_SYSTEM_PROMPT = """당신은 사용자의 질문에 친절하고 명확하게 답하는 AI 도우미입니다. 상대가 그 분야의 전문가가 아닐 수 있다고 가정하고, 설명의 깊이와 용어 수준을 눈높이에 맞춥니다.
 
 [원칙]
@@ -390,16 +387,13 @@ class OcrEngine:
 
     @staticmethod
     def list_gemini_models(api_key: str, base_url: str = "") -> list[str]:
-        """API에서 사용 가능한 모델 ID 목록을 조회한다.
+        """게이트웨이의 `/v1/models`에서 사용 가능한 모델 ID 목록을 조회한다.
 
-        - base_url 있음: OpenAI 호환 게이트웨이의 `/v1/models` 엔드포인트 사용
-          (Mindlogic/사내 프록시 등). **모델 계열 필터 없이 전부 반환** — 게이트웨이
-          호출 경로(`_recognize_openai_compat`/`_ask_openai_compat`)는 평범한 OpenAI 호환
-          chat.completions라 claude·gpt·grok 등 gemini가 아닌 모델도 그대로 동작한다.
-          옛 `"gemini" in id` 필터는 게이트웨이가 제공하는 45종 중 6종만 노출시켜
-          사용자가 다른 모델을 고를 수 없게 만들던 제약이라 제거했다.
-        - base_url 없음: `google.generativeai.list_models()` 사용. generateContent를
-          지원하는 gemini-* 모델만 추출(공식 Google AI Studio API는 태생적으로 gemini 전용).
+        **모델 계열 필터 없이 전부 반환** — 게이트웨이 호출 경로
+        (`_recognize_openai_compat`/`_ask_openai_compat`)는 평범한 OpenAI 호환
+        chat.completions라 claude·gpt·grok 등 gemini가 아닌 모델도 그대로 동작한다.
+        옛 `"gemini" in id` 필터는 게이트웨이가 제공하는 45종 중 6종만 노출시켜
+        사용자가 다른 모델을 고를 수 없게 만들던 제약이라 제거했다.
 
         **여기서 아무것도 걸러내지 않는다.** 못 쓰는 모델(유령 404·이미지 400·TTS)을
         목록에서 조용히 지우면 사용자는 "왜 이 모델이 없지?"를 알 수 없다. 어떤 모델이
@@ -410,36 +404,21 @@ class OcrEngine:
         """
         if not api_key:
             raise RuntimeError("API 키가 비어 있습니다.")
+        if not base_url:
+            raise RuntimeError("Base URL이 비어 있습니다. 설정에서 게이트웨이 주소를 입력하세요.")
 
-        if base_url:
-            try:
-                import openai
-            except ImportError as e:
-                raise RuntimeError("openai 패키지 미설치: pip install openai") from e
-            try:
-                client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
-                resp = client.models.list()
-                # 필터 없음 — 게이트웨이가 광고하는 모든 모델을 그대로 넘긴다.
-                # (옛날엔 여기서 조용히 지워 "왜 없지?"가 됐다.)
-                models = [m.id for m in resp.data]
-            except Exception as e:
-                raise RuntimeError(f"게이트웨이 모델 조회 실패: {e}") from e
-        else:
-            try:
-                import google.generativeai as genai
-            except ImportError as e:
-                raise RuntimeError("google-generativeai 패키지 미설치") from e
-            try:
-                genai.configure(api_key=api_key)
-                models = []
-                for m in genai.list_models():
-                    if "generateContent" not in getattr(m, "supported_generation_methods", []):
-                        continue
-                    name = m.name.split("/", 1)[-1] if "/" in m.name else m.name
-                    if "gemini" in name.lower():
-                        models.append(name)
-            except Exception as e:
-                raise RuntimeError(f"Google API 모델 조회 실패: {e}") from e
+        try:
+            import openai
+        except ImportError as e:
+            raise RuntimeError("openai 패키지 미설치: pip install openai") from e
+        try:
+            client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
+            resp = client.models.list()
+            # 필터 없음 — 게이트웨이가 광고하는 모든 모델을 그대로 넘긴다.
+            # (옛날엔 여기서 조용히 지워 "왜 없지?"가 됐다.)
+            models = [m.id for m in resp.data]
+        except Exception as e:
+            raise RuntimeError(f"게이트웨이 모델 조회 실패: {e}") from e
 
         return sorted(set(models))
 
@@ -512,29 +491,18 @@ class OcrEngine:
         import os
         api_key = self.api_key or os.environ.get("GOOGLE_API_KEY", "")
         if not api_key:
-            raise RuntimeError("API 키가 설정되지 않았습니다. 설정에서 Gemini API 키를 입력하세요.")
+            raise RuntimeError("API 키가 설정되지 않았습니다. 설정에서 API 키를 입력하세요.")
+        if not self.base_url:
+            raise RuntimeError("Base URL이 설정되지 않았습니다. 설정에서 게이트웨이 주소를 입력하세요.")
 
         # 매 호출마다 폴백 상태 리셋 (이번 호출이 폴백 없이 끝났는지 main이 구별)
         self.last_fallback_from = None
 
-        if self.base_url:
-            # 게이트웨이 폴백 기본은 가장 저렴한 flash-lite
-            model_name = self.model or "gemini-3.1-flash-lite"
-            return self._call_with_fallback(
-                model_name,
-                call=lambda m: self._openai_compat_call(pil_image, api_key, self.base_url, m),
-            )
-
-        try:
-            import google.generativeai as genai
-        except ImportError:
-            raise RuntimeError("google-generativeai 패키지 미설치: pip install google-generativeai")
-
-        genai.configure(api_key=api_key)
-        model_name = self.model or "gemini-2.5-flash"
+        # 폴백 기본은 가장 저렴한 flash-lite
+        model_name = self.model or "gemini-3.1-flash-lite"
         return self._call_with_fallback(
             model_name,
-            call=lambda m: self._google_genai_call(genai, pil_image, m),
+            call=lambda m: self._openai_compat_call(pil_image, api_key, self.base_url, m),
         )
 
     # ── 폴백 공통 래퍼 ──
@@ -554,13 +522,6 @@ class OcrEngine:
             self.last_fallback_from = model
             self.last_used_model = fallback
             return call(fallback)
-
-    # ── 공식 Google API 단일 호출 ──
-
-    def _google_genai_call(self, genai_module, pil_image: Image.Image, model_name: str) -> str:
-        model = genai_module.GenerativeModel(model_name)
-        response = model.generate_content([pil_image, _ocr_prompt(self.language)])
-        return (response.text or "").strip()
 
     # ── OpenAI 호환 게이트웨이 ──
 
@@ -627,74 +588,51 @@ class OcrEngine:
                      tools_enabled: bool = True) -> str:
         """멀티턴 AI 질의 — `messages`는 [{"role":"user"/"assistant","content":str}, ...].
 
-        `tools_enabled=False`면 **웹 검색 도구를 붙이지 않는다**(세 경로 모두: 게이트웨이
-        chat.completions의 `web_search` 도구, GPT Responses의 내장 web_search, 공식 API의
-        google_search grounding). 여러 모델 비교에서 쓴다 — 검색은 앞단에서 한 번만 하고
-        (`web_search.prefetch`) 그 자료를 프롬프트에 주입하므로, 여기서 도구를 남겨 두면
-        모델이 또 검색해 자료가 갈린다(공유가 무의미해진다).
+        `tools_enabled=False`면 **웹 검색 도구를 붙이지 않는다**(두 경로 모두: 게이트웨이
+        chat.completions의 `web_search` 도구, GPT Responses의 내장 web_search). 여러 모델
+        비교에서 쓴다 — 검색은 앞단에서 한 번만 하고 (`web_search.prefetch`) 그 자료를
+        프롬프트에 주입하므로, 여기서 도구를 남겨 두면 모델이 또 검색해 자료가 갈린다
+        (공유가 무의미해진다).
 
         마지막 항목이 방금 던진 user 질문이고, 앞선 턴들은 직전까지의 대화(웹 챗봇처럼
         이전 문답을 인지한 상태로 답하게 함). `images`(여러 장 가능)는 **첫 user 턴에만**
-        멀티모달로 실린다(이미지는 한 번만 전송, 이후 턴은 텍스트만). OCR과 동일한 Gemini 배관
-        (게이트웨이/공식 분기·자동 폴백·_normalize_base_url·max_tokens=16384)을 재사용하고,
-        시스템 프롬프트(AI_SYSTEM_PROMPT)를 주입한다. 공식 경로는 google_search(grounding)
-        도구를 붙여 실시간 질문에도 답한다. 동기 호출이라 워커 스레드에서 실행해야 한다.
+        멀티모달로 실린다(이미지는 한 번만 전송, 이후 턴은 텍스트만). OCR과 동일한 게이트웨이
+        배관(자동 폴백·_normalize_base_url·max_tokens=16384)을 재사용하고, 시스템 프롬프트
+        (AI_SYSTEM_PROMPT)를 주입한다. 동기 호출이라 워커 스레드에서 실행해야 한다.
         """
         import os
         api_key = self.api_key or os.environ.get("GOOGLE_API_KEY", "")
         if not api_key:
-            raise RuntimeError("API 키가 설정되지 않았습니다. 설정에서 Gemini API 키를 입력하세요.")
+            raise RuntimeError("API 키가 설정되지 않았습니다. 설정에서 API 키를 입력하세요.")
+        if not self.base_url:
+            raise RuntimeError("Base URL이 설정되지 않았습니다. 설정에서 게이트웨이 주소를 입력하세요.")
 
         self.last_fallback_from = None
 
-        if self.base_url:
-            model_name = self.model or "gemini-3.1-flash-lite"
-            # 게이트웨이는 제공사 내장 검색을 chat.completions로는 실어 주지 않는다. 그래서
-            # 웹 검색을 두 갈래로 얻는다 (2026-07-11 실호출로 각각 검증):
-            #   GPT 계열 → Responses API의 **내장** web_search (서버가 검색·독해·인용까지)
-            #   그 외    → chat.completions + 우리가 만든 web_search 도구(DuckDuckGo)
-            if supports_responses_api(model_name):
-                try:
-                    return self._call_with_fallback(
-                        model_name,
-                        call=lambda m: self._ask_openai_responses(
-                            messages, api_key, self.base_url, m, images, tools_enabled),
-                    )
-                except Exception:
-                    # 게이트웨이가 이 GPT 모델에 Responses를 안 열어 줄 수도 있다. 그때는
-                    # 아래 공용 경로(chat.completions + DDG)로 내려가 답이라도 낸다. 진짜
-                    # 오류(키 불량 등)라면 그 경로에서도 같은 예외가 나 사용자에게 전달된다.
-                    # 실패한 시도가 남긴 폴백 흔적은 지운다 — 안 지우면 아래 경로가 성공해도
-                    # main이 "A → B로 폴백" 토스트를 잘못 띄운다(그 폴백은 무산된 것이다).
-                    self.last_fallback_from = None
-            return self._call_with_fallback(
-                model_name,
-                call=lambda m: self._ask_openai_compat(
-                    messages, api_key, self.base_url, m, images, tools_enabled),
-            )
-
-        try:
-            from google import genai
-        except ImportError:
-            raise RuntimeError("google-genai 패키지 미설치: pip install google-genai")
-
-        client = genai.Client(api_key=api_key)
-        model_name = self.model or "gemini-2.5-flash"
-        call = lambda m: self._ask_google_genai(client, messages, m, images, tools_enabled)
-        try:
-            return self._call_with_fallback(model_name, call=call)
-        except Exception as exc:
-            # grounding(웹 검색) 할당량 막힘(429): flash-lite 등 일부 모델은 검색 도구에
-            # 무료 할당량이 없어 grounding 호출이 429난다. AI 답변은 항상 검색을 붙이므로
-            # 이 경우 검색이 되는 안전망 모델(_FALLBACK_DEFAULT=gemini-2.5-flash)로 1회
-            # 재시도한다. OCR과 분리(OCR은 검색을 안 써 이 폴백이 불필요·유해). last_*는
-            # main이 폴백 토스트로 표시. 2026-06-27 실호출 검증(flash-lite 검색 429 재현).
-            if _is_quota_error(exc) and model_name != _FALLBACK_DEFAULT:
-                self.last_fallback_from = model_name
-                self.last_used_model = _FALLBACK_DEFAULT
-                return self._ask_google_genai(
-                    client, messages, _FALLBACK_DEFAULT, images, tools_enabled)
-            raise
+        model_name = self.model or "gemini-3.1-flash-lite"
+        # 게이트웨이는 제공사 내장 검색을 chat.completions로는 실어 주지 않는다. 그래서
+        # 웹 검색을 두 갈래로 얻는다 (2026-07-11 실호출로 각각 검증):
+        #   GPT 계열 → Responses API의 **내장** web_search (서버가 검색·독해·인용까지)
+        #   그 외    → chat.completions + 우리가 만든 web_search 도구(nano 심부름꾼/DDG)
+        if supports_responses_api(model_name):
+            try:
+                return self._call_with_fallback(
+                    model_name,
+                    call=lambda m: self._ask_openai_responses(
+                        messages, api_key, self.base_url, m, images, tools_enabled),
+                )
+            except Exception:
+                # 게이트웨이가 이 GPT 모델에 Responses를 안 열어 줄 수도 있다. 그때는
+                # 아래 공용 경로(chat.completions + 도구 왕복)로 내려가 답이라도 낸다. 진짜
+                # 오류(키 불량 등)라면 그 경로에서도 같은 예외가 나 사용자에게 전달된다.
+                # 실패한 시도가 남긴 폴백 흔적은 지운다 — 안 지우면 아래 경로가 성공해도
+                # main이 "A → B로 폴백" 토스트를 잘못 띄운다(그 폴백은 무산된 것이다).
+                self.last_fallback_from = None
+        return self._call_with_fallback(
+            model_name,
+            call=lambda m: self._ask_openai_compat(
+                messages, api_key, self.base_url, m, images, tools_enabled),
+        )
 
     def _system_text(self, search_available: bool = False) -> str:
         """AI 질의용 시스템 프롬프트 + 오늘 날짜 (+검색 도구가 붙었으면 검색 지시).
@@ -709,7 +647,7 @@ class OcrEngine:
         도구를 골라야 하는 chat.completions 도구-왕복 경로(claude·grok·solar 등)**에서
         모델이 검색 대신 "실시간 정보에 접근할 수 없다"고 포기하는 것을 막는다(2026-07-11
         실측: 게이트웨이 claude-haiku가 날씨 질문에 검색 없이 기상청을 안내함). 서버측 검색을
-        쓰는 gpt(Responses)·gemini(grounding)는 페르소나와 무관하게 검색하지만, 지시를
+        쓰는 gpt(Responses)는 페르소나와 무관하게 검색하지만, 지시를
         얹어도 무해하다. 도구가 없는 경로(공유 검색 `tools_enabled=False`·OCR)에는 붙이지
         않아 도구 없이 검색을 종용하는 모순을 피하고 자유질문의 환각 억제 원칙을 보존한다.
         """
@@ -920,42 +858,6 @@ class OcrEngine:
             input=inp, tools=[{"type": "web_search"}] if tools_enabled else [])
         return (getattr(resp, "output_text", "") or "").strip()
 
-    def _ask_google_genai(
-        self, client, messages: list[dict], model_name: str, images: list[bytes] | None = None,
-        tools_enabled: bool = True,
-    ) -> str:
-        """공식 Google API 멀티턴 질의 단일 호출 (폴백 없음). 신 SDK google-genai 사용.
-
-        대화 히스토리를 types.Content 리스트로 변환한다(user→"user", assistant→"model").
-        google_search 도구를 항상 붙여 모델이 필요할 때만 웹 검색하게 한다(실시간
-        날씨·뉴스 등 grounding). 구 SDK(google-generativeai 0.8.x)는 proto에 필드는
-        있으나 요청에 이 도구를 실어 보내지 못해 검색이 동작하지 않으므로 신 SDK로
-        이전했다(2026-06-27 실호출 검증: 구 SDK 4방식 모두 미검색, 신 SDK 검색 동작).
-        images가 있으면 **첫 user 턴**에 멀티모달로 실린다(여러 장) — 이미지+grounding 동시도 정상.
-        max_output_tokens=16384는 thinking 모델 본문 잘림 방지(OCR과 동일 사유).
-        """
-        from google.genai import types
-        config = types.GenerateContentConfig(
-            system_instruction=self.system_prompt or AI_SYSTEM_PROMPT,
-            tools=[types.Tool(google_search=types.GoogleSearch())] if tools_enabled else None,
-            max_output_tokens=16384,
-        )
-        contents = []
-        first_user_done = False
-        for m in messages:
-            role = "user" if m["role"] == "user" else "model"
-            parts = []
-            if role == "user" and not first_user_done:
-                first_user_done = True
-                for png in (images or []):
-                    parts.append(types.Part.from_bytes(data=png, mime_type="image/png"))
-            parts.append(types.Part(text=m["content"]))
-            contents.append(types.Content(role=role, parts=parts))
-
-        resp = client.models.generate_content(
-            model=model_name, contents=contents, config=config)
-        return (resp.text or "").strip()
-
 
 # ── 연결·모델 라이브 프로브 ──────────────────────────────────────────────────
 # 설정창 `연결 테스트` 버튼이 쓰는 온디맨드 검사. 옛 `model_matrix.json`(빌드타임 전수
@@ -1050,33 +952,21 @@ def probe_connection(api_key: str, base_url: str = "") -> ProbeResult:
 
 def _chat_probe_call(api_key: str, base_url: str, model: str, image_png: Optional[bytes]) -> str:
     """AI 질의 프로브의 단일 호출. `image_png`가 있으면 멀티모달로 함께 보낸다."""
-    if base_url:
-        import openai
-        client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
-        content: object = _CHAT_PROBE_PROMPT
-        if image_png:
-            import base64
-            b64 = base64.standard_b64encode(image_png).decode()
-            content = [
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-                {"type": "text", "text": _CHAT_PROBE_PROMPT},
-            ]
-        resp = client.chat.completions.create(
-            model=model, max_tokens=16384,
-            messages=[{"role": "user", "content": content}],
-        )
-        return (resp.choices[0].message.content or "").strip()
-
-    from google import genai
-    from google.genai import types
-    client = genai.Client(api_key=api_key)
-    parts = []
+    import openai
+    client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
+    content: object = _CHAT_PROBE_PROMPT
     if image_png:
-        parts.append(types.Part.from_bytes(data=image_png, mime_type="image/png"))
-    parts.append(types.Part(text=_CHAT_PROBE_PROMPT))
-    resp = client.models.generate_content(
-        model=model, contents=[types.Content(role="user", parts=parts)])
-    return (resp.text or "").strip()
+        import base64
+        b64 = base64.standard_b64encode(image_png).decode()
+        content = [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            {"type": "text", "text": _CHAT_PROBE_PROMPT},
+        ]
+    resp = client.chat.completions.create(
+        model=model, max_tokens=16384,
+        messages=[{"role": "user", "content": content}],
+    )
+    return (resp.choices[0].message.content or "").strip()
 
 
 def probe_chat_model(api_key: str, base_url: str, model: str) -> ProbeResult:
@@ -1091,9 +981,9 @@ def probe_chat_model(api_key: str, base_url: str, model: str) -> ProbeResult:
     `weak`(질의는 되나 이미지 첨부 불가), 텍스트도 안 되면 그 에러가 진짜 원인이다.
     에러 메시지 문구에 기대지 않으므로 게이트웨이가 뭐라고 답하든 판정이 흔들리지 않는다.
 
-    **웹 검색(grounding) 도구는 붙이지 않는다.** 붙이면 검색 무료 할당량이 없는 모델
-    (flash-lite 등)이 429를 내는데, 실제 AI 질의에서는 `ask_messages`가 안전망 모델로
-    자동 재시도해 정상 동작한다 — 여기서 ✗를 띄우면 멀쩡한 모델을 버리게 된다.
+    **웹 검색 도구는 붙이지 않는다.** 여기서 확인할 것은 "이 모델이 질의에 응답하는가"이지
+    "검색이 되는가"가 아니다 — 도구를 얹으면 도구를 못 받는 모델(Llama-4-Maverick의 405 등)이
+    ✗로 찍히는데, 실제 AI 질의는 `_ask_openai_compat`이 도구를 떼고 재시도해 정상 동작한다.
 
     성공 판정은 **예외가 안 나는 것**뿐이다. thinking 계열은 본문이 비어 올 수 있는데
     (max_tokens 예산을 사고에 다 씀) 그것도 '호출은 된다'는 뜻이라 ok로 본다.
@@ -1131,7 +1021,7 @@ def probe_chat_model(api_key: str, base_url: str, model: str) -> ProbeResult:
 def probe_ocr_model(api_key: str, base_url: str, model: str, language: str = "ko") -> ProbeResult:
     """이 모델이 **이미지를 받아** 글자를 읽는지 실호출로 확인.
 
-    실제 OCR과 같은 경로(`_openai_compat_call` / `_google_genai_call`)를 폴백 없이 탄다.
+    실제 OCR과 같은 경로(`_openai_compat_call`)를 폴백 없이 탄다.
     `_PROBE_TEXT`가 응답에 있으면 ok, 이미지는 받았는데 못 읽으면 weak(고를 수는 있으나
     작은 글씨에서 무너질 신호), 이미지 자체를 거부하면 fail.
     """
@@ -1142,12 +1032,7 @@ def probe_ocr_model(api_key: str, base_url: str, model: str, language: str = "ko
         engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url,
                            language=language, model=model)
         pil = Image.open(io.BytesIO(_probe_image_png()))
-        if base_url:
-            text = engine._openai_compat_call(pil, api_key, base_url, model)
-        else:
-            import google.generativeai as genai
-            genai.configure(api_key=api_key)
-            text = engine._google_genai_call(genai, pil, model)
+        text = engine._openai_compat_call(pil, api_key, base_url, model)
     except Exception as exc:
         # 이미지 생성 실패도 여기서 잡힌다 — OCR 줄에 표시돼야 원인을 짚을 수 있다.
         return _classify_probe_error(exc, with_image=True)
