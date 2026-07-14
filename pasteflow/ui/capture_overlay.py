@@ -31,7 +31,6 @@ GetCursorPos·GetWindowRect = 물리 픽셀(DPI-aware 프로세스). Qt 위젯 g
 from __future__ import annotations
 
 import ctypes
-import time
 from ctypes import wintypes
 
 from PyQt6.QtWidgets import QWidget, QApplication
@@ -44,7 +43,6 @@ from pasteflow import uia
 _MASK_ALPHA = 100  # 어두운 마스크 알파
 _BORDER_W = 2
 _POLL_MS = 16          # 커서 추적/드래그 repaint 주기 (~60fps)
-_UIA_MIN_INTERVAL = 0.030  # hover 요소 hit-test(MSAA) 최소 호출 간격(초) — 과호출 방지
 _INVAL_MARGIN = _BORDER_W + 2  # 부분 repaint 무효화 영역 여유(테두리 잔상 방지)
 _DRAG_THRESHOLD = 4  # 클릭(창) vs 드래그(자유 사각형) 구분 임계(논리 px)
 
@@ -301,7 +299,7 @@ class CaptureOverlay:
         self._drag_start: QPoint | None = None  # 드래그 시작 논리 좌표(press 시점에 확정)
         # 얼린 최상위 창 (hwnd, l, t, r, b) 물리 — hwnd로 요소 스냅(창-스코프 hit-test)
         self._frozen_windows: list[tuple[int, int, int, int, int]] = []
-        self._last_uia = 0.0  # hover 요소 hit-test 스로틀용 마지막 호출 시각(monotonic)
+        self._last_cursor: tuple[int, int] | None = None  # 커서가 안 움직이면 hit-test 스킵
 
     def start(self):
         self._close_all()
@@ -311,7 +309,7 @@ class CaptureOverlay:
         self._dragging = False
         self._drag_start = None
         self._frozen_windows = []
-        self._last_uia = 0.0
+        self._last_cursor = None
         for screen in QApplication.screens():
             ov = _CaptureScreen(screen, self)
             ov.prepare()
@@ -369,12 +367,14 @@ class CaptureOverlay:
                 for ov in self._overlays:
                     ov.set_highlight_global(gr)
             return
-        # hover 요소 hit-test: MSAA(창-스코프)는 COM이라 무거우므로 최소 간격으로 스로틀
-        # (드래그 repaint는 매 tick=60fps로 돌고, 요소 조회만 ~30fps로 떼어냄)
-        now = time.monotonic()
-        if now - self._last_uia < _UIA_MIN_INTERVAL:
+        # hover 요소 hit-test: 커서가 움직였을 때만 부른다(안 움직이면 결과가 같으므로 유휴 비용 0).
+        # 옛 30ms 스로틀은 hit-test 한 번이 59ms이던 시절 과호출을 막으려던 것인데, 루트를 최말단
+        # 자식 HWND로 바꿔 5ms로 떨어진 지금은 하이라이트를 33Hz로 묶어 '건너뛰며 따라오는' 체감만
+        # 남긴다 → 제거하고 매 tick(60fps) 갱신.
+        cur = _cursor_phys()
+        if cur == self._last_cursor:
             return
-        self._last_uia = now
+        self._last_cursor = cur
         gr = self._target_rect_logical()
         for ov in self._overlays:
             ov.set_highlight_global(gr)

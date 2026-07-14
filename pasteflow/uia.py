@@ -28,9 +28,22 @@ class _POINT(ctypes.Structure):
 
 # ── MSAA (oleacc) — 우선 경로 ────────────────────────────────────────────────
 _OBJID_WINDOW = 0x00000000  # AccessibleObjectFromWindow 루트(창 전체) 오브젝트 ID
+# ChildWindowFromPointEx 플래그: 숨김·비활성·입력투명 자식을 모두 건너뛴다.
+# ⚠ SKIPDISABLED|SKIPTRANSPARENT가 없으면 크롬의 Chrome_RenderWidgetHostHWND·
+# Intermediate D3D Window(실제 마우스 입력을 안 받는 합성용 자식)를 짚어, 그 창의 별개
+# 접근성 트리에서 엉뚱한 사각형이 나온다(실측: 격자 48점 중 12점 불일치, 최악은 창 전체).
+# 이 플래그를 주면 크롬은 최상위 창이 루트로 남아 옛 동작과 48/48 일치한다.
+_CWP_SKIP = 0x0001 | 0x0002 | 0x0004  # SKIPINVISIBLE | SKIPDISABLED | SKIPTRANSPARENT
 _msaa_ready = False
 _Acc = None
 _oleacc = None
+
+_user32 = ctypes.windll.user32
+_user32.ChildWindowFromPointEx.argtypes = [
+    ctypes.c_void_p, _POINT, ctypes.c_uint]
+_user32.ChildWindowFromPointEx.restype = ctypes.c_void_p
+_user32.ScreenToClient.argtypes = [ctypes.c_void_p, POINTER(_POINT)]
+_user32.ScreenToClient.restype = ctypes.c_int
 
 
 def _ensure_msaa():
@@ -75,13 +88,45 @@ def _rect_at_msaa(x: int, y: int) -> QRect | None:
     return QRect(left, top, w, h)
 
 
+def _deepest_child_at(hwnd: int, x: int, y: int) -> int:
+    """창 hwnd의 자식 트리에서 물리 점 (x,y) 아래 최말단 자식 HWND. 없으면 hwnd 자신.
+
+    hwnd의 *자식만* 뒤지므로 별개 최상위 창(입력 소유 오버레이)을 짚을 위험이 없다.
+    """
+    cur = hwnd
+    for _ in range(20):  # 하강 깊이 가드
+        pt = _POINT(x, y)
+        _user32.ScreenToClient(ctypes.c_void_p(cur), byref(pt))
+        child = _user32.ChildWindowFromPointEx(
+            ctypes.c_void_p(cur), pt, _CWP_SKIP)
+        if not child or int(child) == int(cur):
+            break
+        cur = int(child)
+    return cur
+
+
 def _rect_in_window_msaa(hwnd: int, x: int, y: int) -> QRect | None:
     """특정 창(hwnd) 안에서 물리 점 (x,y) 아래 최말단 요소의 사각형(물리). 없으면 None.
 
     점 기반 AccessibleObjectFromPoint가 최상위 오버레이(입력 소유)를 짚는 문제를 피하려고,
     hwnd로 IAccessible 루트를 얻은 뒤 accHitTest를 반복 하강해 커서 아래 최말단 요소를 찾는다
     (AccessibleObjectFromPoint가 내부적으로 하는 일을 대상 창에 한정해 재현).
+
+    ⚠ 루트는 **점 아래 최말단 자식 HWND**로 잡는다(oleacc가 내부적으로 하는 WindowFromPoint에
+    해당). 최상위 창부터 하강하면 리본·주소창 등 껍데기 계층을 전부 걸어 내려가는데 accHitTest
+    한 단계가 크로스프로세스 COM 호출(~4ms)이라 탐색기에서 13단계 = 59ms가 걸렸다(실측). 자식
+    HWND(DirectUIHWND)에서 시작하면 2단계 = 3ms로 같은 사각형이 나온다. 요소를 못 짚으면
+    최상위 창 루트로 폴백해 품질은 그대로 둔다.
     """
+    root = _deepest_child_at(hwnd, x, y)
+    r = _hit_test_from(root, x, y)
+    if r is None and root != hwnd:
+        r = _hit_test_from(hwnd, x, y)  # 자식이 접근성 요소를 안 주는 창 → 기존 경로 폴백
+    return r
+
+
+def _hit_test_from(hwnd: int, x: int, y: int) -> QRect | None:
+    """hwnd를 IAccessible 루트로 삼아 accHitTest를 반복 하강, 최말단 요소 사각형(물리)."""
     import comtypes.automation
 
     pacc = POINTER(_Acc.IAccessible)()
