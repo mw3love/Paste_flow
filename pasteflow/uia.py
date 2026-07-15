@@ -38,12 +38,49 @@ _msaa_ready = False
 _Acc = None
 _oleacc = None
 
-_user32 = ctypes.windll.user32
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+# ⚠ **전용 WinDLL 인스턴스**(공유 ctypes.windll.user32가 아니라 새 인스턴스).
+# ctypes.windll.user32는 프로세스 전역에서 캐시·공유되는 단일 객체라, 여기서 함수에
+# argtypes를 걸면 같은 함수를 쓰는 다른 모듈(capture_overlay 등)의 argtypes 설정과
+# 서로 덮어쓴다. 실측 사고: capture_overlay도 GetWindowRect.argtypes를 자기 _RECT로 걸어,
+# uia._window_rect가 uia._RECT로 호출하는 순간 ArgumentError → rect_in_window_at이 None을
+# 반환 → 캡처가 창 전체로 폴백(HWP 편집영역 스냅이 앱에서만 깨졌던 원인). WinDLL('user32')로
+# 전용 인스턴스를 만들면 argtypes가 격리돼 이 충돌이 원천 차단된다.
+_user32 = ctypes.WinDLL("user32")
 _user32.ChildWindowFromPointEx.argtypes = [
     ctypes.c_void_p, _POINT, ctypes.c_uint]
 _user32.ChildWindowFromPointEx.restype = ctypes.c_void_p
 _user32.ScreenToClient.argtypes = [ctypes.c_void_p, POINTER(_POINT)]
 _user32.ScreenToClient.restype = ctypes.c_int
+_user32.GetWindowRect.argtypes = [ctypes.c_void_p, POINTER(_RECT)]
+_user32.GetWindowRect.restype = ctypes.c_int
+
+
+def _window_rect(hwnd: int) -> QRect | None:
+    """hwnd의 화면 사각형(물리 픽셀 QRect). GetWindowRect 실패 시 None.
+
+    DPI-aware 프로세스에서 GetWindowRect는 물리 픽셀을 돌려주므로 MSAA/커서 좌표계와 일치.
+    """
+    r = _RECT()
+    if not _user32.GetWindowRect(ctypes.c_void_p(int(hwnd)), byref(r)):
+        return None
+    w, h = r.right - r.left, r.bottom - r.top
+    if w <= 0 or h <= 0:
+        return None
+    return QRect(r.left, r.top, w, h)
+
+
+def _mostly_within(r: QRect, box: QRect, frac: float = 0.5) -> bool:
+    """r 넓이의 frac 이상이 box 안에 들어오면 True (MSAA 사각형이 자식 창에 속하는지 판정)."""
+    inter = r.intersected(box)
+    area_r = r.width() * r.height()
+    if area_r <= 0:
+        return False
+    return (inter.width() * inter.height()) >= frac * area_r
 
 
 def _ensure_msaa():
@@ -117,11 +154,23 @@ def _rect_in_window_msaa(hwnd: int, x: int, y: int) -> QRect | None:
     한 단계가 크로스프로세스 COM 호출(~4ms)이라 탐색기에서 13단계 = 59ms가 걸렸다(실측). 자식
     HWND(DirectUIHWND)에서 시작하면 2단계 = 3ms로 같은 사각형이 나온다. 요소를 못 짚으면
     최상위 창 루트로 폴백해 품질은 그대로 둔다.
+
+    ⚠ **HWP(한글) 대응**: HWP 편집창(`HwpMainEditWnd`)의 MSAA는 문서 캔버스를 창 밖으로
+    벗어난 과대·오배치 사각형으로 준다(실측: 편집창 1035×1626인데 MSAA는 x=2922의 1552×2439).
+    그대로 쓰면 최상위 창에 클램프돼 우측 세로 슬라이버만 잡힌다. 그래서 **콘텐츠 자식 창이
+    따로 있고(root != hwnd) MSAA 사각형이 그 자식 창을 크게 벗어나면, 자식 창의 GetWindowRect로
+    대체**한다(= 편집영역, Snipaste와 동일 granularity). UIA는 텍스트 위에서 0×0을 줘 기각.
     """
     root = _deepest_child_at(hwnd, x, y)
     r = _hit_test_from(root, x, y)
     if r is None and root != hwnd:
         r = _hit_test_from(hwnd, x, y)  # 자식이 접근성 요소를 안 주는 창 → 기존 경로 폴백
+    if root != hwnd:  # 별개 콘텐츠 자식 창(HwpMainEditWnd 등)일 때만 보정
+        crect = _window_rect(root)
+        if crect is not None:
+            if r is None or not _mostly_within(r, crect):
+                return crect               # MSAA가 신뢰 불가 → 자식 창 전체(편집영역)
+            return r.intersected(crect)    # 정상 요소는 자식 창 경계로 클램프
     return r
 
 
