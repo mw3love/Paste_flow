@@ -155,23 +155,35 @@ def _rect_in_window_msaa(hwnd: int, x: int, y: int) -> QRect | None:
     HWND(DirectUIHWND)에서 시작하면 2단계 = 3ms로 같은 사각형이 나온다. 요소를 못 짚으면
     최상위 창 루트로 폴백해 품질은 그대로 둔다.
 
-    ⚠ **HWP(한글) 대응**: HWP 편집창(`HwpMainEditWnd`)의 MSAA는 문서 캔버스를 창 밖으로
-    벗어난 과대·오배치 사각형으로 준다(실측: 편집창 1035×1626인데 MSAA는 x=2922의 1552×2439).
-    그대로 쓰면 최상위 창에 클램프돼 우측 세로 슬라이버만 잡힌다. 그래서 **콘텐츠 자식 창이
-    따로 있고(root != hwnd) MSAA 사각형이 그 자식 창을 크게 벗어나면, 자식 창의 GetWindowRect로
-    대체**한다(= 편집영역, Snipaste와 동일 granularity). UIA는 텍스트 위에서 0×0을 줘 기각.
+    ⚠ **HWP(한글) 대응 — 오배치 쓰레기값 걸러내기**: HWP는 편집창(`HwpMainEditWnd`)이든 리본
+    툴바(WPF 최상위 창에 직접 그림)든 MSAA가 문서/캔버스를 **담긴 창 밖으로 크게 벗어난 과대·
+    오배치 사각형**으로 준다(실측: 편집창 1035×1626인데 MSAA는 x=2922의 1552×2439). 그대로 쓰면
+    최상위 창에 클램프돼 **우측 세로 슬라이버**만 잡힌다. 그래서 MSAA 요소를 **담긴 창(콘텐츠
+    자식이면 자식 HWND, 아니면 최상위)** 경계와 대조해:
+
+    - 요소가 창 안에 대체로 들어오면(정상) → 그 창 경계로 클램프해 반환.
+    - 요소가 창을 크게 벗어나면(오배치 쓰레기) → **콘텐츠 자식**(HwpMainEditWnd 등)이면 그 자식
+      창(= 편집영역, Snipaste와 동일 granularity)을, **최상위 창**(리본 툴바 등)이면 `None`을
+      반환해 호출부가 **창 전체로 폴백**하게 둔다.
+    - MSAA가 요소를 아예 안 주면(r is None) → `None` → 호출부 창 전체 폴백(크롬·웹 본문 등).
+
+    이 한 규칙으로 **편집영역 스냅(문서)과 창 전체 스냅(툴바 등 크롬)이 공존**한다. UIA 창-스코프
+    폴백은 텍스트 위 0×0을 줘 기각.
     """
     root = _deepest_child_at(hwnd, x, y)
     r = _hit_test_from(root, x, y)
     if r is None and root != hwnd:
         r = _hit_test_from(hwnd, x, y)  # 자식이 접근성 요소를 안 주는 창 → 기존 경로 폴백
-    if root != hwnd:  # 별개 콘텐츠 자식 창(HwpMainEditWnd 등)일 때만 보정
-        crect = _window_rect(root)
-        if crect is not None:
-            if r is None or not _mostly_within(r, crect):
-                return crect               # MSAA가 신뢰 불가 → 자식 창 전체(편집영역)
-            return r.intersected(crect)    # 정상 요소는 자식 창 경계로 클램프
-    return r
+    if r is None:
+        return None  # MSAA 요소 없음 → 호출부가 창 전체로 폴백
+    # MSAA 사각형을 담긴 창(콘텐츠 자식이면 자식, 아니면 최상위)과 대조해 오배치 쓰레기를 걸러낸다.
+    box = _window_rect(root)
+    if box is None:
+        return r
+    if not _mostly_within(r, box):
+        # 요소가 담긴 창을 크게 벗어남 = 오배치 쓰레기. 콘텐츠 자식이면 편집영역, 최상위면 창 전체.
+        return box if root != hwnd else None
+    return r.intersected(box)  # 정상 요소는 담긴 창 경계로 클램프
 
 
 def _hit_test_from(hwnd: int, x: int, y: int) -> QRect | None:
