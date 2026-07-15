@@ -1952,7 +1952,11 @@ class PasteFlowApp:
         item = ClipboardItem(content_type="image", image_data=png, thumbnail=thumb)
         self.interceptor._set_clipboard(item)   # 클립보드
         self._persist_clipboard_item(item)       # 히스토리 + 큐
-        ToastNotification("복사 + 히스토리 저장됨", icon="🖼")
+        # png는 PNG라 QPixmap이 바로 로드 → 토스트에 썸네일을 실어 "무엇을 복사했나"를
+        # 시각 확인(핀·경로 붙여넣기 토스트와 일관). 원본을 넘겨 96px 축소 시 선명.
+        # 썸네일이 카테고리를 대신하므로 이모지 아이콘은 생략(icon="") — image_path 토스트
+        # 5곳과 동일 규칙.
+        ToastNotification("복사 + 히스토리 저장됨", icon="", image_bytes=png)
 
     def _on_annotation_export(self, png: bytes):
         """주석본을 PNG 파일로 저장(경로는 사용자 선택)."""
@@ -2371,7 +2375,17 @@ class PasteFlowApp:
         )
         self.interceptor._set_clipboard(item)
         self._persist_clipboard_item(item)
-        ToastNotification("답변을 이미지로 복사 + 히스토리 저장됨", icon="🖼")
+        # 렌더된 픽맵을 PNG로 실어 썸네일 표시(다른 이미지 복사 토스트와 일관).
+        # 썸네일이 카테고리를 대신하므로 이모지 아이콘은 생략(icon="").
+        from PyQt6.QtCore import QBuffer, QByteArray
+        _ba = QByteArray()
+        _buf = QBuffer(_ba)
+        _buf.open(QBuffer.OpenModeFlag.WriteOnly)
+        _png = pixmap.save(_buf, "PNG")
+        _buf.close()
+        _thumb = bytes(_ba) if _png else None
+        ToastNotification("답변을 이미지로 복사 + 히스토리 저장됨",
+                          icon="" if _thumb else "🖼", image_bytes=_thumb)
 
     def _on_ai_error(self, payload):
         """AI 질의 실패 — 항상 이미 떠 있는 답변창(pending)에 오류를 표시한다(v1.49.3부터

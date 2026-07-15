@@ -291,21 +291,39 @@ def show_copy_toast(item, queue_count: int) -> ToastNotification:
     preview = _elide(getattr(item, "preview_text", None) or "클립보드 항목")
     # 이미지면 항목 썸네일을 렌더. **원본(image_data)을 우선** — 토스트가 96px로 줄여
     # 그리므로 원본을 축소하면 선명하다. 미리 만든 thumbnail은 80×60이라 96px로 늘리면
-    # 뭉개진다(캡처 토스트가 image_path 원본으로 선명한 것과 같은 이유). 원본이 raw DIB 등
-    # QPixmap이 못 여는 포맷이면 thumbnail로 폴백.
+    # 뭉개진다(캡처 토스트가 image_path 원본으로 선명한 것과 같은 이유). 원본이 raw CF_DIB면
+    # QPixmap이 못 여므로 BMP 헤더를 조립해 로드 가능하게 만들고(핀 항목은 thumbnail이
+    # 없어 이 변환이 없으면 아이콘만 떴다), 그래도 안 되면 thumbnail로 폴백.
     thumb_bytes = None
+    _renderable = False   # QPixmap이 실제로 로드에 성공한 경우만 True
     if getattr(item, "content_type", None) == "image":
         data = getattr(item, "image_data", None)
         if data:
             _probe = QPixmap()
             if _probe.loadFromData(data):
-                thumb_bytes = data
+                thumb_bytes, _renderable = data, True
+            else:
+                # raw CF_DIB(QPixmap 미지원) → BMP 파일 헤더 조립 후 재시도
+                from pasteflow.clipboard_monitor import is_encoded_image, _dib_to_bmp
+                if not is_encoded_image(data):
+                    try:
+                        bmp = _dib_to_bmp(data)
+                        if QPixmap().loadFromData(bmp):
+                            thumb_bytes, _renderable = bmp, True
+                    except Exception:
+                        pass
         if thumb_bytes is None:
             thumb_bytes = getattr(item, "thumbnail", None) or data
+            if thumb_bytes is not None:
+                _renderable = QPixmap().loadFromData(thumb_bytes)
+    # 렌더 가능한 썸네일이 있을 때만 이모지(📋) 생략 — 썸네일이 카테고리를 대신한다
+    # (image_path 토스트와 동일 규칙). 텍스트 항목이나 로드 불가 폴백값이면 📋를 유지해야
+    # '아이콘도 썸네일도 없는' 상태(회귀)를 막는다.
+    _has_thumb = _renderable
     return ToastNotification(
         preview,
         duration_ms=COPY_TOAST_DURATION_MS,
-        icon="📋",
+        icon="" if _has_thumb else "📋",
         badge=f"Q{queue_count}",
         badge_position="leading",
         image_bytes=thumb_bytes,
