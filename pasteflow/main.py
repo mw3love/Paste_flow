@@ -348,27 +348,21 @@ def _image_data_to_png_bytes(image_data: bytes) -> bytes:
     """image_data(PNG/JPEG/GIF/WebP/CF_DIB)를 PNG bytes로 변환.
 
     PIL이 직접 못 여는 CF_DIB raw는 BMP 파일 헤더를 조립해 인식시킨다(_create_thumbnail과
-    동일 기법). 파일 저장(_save_image_to_folder)·이미지 AI 질의가 공유한다.
+    동일 기법 — clipboard_monitor._dib_to_bmp 재사용). 파일 저장(_save_image_to_folder)·
+    이미지 AI 질의가 공유한다.
     """
     import io
-    import struct
     from PIL import Image
+    from pasteflow.clipboard_monitor import _dib_to_bmp
 
     if any(image_data.startswith(sig) for sig in _DIRECT_OPEN_SIGNATURES):
         # PIL이 직접 인식 가능한 포맷 (PNG/JPEG/GIF/WebP/BMP 파일 등)
         img = Image.open(io.BytesIO(image_data))
     else:
-        # CF_DIB raw → BMP 파일 헤더 조립 → Pillow로 인식
-        bih_size = struct.unpack_from('<I', image_data, 0)[0]
-        bit_count = struct.unpack_from('<H', image_data, 14)[0]
-        colors_used = struct.unpack_from('<I', image_data, 32)[0]
-        n_colors = colors_used if (colors_used > 0 or bit_count > 8) else (1 << bit_count)
-        if bit_count > 8:
-            n_colors = colors_used  # 보통 0
-        pixel_offset = 14 + bih_size + n_colors * 4
-        file_size = 14 + len(image_data)
-        file_header = struct.pack('<2sIHHI', b'BM', file_size, 0, 0, pixel_offset)
-        img = Image.open(io.BytesIO(file_header + image_data))
+        # CF_DIB raw → BMP 파일 헤더 조립 → Pillow로 인식. _dib_to_bmp는 색상 테이블뿐
+        # 아니라 BI_BITFIELDS(compression=3) RGB 마스크 12바이트까지 픽셀 오프셋에 더한다
+        # — 손수 조립하던 옛 코드는 이걸 빠뜨려 32bpp BITFIELDS DIB에서 색이 뒤집혔다(빨강↔파랑).
+        img = Image.open(io.BytesIO(_dib_to_bmp(image_data)))
 
     buf = io.BytesIO()
     img.save(buf, format='PNG')
