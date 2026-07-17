@@ -17,3 +17,5 @@ _icons_preview.png
 # 앱은 이 값을 설정창에서 입력받아 DPAPI로 암호화해 로컬 DB에만 저장한다(pasteflow/crypto.py).
 client_secret*.json
 .playwright-mcp/
+# webchat 로컬 런처 — 개인 API 키를 담으므로 커밋 금지.
+webchat/run_local.bat

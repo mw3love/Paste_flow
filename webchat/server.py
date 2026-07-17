@@ -45,7 +45,7 @@ from pasteflow.ocr_engine import _normalize_base_url  # noqa: E402
 # ⚠ 단 18MB급 초대형 파일(PDF 매뉴얼 등)은 어떤 모델로도 통째로 못 읽는다 — 그건 fetch가
 #   아니라 '파일 안 검색'으로 접근해야 하는 별도 과제다.
 # 품질이 더 필요하면 환경변수로 교체하거나(WEBCHAT_MODEL), 계획의 경로 2(Claude MCP)로 승격.
-MODEL = os.environ.get("WEBCHAT_MODEL", "gpt-5.2")
+MODEL = os.environ.get("WEBCHAT_MODEL", "gpt-5.6-sol")
 
 # 드라이브 검색을 파일목록 패널로 렌더할 도구들 — output이 {"results":[...]} 형태인 것만.
 # fetch(본문 읽기)는 output이 {"content":...}라 목록이 아니므로 제외한다.
@@ -79,9 +79,15 @@ def _get_setting(key: str, default: str = "") -> str:
 
 
 def _gateway_creds() -> tuple[str, str]:
-    """(api_key, base_url) — api_key는 DPAPI 복호화."""
-    api_key = crypto.unprotect(_get_setting("ocr_gemini_api_key_gateway"))
-    base_url = _get_setting("ocr_gemini_base_url")
+    """(api_key, base_url) — webchat 전용 환경변수가 있으면 그것을, 없으면 PasteFlow DB.
+
+    WEBCHAT_API_KEY / WEBCHAT_BASE_URL로 override하면 **기존 PasteFlow 앱(OCR·AI 질의)은
+    그대로 두고 webchat만 다른 게이트웨이 계정**을 쓸 수 있다(예: 학교 계정 크레딧 소진 시
+    개인 계정으로 webchat만 전환). 환경변수가 비어 있으면 DB 값으로 폴백(DPAPI 복호화).
+    """
+    api_key = os.environ.get("WEBCHAT_API_KEY", "") or \
+        crypto.unprotect(_get_setting("ocr_gemini_api_key_gateway"))
+    base_url = os.environ.get("WEBCHAT_BASE_URL", "") or _get_setting("ocr_gemini_base_url")
     return api_key, base_url
 
 
