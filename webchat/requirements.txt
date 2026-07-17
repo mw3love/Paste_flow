@@ -1,0 +1,4 @@
+# 웹 챗봇 전용 추가 의존성 (PasteFlow 본체 requirements.txt와 별개).
+# openai·pasteflow 모듈은 상위 프로젝트에서 이미 제공된다.
+fastapi
+uvicorn[standard]

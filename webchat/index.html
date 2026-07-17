@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>드라이브 챗봇</title>
+<style>
+  :root{
+    --bg:#121212; --panel:#1b1b1b; --panel2:#242424; --line:#333;
+    --text:#e8e8e8; --muted:#9a9a9a; --coral:#ff9e7d; --coral2:#ff8763;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--text); font-family:'Segoe UI','Noto Sans KR',sans-serif;
+    display:grid; grid-template-columns:1fr 320px; grid-template-rows:1fr auto; height:100vh;
+  }
+  /* 왼쪽: 대화 */
+  #chat{grid-column:1; grid-row:1; overflow-y:auto; padding:24px 28px;}
+  .msg{margin:0 0 20px; max-width:760px;}
+  .msg .who{font-size:12px; color:var(--muted); margin-bottom:4px;}
+  .msg.user .bubble{background:var(--panel2); border:1px solid var(--line);}
+  .msg.ai .bubble{background:transparent;}
+  .bubble{padding:10px 14px; border-radius:10px; white-space:pre-wrap;
+          line-height:1.6; word-break:break-word;}
+  .bubble a{color:var(--coral);}
+  .cursor::after{content:'▋'; color:var(--coral); animation:blink 1s steps(2) infinite;}
+  @keyframes blink{50%{opacity:0}}
+  /* 오른쪽: 근거 파일 패널 */
+  #files{grid-column:2; grid-row:1/3; background:var(--panel); border-left:1px solid var(--line);
+         overflow-y:auto; padding:18px 16px;}
+  #files h2{font-size:13px; color:var(--coral); margin:0 0 12px; letter-spacing:.3px;}
+  .file{display:block; padding:9px 10px; margin-bottom:8px; border:1px solid var(--line);
+        border-radius:8px; background:var(--panel2); text-decoration:none; color:var(--text);}
+  .file:hover{border-color:var(--coral);}
+  .file .ft{font-size:13px; word-break:break-all;}
+  .file .fm{font-size:11px; color:var(--muted); margin-top:3px;}
+  .files-empty{color:var(--muted); font-size:12px;}
+  /* 하단: 입력 */
+  #composer{grid-column:1; grid-row:2; border-top:1px solid var(--line); padding:14px 20px;
+            display:flex; gap:10px; background:var(--bg);}
+  #q{flex:1; resize:none; height:44px; max-height:160px; padding:11px 12px; border-radius:10px;
+     border:1px solid var(--line); background:var(--panel2); color:var(--text); font-size:14px;
+     font-family:inherit; line-height:1.4;}
+  #q:focus{outline:none; border-color:var(--coral);}
+  #send{padding:0 20px; border:none; border-radius:10px; background:var(--coral); color:#1a1a1a;
+        font-weight:600; cursor:pointer;}
+  #send:disabled{opacity:.5; cursor:default;}
+  .notice{font-size:12px; color:var(--muted); margin:0 0 16px;}
+  .err{color:#ff6b6b;}
+</style>
+</head>
+<body>
+  <div id="chat"></div>
+  <aside id="files"><h2>📎 근거 파일</h2><div id="filelist" class="files-empty">질문하면 관련 드라이브 문서가 여기 표시됩니다.</div></aside>
+  <form id="composer">
+    <textarea id="q" placeholder="드라이브 문서에 대해 물어보세요…  (Enter 전송 · Shift+Enter 줄바꿈)"></textarea>
+    <button id="send" type="submit">전송</button>
+  </form>
+
+<script>
+const chatEl = document.getElementById('chat');
+const fileListEl = document.getElementById('filelist');
+const qEl = document.getElementById('q');
+const sendBtn = document.getElementById('send');
+const form = document.getElementById('composer');
+
+// 대화 히스토리(서버에 통째로 전송 → 멀티턴)
+const messages = [];
+
+function addMessage(role, text){
+  const wrap = document.createElement('div');
+  wrap.className = 'msg ' + role;
+  const who = document.createElement('div');
+  who.className = 'who';
+  who.textContent = role === 'user' ? '나' : 'AI';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text || '';
+  wrap.appendChild(who); wrap.appendChild(bubble);
+  chatEl.appendChild(wrap);
+  chatEl.scrollTop = chatEl.scrollHeight;
+  return bubble;
+}
+
+function addNotice(text, cls){
+  const n = document.createElement('div');
+  n.className = 'notice ' + (cls||'');
+  n.textContent = text;
+  chatEl.appendChild(n);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+const MIME_ICON = {
+  'application/vnd.google-apps.folder':'📁',
+  'application/pdf':'📕',
+  'text/markdown':'📝','text/plain':'📄','text/html':'🌐',
+  'application/vnd.google-apps.document':'📘',
+  'application/vnd.google-apps.spreadsheet':'📗',
+  'application/vnd.google-apps.presentation':'📙',
+};
+function iconFor(m){ return MIME_ICON[m] || (m && m.startsWith('image/') ? '🖼️' : '📄'); }
+function fmtSize(s){ if(!s) return ''; const n=+s; if(!n) return '';
+  const u=['B','KB','MB','GB']; let i=0,v=n; while(v>=1024&&i<u.length-1){v/=1024;i++;}
+  return v.toFixed(v<10&&i>0?1:0)+u[i]; }
+
+function renderFiles(results){
+  fileListEl.className = '';
+  fileListEl.innerHTML = '';
+  results.forEach(r => {
+    const a = document.createElement('a');
+    a.className = 'file'; a.href = r.url || r.display_url || '#';
+    a.target = '_blank'; a.rel = 'noopener';
+    const t = document.createElement('div'); t.className = 'ft';
+    t.textContent = iconFor(r.mime_type) + ' ' + (r.title || r.display_title || '(제목 없음)');
+    const m = document.createElement('div'); m.className = 'fm';
+    const parts = [];
+    if (r.file_or_folder === 'folder') parts.push('폴더');
+    const sz = fmtSize(r.size); if (sz) parts.push(sz);
+    if (r.updated_at) parts.push(r.updated_at.slice(0,10));
+    m.textContent = parts.join(' · ');
+    a.appendChild(t); a.appendChild(m);
+    fileListEl.appendChild(a);
+  });
+}
+
+// SSE 프레임 파서 (fetch 스트림 위에서 직접) — 브라우저 EventSource는 POST를 못 해서 수동.
+async function streamChat(bubble){
+  const res = await fetch('/chat', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({messages}),
+  });
+  if(!res.ok){ throw new Error('서버 오류 ' + res.status); }
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', answer = '';
+  bubble.classList.add('cursor');
+
+  while(true){
+    const {value, done} = await reader.read();
+    if(done) break;
+    buf += dec.decode(value, {stream:true});
+    let sep;
+    while((sep = buf.indexOf('\n\n')) >= 0){
+      const frame = buf.slice(0, sep); buf = buf.slice(sep+2);
+      let event = 'message', data = '';
+      frame.split('\n').forEach(line => {
+        if(line.startsWith('event:')) event = line.slice(6).trim();
+        else if(line.startsWith('data:')) data += line.slice(5).trim();
+      });
+      let payload = {}; try{ payload = JSON.parse(data); }catch(e){}
+
+      if(event === 'token'){
+        answer += payload.text || '';
+        bubble.textContent = answer;
+        chatEl.scrollTop = chatEl.scrollHeight;
+      } else if(event === 'files'){
+        renderFiles(payload.results || []);
+      } else if(event === 'notice'){
+        addNotice(payload.message || '');
+      } else if(event === 'error'){
+        addNotice('오류: ' + (payload.message || ''), 'err');
+      } else if(event === 'done'){
+        // 스트림 끝
+      }
+    }
+  }
+  bubble.classList.remove('cursor');
+  return answer;
+}
+
+async function send(){
+  const text = qEl.value.trim();
+  if(!text) return;
+  qEl.value = ''; qEl.style.height = '44px';
+  sendBtn.disabled = true;
+
+  addMessage('user', text);
+  messages.push({role:'user', content:text});
+  const bubble = addMessage('ai', '');
+
+  try{
+    const answer = await streamChat(bubble);
+    messages.push({role:'assistant', content: answer});
+  }catch(err){
+    bubble.classList.remove('cursor');
+    addNotice('오류: ' + err.message, 'err');
+  }finally{
+    sendBtn.disabled = false;
+    qEl.focus();
+  }
+}
+
+form.addEventListener('submit', e => { e.preventDefault(); send(); });
+qEl.addEventListener('keydown', e => {
+  if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+});
+qEl.addEventListener('input', () => {
+  qEl.style.height = '44px';
+  qEl.style.height = Math.min(qEl.scrollHeight, 160) + 'px';
+});
+qEl.focus();
+</script>
+</body>
+</html>
