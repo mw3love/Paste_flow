@@ -683,6 +683,9 @@ class _SignalBridge(QObject):
     seq_pin            = pyqtSignal()        # 훅 스레드 → 메인: 큐에서 다음 항목을 꺼내 화면에 순차 핀
     capture_requested  = pyqtSignal()        # 훅 스레드 → 메인: 영역 캡처 오버레이 띄우기
     ask_ai             = pyqtSignal()        # 훅 스레드 → 메인: AI 자유질문 입력창 띄우기
+    record_gif         = pyqtSignal()        # 훅 스레드 → 메인: GIF 녹화(영역 선택 오버레이) 띄우기
+    gif_saved          = pyqtSignal(str)     # 인코딩 워커 → 메인: 저장된 GIF 경로
+    gif_error          = pyqtSignal(str)     # 인코딩 워커 → 메인: 에러 메시지
     ai_turn_done       = pyqtSignal(object)  # AI 워커 스레드 → 메인: 대화 턴 결과 dict(팝업·답변·히스토리)
     ai_error           = pyqtSignal(object)  # AI 워커 스레드 → 메인: 에러 dict({popup, msg})
     ai_searching       = pyqtSignal(str)     # AI 워커 스레드 → 메인: 웹 검색 시작(검색어) / 종료("")
@@ -723,6 +726,9 @@ class PasteFlowApp:
         self._bridge.seq_pin.connect(self._on_seq_pin_hotkey)
         self._bridge.capture_requested.connect(self._on_capture_requested)
         self._bridge.ask_ai.connect(self._on_ask_ai_hotkey)
+        self._bridge.record_gif.connect(self._on_record_gif_hotkey)
+        self._bridge.gif_saved.connect(self._on_gif_saved)
+        self._bridge.gif_error.connect(self._on_gif_error)
         self._bridge.ai_turn_done.connect(self._on_ai_turn_done)
         self._bridge.ai_error.connect(self._on_ai_error)
         self._bridge.ai_searching.connect(self._on_ai_searching)
@@ -762,6 +768,7 @@ class PasteFlowApp:
             on_seq_pin=self._bridge.seq_pin.emit,
             on_capture=self._bridge.capture_requested.emit,
             on_ask_ai=self._bridge.ask_ai.emit,
+            on_record_gif=self._bridge.record_gif.emit,
         )
         self.hotkey_manager = HotkeyManager()
 
@@ -786,7 +793,14 @@ class PasteFlowApp:
         from pasteflow.ui.capture_overlay import CaptureOverlay
         self._capture_overlay = CaptureOverlay()
         self._capture_overlay.region_captured.connect(self._on_capture_region)
+        # GIF 녹화: 같은 오버레이의 select_only 모드로 사각형만 받아 라이브 녹화 시작
+        self._capture_overlay.region_selected.connect(self._on_record_region_selected)
         # cancelled는 오버레이 내부 정리로 충분 — 별도 콜백 불필요
+
+        # GIF 녹화기 — 녹화 중 참조 유지(GC 방지), 인코딩은 전용 워커에서 UI 블로킹 방지
+        from concurrent.futures import ThreadPoolExecutor
+        self._gif_recorder = None
+        self._gif_executor = ThreadPoolExecutor(max_workers=1)
         # 마지막 캡처 위치(논리 전역) — 그 직후 핀(Alt+F3)이 캡처 자리에 그대로 덮게 함.
         # 외부 복사가 들어오면 무효화(_on_new_clipboard_item)해 "방금 캡처한 그 이미지"일 때만 적용.
         self._pin_place_rect: QRect | None = None
@@ -869,6 +883,9 @@ class PasteFlowApp:
 
         ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+`")
         self.interceptor.set_ask_ai_hotkey(ask_ai_hotkey)
+
+        record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
+        self.interceptor.set_record_gif_hotkey(record_hotkey)
 
 
     def _persist_clipboard_item(self, item: ClipboardItem) -> ClipboardItem:
@@ -998,6 +1015,87 @@ class PasteFlowApp:
                 icon="", image_path=saved_path)
         else:
             ToastNotification("캡처를 클립보드에 복사했습니다", icon="📷")
+
+    # ── GIF 녹화 (Ctrl+Shift+G) ──
+
+    def _on_record_gif_hotkey(self):
+        """메인 스레드: 이미 녹화 중이 아니면 선택 오버레이(select_only)를 띄운다.
+
+        capture_overlay는 '얼린' 스냅이라 녹화엔 부적합 — 여기선 사각형만 받고
+        (region_selected → _on_record_region_selected) 그 자리를 라이브로 연속 캡처한다.
+        """
+        from pasteflow.ui.toast import ToastNotification
+        if self._gif_recorder is not None and self._gif_recorder.is_active():
+            ToastNotification("이미 녹화 중입니다 (■ 정지 또는 ESC)", icon="🎬")
+            return
+        self._capture_overlay.start(select_only=True)
+
+    def _on_record_region_selected(self, rect):
+        """메인 스레드: 선택된 논리 전역 사각형을 라이브 녹화 시작.
+
+        오버레이가 완전히 닫히도록 짧게(150ms) 미룬 뒤 시작 — 잔상이 첫 프레임에 안 잡히게.
+        """
+        from pasteflow.gif_recorder import GifRecorder
+
+        try:
+            fps = int(self.db.get_setting("gif_fps", "12") or 12)
+        except ValueError:
+            fps = 12
+        try:
+            max_sec = int(self.db.get_setting("gif_max_seconds", "15") or 15)
+        except ValueError:
+            max_sec = 15
+
+        self._gif_recorder = GifRecorder(fps=fps, max_seconds=max_sec)
+        self._gif_recorder.finished.connect(self._on_record_finished)
+        self._gif_recorder.cancelled.connect(self._on_record_cancelled)
+        QTimer.singleShot(150, lambda: self._gif_recorder.start(QRect(rect)))
+
+    def _on_record_finished(self, frames, interval_ms):
+        """메인 스레드: 녹화 종료 → 인코딩을 워커에 넘긴다(프레임 수가 많으면 UI 블로킹)."""
+        from pasteflow.ui.toast import ToastNotification
+        ToastNotification(f"GIF 인코딩 중… ({len(frames)}프레임)", icon="🎬")
+        self._gif_executor.submit(self._encode_gif_worker, frames, interval_ms)
+
+    def _on_record_cancelled(self):
+        from pasteflow.ui.toast import ToastNotification
+        ToastNotification("녹화 취소됨", icon="🎬")
+
+    def _encode_gif_worker(self, frames, interval_ms):
+        """워커 스레드: 프레임 → GIF 파일. 결과/에러를 시그널로 메인에 되돌린다."""
+        from datetime import datetime
+        from pasteflow import gif_recorder
+        try:
+            folder = self.db.get_setting("capture_save_folder", "") or _default_capture_folder()
+            os.makedirs(folder, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(folder, f"rec_{ts}.gif")
+            gif_recorder.encode_gif(frames, path, interval_ms)
+            self._bridge.gif_saved.emit(path)
+        except Exception as e:
+            self._bridge.gif_error.emit(str(e))
+
+    def _on_gif_saved(self, path):
+        """메인 스레드: GIF 저장 완료 → 경로를 클립보드 텍스트로 복사 + 썸네일 토스트.
+
+        GIF는 클립보드에 애니메이션으로 못 올라가므로(이미지→경로 패턴과 동일) 파일 경로를
+        클립보드에 넣어 노션·슬랙 등엔 경로/파일로 넘긴다. 첫 프레임 썸네일로 결과를 시각 확인.
+        """
+        from pasteflow.ui.toast import ToastNotification
+        # 경로를 클립보드 텍스트로 (self_triggered라 히스토리엔 안 남음 — 이미지→경로와 동일)
+        path_item = ClipboardItem(
+            content_type="text",
+            text_content=path,
+            preview_text=path[:200],
+        )
+        self.interceptor._set_clipboard(path_item)
+        ToastNotification(
+            f"GIF 저장·경로 복사됨: {os.path.basename(path)}",
+            icon="", image_path=path)
+
+    def _on_gif_error(self, msg):
+        from pasteflow.ui.toast import ToastNotification
+        ToastNotification(f"GIF 인코딩 실패 — {msg}", icon="🎬")
 
     def _resolve_gemini_cfg(self, purpose: str = "ai",
                             model_override: str | None = None) -> tuple[str, str, str]:
@@ -2596,6 +2694,7 @@ class PasteFlowApp:
             "hotkey_seq_pin": self.db.get_setting("hotkey_seq_pin", "alt+shift+f3"),
             "hotkey_capture": self.db.get_setting("hotkey_capture", "alt+f2"),
             "hotkey_ask_ai": self.db.get_setting("hotkey_ask_ai", "alt+`"),
+            "hotkey_record_gif": self.db.get_setting("hotkey_record_gif", "ctrl+shift+g"),
             "capture_save_folder": self.db.get_setting("capture_save_folder", "") or _default_capture_folder(),
             "ocr_language": self.db.get_setting("ocr_language", "ko"),
             "ocr_engine": self.db.get_setting("ocr_engine", "gemini"),  # OCR은 항상 AI API(엔진 선택 제거)
@@ -2640,6 +2739,7 @@ class PasteFlowApp:
         old_seq_pin_hotkey = self.db.get_setting("hotkey_seq_pin", "alt+shift+f3")
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         old_ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+`")
+        old_record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
 
         from pasteflow.crypto import protect
         for key, value in new_settings.items():
@@ -2686,6 +2786,11 @@ class PasteFlowApp:
         new_ask_ai_hotkey = new_settings.get("hotkey_ask_ai", "alt+`")
         if old_ask_ai_hotkey != new_ask_ai_hotkey:
             self.interceptor.set_ask_ai_hotkey(new_ask_ai_hotkey)
+
+        # GIF 녹화 단축키 재설정
+        new_record_hotkey = new_settings.get("hotkey_record_gif", "ctrl+shift+g")
+        if old_record_hotkey != new_record_hotkey:
+            self.interceptor.set_record_gif_hotkey(new_record_hotkey)
 
         # 자동 시작
         auto_start = new_settings.get("auto_start", "0") == "1"

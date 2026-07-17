@@ -313,6 +313,7 @@ class SettingsDialog(QDialog):
     KEY_PIN_IMAGE_HOTKEY = "hotkey_pin_image"
     KEY_SEQ_PIN_HOTKEY = "hotkey_seq_pin"
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
+    KEY_RECORD_GIF_HOTKEY = "hotkey_record_gif"
     KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
     KEY_CAPTURE_FOLDER = "capture_save_folder"
     KEY_OCR_ENGINE = "ocr_engine"
@@ -517,6 +518,15 @@ class SettingsDialog(QDialog):
             "이미지가 아닌 항목은 이미지로 렌더해 핀합니다."
         )
         hotkey_form.addRow("•  순차 핀:", self._seq_pin_hotkey)
+
+        self._record_gif_hotkey = HotkeyEdit()
+        self._record_gif_hotkey.setToolTip(
+            "화면 영역을 드래그로 선택해 GIF로 녹화합니다.\n"
+            "녹화 중 뜨는 ■ 정지 버튼(또는 ESC로 취소)으로 끝내면 GIF로 저장되고\n"
+            "파일 경로가 클립보드에 복사됩니다(노션·슬랙 등엔 파일/경로로 넘김).\n"
+            "커서는 녹화되지 않으며, 선택이 시작된 단일 모니터만 녹화됩니다(MVP)."
+        )
+        hotkey_form.addRow("•  GIF 녹화:", self._record_gif_hotkey)
         hotkey_form.addRow(_hk_sep())
 
         # ④ AI 호출(alt+`) / AI OCR
@@ -1049,6 +1059,9 @@ class SettingsDialog(QDialog):
         self._capture_hotkey.set_value(
             self._settings.get(self.KEY_CAPTURE_HOTKEY, "alt+f2")
         )
+        self._record_gif_hotkey.set_value(
+            self._settings.get(self.KEY_RECORD_GIF_HOTKEY, "ctrl+shift+g")
+        )
         self._ask_ai_hotkey.set_value(
             self._settings.get(self.KEY_ASK_AI_HOTKEY, "alt+`")
         )
@@ -1406,6 +1419,7 @@ class SettingsDialog(QDialog):
             self.KEY_PIN_IMAGE_HOTKEY: self._pin_image_hotkey.value() or "alt+f3",
             self.KEY_SEQ_PIN_HOTKEY: self._seq_pin_hotkey.value() or "alt+shift+f3",
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
+            self.KEY_RECORD_GIF_HOTKEY: self._record_gif_hotkey.value() or "ctrl+shift+g",
             self.KEY_ASK_AI_HOTKEY: self._ask_ai_hotkey.value() or "alt+`",
             self.KEY_CAPTURE_FOLDER: self._capture_folder_edit.text(),
             # OCR은 별도 엔진 선택 없이 항상 AI(Gemini/Mindlogic) API로 처리 → kind 고정.

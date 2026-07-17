@@ -278,6 +278,7 @@ class _CaptureScreen(QWidget):
 class _Bridge(QObject):
     cancelled = pyqtSignal()
     region_captured = pyqtSignal(QPixmap, QRect)  # (잘린 이미지, 캡처한 논리 전역 사각형)
+    region_selected = pyqtSignal(QRect)  # select_only 모드: 사각형만(GIF 녹화가 라이브로 채운다)
 
 
 class CaptureOverlay:
@@ -287,6 +288,8 @@ class CaptureOverlay:
         self._bridge = _Bridge()
         self.cancelled = self._bridge.cancelled
         self.region_captured = self._bridge.region_captured
+        self.region_selected = self._bridge.region_selected
+        self._select_only = False  # True면 자르지 않고 사각형만 emit(GIF 녹화용)
         self._overlays: list[_CaptureScreen] = []
         self._timer = QTimer()
         self._timer.setInterval(_POLL_MS)
@@ -301,7 +304,10 @@ class CaptureOverlay:
         self._frozen_windows: list[tuple[int, int, int, int, int]] = []
         self._last_cursor: tuple[int, int] | None = None  # 커서가 안 움직이면 hit-test 스킵
 
-    def start(self):
+    def start(self, select_only: bool = False):
+        """select_only=True면 선택 영역을 자르지 않고 논리 전역 사각형만 emit한다
+        (GIF 녹화가 그 자리를 라이브로 연속 캡처한다 — capture_overlay는 '얼린' 스냅이라 부적합)."""
+        self._select_only = select_only
         self._close_all()
         self._pending = None
         self._cancel_pending = False
@@ -442,6 +448,11 @@ class CaptureOverlay:
         gr이 None(빈 영역을 드래그 없이 클릭)이면 무시한다.
         """
         if gr is None or gr.isEmpty():
+            return
+        if self._select_only:
+            # 자르지 않고 사각형만 넘긴다 — 오버레이를 먼저 닫아 녹화 프레임에 안 잡히게.
+            self._close_all()
+            self.region_selected.emit(QRect(gr))
             return
         pm = self._crop_global(gr)
         self._close_all()

@@ -243,6 +243,7 @@ class PasteInterceptor:
         on_seq_pin: Optional[Callable[[], None]] = None,
         on_capture: Optional[Callable[[], None]] = None,
         on_ask_ai: Optional[Callable[[], None]] = None,
+        on_record_gif: Optional[Callable[[], None]] = None,
     ):
         self.queue = paste_queue
         self.monitor = clipboard_monitor
@@ -257,6 +258,7 @@ class PasteInterceptor:
         self.on_seq_pin = on_seq_pin
         self.on_capture = on_capture
         self.on_ask_ai = on_ask_ai
+        self.on_record_gif = on_record_gif
         self._hook = None
         self._thread: Optional[threading.Thread] = None
         self._hook_thread_id: int = 0
@@ -305,6 +307,11 @@ class PasteInterceptor:
         self._ask_ai_need_ctrl: bool = False
         self._ask_ai_need_shift: bool = False
         self._ask_ai_need_alt: bool = False
+        # GIF 녹화 단축키 (패널 토글과 동일 구조)
+        self._record_vk: int = 0
+        self._record_need_ctrl: bool = False
+        self._record_need_shift: bool = False
+        self._record_need_alt: bool = False
         # 콜백 참조 유지 (GC 방지)
         self._hook_proc = HOOKPROC(self._low_level_keyboard_proc)
 
@@ -399,6 +406,19 @@ class PasteInterceptor:
             self._capture_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._capture_vk = 0
+
+    def set_record_gif_hotkey(self, hotkey_str: str):
+        """GIF 녹화 단축키 설정 — 영역을 드래그로 선택해 라이브로 녹화, GIF로 저장."""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._record_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._record_need_shift = "shift" in parts
+        self._record_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._record_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._record_vk = 0
 
     def set_ask_ai_hotkey(self, hotkey_str: str):
         """AI 자유질문 단축키 설정 — 컨텍스트 없이 즉석에서 AI 질문 입력창을 띄운다."""
@@ -630,6 +650,20 @@ class PasteInterceptor:
                     if self.on_ask_ai:
                         try:
                             self.on_ask_ai()
+                        except Exception:
+                            pass
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
+
+                # GIF 녹화 단축키 감지 (기본 Ctrl+Shift+G)
+                if (self._record_vk and vk_code == self._record_vk
+                        and ctrl_pressed  == self._record_need_ctrl
+                        and shift_pressed == self._record_need_shift
+                        and alt_pressed   == self._record_need_alt):
+                    # 선택 오버레이·정지 컨트롤러가 포그라운드를 잡도록 잠금 해제 (캡처 트리거와 동일)
+                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
+                    if self.on_record_gif:
+                        try:
+                            self.on_record_gif()
                         except Exception:
                             pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)
