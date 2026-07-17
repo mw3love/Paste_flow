@@ -83,6 +83,20 @@ function addMessage(role, text){
   return bubble;
 }
 
+// 답변 본문의 URL을 클릭 가능한 링크로. 모델 출력이라 먼저 HTML 이스케이프(XSS 방지)한 뒤
+// http(s) URL만 <a>로 감싼다. 스트리밍 중엔 평문(textContent)으로 빠르게 찍고, 완료 시 1회 변환.
+function escapeHtml(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function linkify(text){
+  return escapeHtml(text).replace(/(https?:\/\/[^\s<]+)/g, (m) => {
+    let url = m, trail = '';
+    const t = url.match(/[.,)\]}>'"]+$/);   // 문장 끝 구두점은 링크에서 제외
+    if(t){ trail = t[0]; url = url.slice(0, -trail.length); }
+    return `<a href="${url}" target="_blank" rel="noopener">${url}</a>` + trail;
+  });
+}
+
 function addNotice(text, cls){
   const n = document.createElement('div');
   n.className = 'notice ' + (cls||'');
@@ -167,6 +181,7 @@ async function streamChat(bubble){
     }
   }
   bubble.classList.remove('cursor');
+  if(answer) bubble.innerHTML = linkify(answer);   // 완료 후 URL을 클릭 가능하게
   return answer;
 }
 

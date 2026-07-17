@@ -39,12 +39,13 @@ from pasteflow.ocr_engine import _normalize_base_url  # noqa: E402
 
 # ── 설정 ─────────────────────────────────────────────────────────────────────
 # 답변 모델. 게이트웨이 Responses(내장 web_search + 드라이브 커넥터)를 타므로 GPT 계열이어야
-# 한다(supports_responses_api). 기본값 gpt-5.4-nano는 커넥터+스트리밍이 실호출로 검증된
-# 유일한 모델이다 — gpt-5-mini는 이 게이트웨이에서 컨텍스트 윈도가 작아, 커넥터가 큰
-# 문서(예: 137KB CLAUDE.md)를 fetch하면 "context window exceeded"로 깨진다(2026-07-17 실측).
-# 여기서 nano는 '심부름꾼'이 아니라 드라이브를 직접 부르는 '답변 모델'이라 옛 구조보다 낫다.
-# 품질이 부족하면 환경변수로 교체하거나(WEBCHAT_MODEL), 계획의 경로 2(Claude MCP)로 승격.
-MODEL = os.environ.get("WEBCHAT_MODEL", "gpt-5.4-nano")
+# 한다(supports_responses_api). 기본값 gpt-5.2 — 18종 GPT 모델을 137KB 문서(CLAUDE.md)
+# fetch로 실측(2026-07-17)한 결과, nano는 큰 문서에서 컨텍스트가 터졌지만 gpt-5.2/5.1/
+# mini는 멀쩡히 읽었고 그중 5.2가 가장 빨랐다(16.8초). nano보다 추론도 낫다.
+# ⚠ 단 18MB급 초대형 파일(PDF 매뉴얼 등)은 어떤 모델로도 통째로 못 읽는다 — 그건 fetch가
+#   아니라 '파일 안 검색'으로 접근해야 하는 별도 과제다.
+# 품질이 더 필요하면 환경변수로 교체하거나(WEBCHAT_MODEL), 계획의 경로 2(Claude MCP)로 승격.
+MODEL = os.environ.get("WEBCHAT_MODEL", "gpt-5.2")
 
 # 드라이브 검색을 파일목록 패널로 렌더할 도구들 — output이 {"results":[...]} 형태인 것만.
 # fetch(본문 읽기)는 output이 {"content":...}라 목록이 아니므로 제외한다.
@@ -102,12 +103,14 @@ _tokens = gdrive.TokenCache(_gdrive_creds)
 
 app = FastAPI(title="Drive Chatbot")
 
-_INDEX = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+_INDEX_PATH = Path(__file__).parent / "index.html"
 
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
-    return _INDEX
+    # 매 요청마다 읽는다 — 개인용 로컬 서버라 비용이 무의미하고, index.html을 고치면
+    # 서버 재시작 없이 새로고침만으로 반영된다(개발 편의).
+    return _INDEX_PATH.read_text(encoding="utf-8")
 
 
 class ChatRequest(BaseModel):
