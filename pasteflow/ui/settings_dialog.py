@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,
     QStyle, QStyledItemDelegate, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
-    QPlainTextEdit, QInputDialog,
+    QPlainTextEdit, QInputDialog, QTabWidget,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize
 from PyQt6.QtGui import QColor, QFontMetrics
@@ -166,6 +166,38 @@ DIALOG_STYLE = f"""
     }}
     QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
         background: transparent;
+    }}
+    /* 탭 — 어두운 탭 바(밝은 네이티브 타이틀바와 분리) + 활성만 코랄 밑줄 강조.
+       스타일이 없으면 Qt 기본(밝은 회색)이라 타이틀바와 뭉쳐 시인성이 떨어진다. */
+    QTabWidget::pane {{
+        border: 1px solid {_LINE};
+        border-radius: 8px;
+        top: -1px;                 /* 콘텐츠 패널이 탭 바 밑줄과 겹치게 */
+        background: {_PAGE};
+    }}
+    QTabWidget::tab-bar {{
+        left: 6px;
+    }}
+    QTabBar {{
+        background: transparent;
+        qproperty-drawBase: 0;     /* Qt가 그리는 밝은 base strip 제거 */
+    }}
+    QTabBar::tab {{
+        background: transparent;
+        color: {_TITLE};           /* 비활성 = 차분한 회청 */
+        padding: 7px 18px;
+        margin-right: 2px;
+        border: none;
+        border-bottom: 2px solid transparent;
+        font-size: 12px;
+        font-weight: 600;
+    }}
+    QTabBar::tab:hover {{
+        color: {_TXT};
+    }}
+    QTabBar::tab:selected {{
+        color: {COLORS['peach']};              /* 활성 = 코랄 글자 */
+        border-bottom: 2px solid {COLORS['peach']};  /* + 코랄 밑줄 */
     }}
 """
 
@@ -435,34 +467,52 @@ class SettingsDialog(QDialog):
         넘어 오른쪽이 잘렸다). 높이: 고정 높이로 압박하면 word-wrap 라벨의 heightForWidth가
         매 repaint마다 진동해 드래그 시 떨렸다 — 스크롤 영역으로 분리해 해결.
         """
-        content = self._content.sizeHint()
+        # 탭 분리 후: 창 크기는 '가장 큰 탭 페이지'에 맞춘다(넘으면 그 탭이 스크롤).
+        pages = self._tab_pages
+        content_w = max((p.sizeHint().width() for p in pages), default=360)
+        content_h = max((p.sizeHint().height() for p in pages), default=420)
+        tabbar_h = self._tabs.tabBar().sizeHint().height()
         btn_h = self._btn_bar.sizeHint().height()
         screen = self.screen() or QApplication.primaryScreen()
         ag = screen.availableGeometry() if screen else None
         avail_w = ag.width() if ag else 1200
         avail_h = ag.height() if ag else 1000
-        w = min(content.width() + 16, avail_w - 80)   # +16: 세로 스크롤바 여유
-        h = min(content.height() + btn_h + 2, avail_h - 64)
+        w = min(content_w + 24, avail_w - 80)   # +24: 세로 스크롤바 + 탭 프레임 여유
+        h = min(content_h + tabbar_h + btn_h + 8, avail_h - 64)
         self.setFixedSize(max(360, w), max(420, h))
 
     def _setup_ui(self):
-        # 콘텐츠를 스크롤 영역에 담아 창 높이와 분리(고정 높이가 콘텐츠를 압박해
-        # 드래그 시 떨리던 문제 해결). 버튼은 스크롤 밖에 둬 항상 노출.
+        # 설정이 늘며 단일 스크롤이 화면을 넘어, 탭 3개(단축키/AI/일반)로 분리한다.
+        # 창 높이는 _finalize_size가 '가장 큰 탭'에 맞춰 고정하므로 스크롤이 사실상
+        # 사라진다. 버튼 바는 탭 밖에 둬 항상 노출.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        outer.addWidget(scroll, 1)
+        self._tabs = QTabWidget()
+        outer.addWidget(self._tabs, 1)
 
-        self._content = QWidget()
-        scroll.setWidget(self._content)
-        layout = QVBoxLayout(self._content)
-        layout.setSpacing(6)
-        layout.setContentsMargins(16, 12, 16, 12)
+        # 각 탭 페이지(스크롤 안의 콘텐츠 위젯)를 모아 _finalize_size가 가장 큰 것에 맞춘다.
+        self._tab_pages: list[QWidget] = []
+
+        def _make_tab(title: str) -> QVBoxLayout:
+            page = QWidget()
+            pl = QVBoxLayout(page)
+            pl.setSpacing(6)
+            pl.setContentsMargins(16, 12, 16, 12)
+            pl.setAlignment(Qt.AlignmentFlag.AlignTop)  # 짧은 탭은 위로 붙임
+            sc = QScrollArea()
+            sc.setWidgetResizable(True)
+            sc.setFrameShape(QFrame.Shape.NoFrame)
+            sc.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            sc.setWidget(page)
+            self._tabs.addTab(sc, title)
+            self._tab_pages.append(page)
+            return pl
+
+        tab_shortcuts = _make_tab("단축키")
+        tab_ai = _make_tab("AI")
+        tab_general = _make_tab("일반")
 
         # ── 기능 단축키 그룹 (변경 가능) — 아래 기본 단축키 다음에 배치 ──
         # 인식 편의를 위해 4개 하위 묶음을 얇은 구분선으로 분리(쭉 나열 대신 시각 그룹화):
@@ -583,9 +633,9 @@ class SettingsDialog(QDialog):
             info_layout.addWidget(action_lbl, row, 0)
             info_layout.addWidget(key_lbl, row, 1)
 
-        # 배치 순서: 기본 단축키(고정) 먼저, 그다음 기능 단축키(변경 가능)
-        layout.addWidget(info_group)
-        layout.addWidget(hotkey_group)
+        # 배치 순서: 기본 단축키(고정) 먼저, 그다음 기능 단축키(변경 가능) — 「단축키」 탭
+        tab_shortcuts.addWidget(info_group)
+        tab_shortcuts.addWidget(hotkey_group)
 
         _combo_style = (
             f"QComboBox {{ background-color: {_INSET}; color: {_TXT}; "
@@ -653,7 +703,8 @@ class SettingsDialog(QDialog):
         # 🕘·🔀 제거 전례) 텍스트로 둔다.
         self._key_reveal_btn = QPushButton("보기")
         self._key_reveal_btn.setCheckable(True)
-        self._key_reveal_btn.setFixedWidth(40)
+        # 40px는 '보기'/'숨김' 두 글자 + 버튼 패딩에 모자라 글자가 잘렸다 → 56px로.
+        self._key_reveal_btn.setFixedWidth(56)
         self._key_reveal_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._key_reveal_btn.setToolTip("API 키 보기/숨기기")
         self._key_reveal_btn.toggled.connect(self._on_key_reveal_toggled)
@@ -754,10 +805,26 @@ class SettingsDialog(QDialog):
             self._ocr_model_combo, self._ocr_model_probe_status))
         ai_form.addRow(self._model_label, self._stack(
             self._model_combo, self._model_probe_status))
-        ai_form.addRow(self._compare_a_label, self._stack(
+
+        # 모델 2·3(비교용)은 '여러 모델 비교 사용' 체크박스 뒤로 숨긴다 — 평소엔 안 보이게
+        # 해 설정창을 줄인다. 켜져 있을 때만 이 두 행이 뜨고, 저장도 그때만 된다.
+        self._compare_enable_check = QCheckBox("여러 모델 비교 사용 (모델 2·3 추가)")
+        self._compare_enable_check.setToolTip(
+            "켜면 질문창에서 여러 모델로 동시에 물어볼 수 있습니다.\n"
+            "끄면 모델 2·3은 저장되지 않아 질문창의 비교 옵션도 사라집니다.")
+        self._compare_enable_check.toggled.connect(self._on_compare_toggle)
+        ai_form.addRow(self._compare_enable_check)
+
+        self._compare_box = QWidget()
+        cbox = QFormLayout(self._compare_box)
+        cbox.setContentsMargins(0, 0, 0, 0)
+        cbox.setVerticalSpacing(4)
+        cbox.addRow(self._compare_a_label, self._stack(
             self._compare_model_a_combo, self._compare_a_probe_status))
-        ai_form.addRow(self._compare_b_label, self._stack(
+        cbox.addRow(self._compare_b_label, self._stack(
             self._compare_model_b_combo, self._compare_b_probe_status))
+        self._compare_box.setVisible(False)  # 기본 접힘(로드 시 저장값 있으면 펼침)
+        ai_form.addRow(self._compare_box)
 
         # API 연결 테스트 — 모델명 바로 아래에 배치(설명 힌트보다 위). 힌트를 그룹 맨 아래로
         # 내려 워드랩 공간을 넉넉히 확보한다.
@@ -779,48 +846,40 @@ class SettingsDialog(QDialog):
         test_row.addWidget(self._test_status, 1)
         ai_form.addRow("", test_row)
 
-        # ── AI 시스템 프롬프트(멘토 페르소나) 편집 ──
-        # AI 질문·답변의 답변 톤·구조를 정하는 시스템 프롬프트. 비워 두면 기본값
-        # (ocr_engine.AI_SYSTEM_PROMPT)으로 폴백한다. OCR(글자 추출)에는 영향 없음.
-        prompt_header = QHBoxLayout()
-        prompt_header.setContentsMargins(0, 0, 0, 0)
-        prompt_header.setSpacing(8)
-        prompt_label = QLabel("AI 시스템 프롬프트")
-        prompt_label.setStyleSheet(f"color: {_TITLE}; font-weight: 600;")
-        self._reset_ai_prompt_btn = QPushButton("기본값으로 되돌리기")
-        self._reset_ai_prompt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._reset_ai_prompt_btn.setToolTip("입력칸을 PasteFlow 기본 멘토 프롬프트로 되돌립니다.")
-        self._reset_ai_prompt_btn.clicked.connect(self._on_reset_ai_prompt)
-        prompt_header.addWidget(prompt_label)
-        prompt_header.addStretch(1)
-        prompt_header.addWidget(self._reset_ai_prompt_btn)
-        ai_form.addRow(prompt_header)
+        # ── AI 시스템 프롬프트(멘토 페르소나) ──
+        # 답변 톤·구조를 정하는 프롬프트. 크고 드물게 손대므로 별도 편집창으로 접는다.
+        # _ai_prompt_edit은 화면에 안 붙는 '데이터 홀더'다(편집은 _open_prompt_editor 창이
+        # 자기 에디터에 복사해 하고, 확인 시 여기로 되쓴다). _on_save가 이걸 그대로 읽는다.
+        # 비워 두면 엔진이 기본값(ocr_engine.AI_SYSTEM_PROMPT)으로 폴백한다.
+        self._ai_prompt_edit = QPlainTextEdit()  # 홀더 — 레이아웃에 추가하지 않음
+        self._prompt_edit_btn = QPushButton("프롬프트 편집…")
+        self._prompt_edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._prompt_edit_btn.setToolTip(
+            "AI 답변의 톤·구조를 정하는 시스템 프롬프트를 편집합니다.\n"
+            "OCR(글자 추출)에는 영향이 없습니다. 비워 두면 기본값이 적용됩니다.")
+        self._prompt_edit_btn.clicked.connect(self._open_prompt_editor)
+        ai_form.addRow(QLabel("•  AI 시스템 프롬프트:"), self._prompt_edit_btn)
 
-        self._ai_prompt_edit = QPlainTextEdit()
-        self._ai_prompt_edit.setMinimumHeight(120)
-        self._ai_prompt_edit.setMaximumHeight(180)
-        # DIALOG_STYLE은 QLineEdit/QSpinBox만 스타일하므로 QPlainTextEdit엔 입력칸 스타일을
-        # 명시 적용(밝은 글자 + inset 배경) — 안 하면 다크 배경에 검은 글자로 안 보인다.
-        self._ai_prompt_edit.setStyleSheet(
-            f"QPlainTextEdit {{ background-color: {_INSET}; color: {_TXT}; "
-            f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
-            f"QPlainTextEdit:focus {{ border-color: {COLORS['peach']}; }}"
-        )
-        self._ai_prompt_edit.setToolTip(
-            "AI 질문·답변의 답변 방식(멘토 페르소나·답변 구조·형식)을 정합니다.\n"
-            "OCR(글자 추출)에는 영향이 없습니다. 비워 두면 기본값이 적용됩니다."
-        )
-        ai_form.addRow(self._ai_prompt_edit)
+        tab_ai.addWidget(ai_group)
 
-        layout.addWidget(ai_group)
-
-        # ── 구글 드라이브 그룹 (선택) ──
+        # ── 구글 드라이브 (선택) — 접이식, 기본 접힘 ──
         # 연결하면 AI 질의가 내 드라이브 문서를 검색해 근거로 삼는다(읽기 전용).
         # 안 하면 도구가 조용히 빠질 뿐 웹 검색·AI 답변은 그대로 동작한다(우아한 열화).
-        gd_group = QGroupBox("구글 드라이브 (선택)")
-        gd_form = QFormLayout(gd_group)
+        # 자주 안 쓰므로 헤더 클릭으로 펼치는 접이식으로 감춘다(삭제 아님 — 배관·연결 상태 보존).
+        self._gd_toggle = QPushButton("▸  구글 드라이브 (선택)")
+        self._gd_toggle.setCheckable(True)
+        self._gd_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._gd_toggle.setStyleSheet(
+            f"QPushButton {{ text-align:left; border:none; padding:6px 2px; "
+            f"color:{_TITLE}; font-weight:600; background:transparent; }}"
+            f"QPushButton:hover {{ color:{COLORS['peach']}; }}")
+        self._gd_toggle.toggled.connect(self._on_gd_toggle)
+        tab_ai.addWidget(self._gd_toggle)
+
+        self._gd_body = QWidget()
+        gd_form = QFormLayout(self._gd_body)
         gd_form.setVerticalSpacing(4)
-        gd_form.setContentsMargins(10, 8, 10, 8)
+        gd_form.setContentsMargins(10, 4, 10, 8)
 
         gd_desc = QLabel(
             "연결하면 AI가 내 구글 드라이브 문서를 찾아 근거로 답합니다(읽기 전용). "
@@ -860,9 +919,10 @@ class SettingsDialog(QDialog):
         gd_btn_row.addWidget(self._gdrive_status, 1)
         gd_form.addRow("", gd_btn_row)
 
-        layout.addWidget(gd_group)
+        self._gd_body.setVisible(False)  # 기본 접힘(_load_values가 연결돼 있으면 펼침)
+        tab_ai.addWidget(self._gd_body)
 
-        # ── 일반 설정 그룹 ──
+        # ── 일반 설정 그룹 ── 「일반」 탭
         general_group = QGroupBox("일반")
         general_form = QFormLayout(general_group)
         general_form.setVerticalSpacing(4)
@@ -902,12 +962,9 @@ class SettingsDialog(QDialog):
         self._notify_copy_check = QCheckBox("복사 시 우하단 알림 표시")
         general_form.addRow(self._notify_copy_check)
 
-        layout.addWidget(general_group)
+        tab_general.addWidget(general_group)
 
-        # 콘텐츠가 창보다 짧을 때 남는 세로 공간을 아래로 모아 그룹들이 자연 크기 유지
-        layout.addStretch()
-
-        # ── 버튼 바 (스크롤 밖, 항상 노출) ──
+        # ── 버튼 바 (탭 밖, 항상 노출) ──
         self._btn_bar = QWidget()
         btn_layout = QHBoxLayout(self._btn_bar)
         btn_layout.setContentsMargins(16, 8, 16, 12)
@@ -940,8 +997,10 @@ class SettingsDialog(QDialog):
         api_key, base_url = self._creds()
         chat_model = self._model_combo.currentText().strip()
         ocr_model = self._ocr_model_combo.currentText().strip()
-        cmp_a = self._compare_value(self._compare_model_a_combo)  # 질의 모델 2 ("" = 미설정)
-        cmp_b = self._compare_value(self._compare_model_b_combo)  # 질의 모델 3
+        # 비교가 꺼져 있으면 모델 2·3은 테스트하지 않는다(저장도 안 되는 값이라).
+        compare_on = self._compare_enable_check.isChecked()
+        cmp_a = self._compare_value(self._compare_model_a_combo) if compare_on else ""
+        cmp_b = self._compare_value(self._compare_model_b_combo) if compare_on else ""
 
         # (slot, 모델, is_ocr). OCR을 맨 앞에 둔다 — 텍스트 전용 모델 오선택으로 캡처 시
         # 400이 가장 자주 나는 지점이라 결과를 먼저 보여준다.
@@ -1125,6 +1184,13 @@ class SettingsDialog(QDialog):
         # 모델 슬롯 4행 — 캐시된 모델 목록으로 채우고 저장값을 복원한다.
         self._init_model_slots()
         self._init_compare_slots()
+        # 저장된 비교 모델(2·3)이 있으면 체크박스를 켜 그 두 행을 펼친다(setChecked가
+        # _on_compare_toggle을 불러 _compare_box를 보이게 한다). 없으면 접힌 채로.
+        has_compare = bool(
+            (self._settings.get(self.KEY_AI_COMPARE_MODEL_A, "") or "").strip()
+            or (self._settings.get(self.KEY_AI_COMPARE_MODEL_B, "") or "").strip())
+        self._compare_enable_check.setChecked(has_compare)
+        self._compare_box.setVisible(has_compare)
         # API 프로필 — 크리덴셜·모델 칸을 채운 뒤 호출(자동 이관이 그 값을 읽는다).
         self._init_profiles()
 
@@ -1138,6 +1204,8 @@ class SettingsDialog(QDialog):
             self._set_gdrive_status("✓ 연결됨", "ok")
         else:
             self._set_gdrive_status("연결되지 않음 — AI가 드라이브를 검색하지 않습니다.", "run")
+        # 이미 연결돼 있으면 접이식 드라이브 섹션을 펼쳐 상태가 바로 보이게 한다.
+        self._gd_toggle.setChecked(bool(self._gdrive_refresh))
 
         try:
             history_max = int(self._settings.get(self.KEY_HISTORY_MAX, "50"))
@@ -1165,9 +1233,55 @@ class SettingsDialog(QDialog):
         from pasteflow.ocr_engine import AI_SYSTEM_PROMPT
         return AI_SYSTEM_PROMPT
 
-    def _on_reset_ai_prompt(self):
-        """'기본값으로 되돌리기' — 입력칸을 기본 멘토 프롬프트로 채운다."""
-        self._ai_prompt_edit.setPlainText(self._default_ai_prompt())
+    def _open_prompt_editor(self):
+        """[프롬프트 편집…] — 시스템 프롬프트를 별도 창에서 편집한다.
+
+        _ai_prompt_edit(홀더)의 내용을 이 창의 에디터로 복사해 편집하고, [확인]이면
+        되쓴다([취소]면 안 건드림). _on_save는 그대로 _ai_prompt_edit를 읽는다.
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle("AI 시스템 프롬프트 편집")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        v = QVBoxLayout(dlg)
+        desc = QLabel(
+            "AI 답변의 톤·구조를 정하는 프롬프트입니다. 비우면 기본값으로 동작합니다.\n"
+            "OCR(글자 추출)에는 영향이 없습니다.")
+        desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
+        desc.setWordWrap(True)
+        edit = QPlainTextEdit()
+        edit.setPlainText(self._ai_prompt_edit.toPlainText())
+        edit.setMinimumSize(460, 320)
+        edit.setStyleSheet(
+            f"QPlainTextEdit {{ background-color: {_INSET}; color: {_TXT}; "
+            f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
+            f"QPlainTextEdit:focus {{ border-color: {COLORS['peach']}; }}")
+        reset_btn = QPushButton("기본값으로 되돌리기")
+        reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        reset_btn.clicked.connect(lambda: edit.setPlainText(self._default_ai_prompt()))
+        cancel_btn = QPushButton("취소")
+        cancel_btn.clicked.connect(dlg.reject)
+        ok_btn = QPushButton("확인")
+        ok_btn.setObjectName("saveBtn")
+        ok_btn.clicked.connect(dlg.accept)
+        row = QHBoxLayout()
+        row.addWidget(reset_btn)
+        row.addStretch(1)
+        row.addWidget(cancel_btn)
+        row.addWidget(ok_btn)
+        v.addWidget(desc)
+        v.addWidget(edit, 1)
+        v.addLayout(row)
+        if dlg.exec():
+            self._ai_prompt_edit.setPlainText(edit.toPlainText())
+
+    def _on_compare_toggle(self, on: bool):
+        """'여러 모델 비교 사용' — 모델 2·3 행을 펼치거나 접는다."""
+        self._compare_box.setVisible(on)
+
+    def _on_gd_toggle(self, on: bool):
+        """구글 드라이브 접이식 헤더 — 본문 표시/숨김 + 화살표(▸/▾) 전환."""
+        self._gd_body.setVisible(on)
+        self._gd_toggle.setText(("▾" if on else "▸") + "  구글 드라이브 (선택)")
 
     def _creds(self) -> tuple[str, str]:
         """게이트웨이 (api_key, base_url) — 편집칸에서 직접 읽는다."""
@@ -1625,8 +1739,13 @@ class SettingsDialog(QDialog):
         # 모델 4행.
         new_settings[self.KEY_OCR_GEMINI_MODEL_GATEWAY] = self._model_combo.currentText()
         new_settings[self.KEY_OCR_MODEL_GATEWAY] = self._ocr_model_combo.currentText()
-        new_settings[self.KEY_AI_COMPARE_MODEL_A] = self._compare_value(self._compare_model_a_combo)
-        new_settings[self.KEY_AI_COMPARE_MODEL_B] = self._compare_value(self._compare_model_b_combo)
+        # 비교 모델(2·3)은 '여러 모델 비교 사용'이 켜졌을 때만 저장한다 — 꺼져 있으면
+        # 빈 값으로 비워 질문창의 비교 옵션도 함께 사라진다("숨김=미사용"과 일치).
+        compare_on = self._compare_enable_check.isChecked()
+        new_settings[self.KEY_AI_COMPARE_MODEL_A] = (
+            self._compare_value(self._compare_model_a_combo) if compare_on else "")
+        new_settings[self.KEY_AI_COMPARE_MODEL_B] = (
+            self._compare_value(self._compare_model_b_combo) if compare_on else "")
 
         # 구글 드라이브 — secret 2종은 main._SECRET_KEYS가 DPAPI로 암호화해 저장한다.
         new_settings[self.KEY_GDRIVE_CLIENT_ID] = self._gdrive_client_id_edit.text().strip()
