@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,
     QStyle, QStyledItemDelegate, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
-    QPlainTextEdit,
+    QPlainTextEdit, QInputDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize
 from PyQt6.QtGui import QColor, QFontMetrics
@@ -335,6 +335,13 @@ class SettingsDialog(QDialog):
     KEY_AI_COMPARE_MODEL_B = "ai_compare_model_b"
     # AI 질의 시스템 프롬프트(멘토 페르소나). 빈 값이면 ocr_engine.AI_SYSTEM_PROMPT로 폴백.
     KEY_AI_SYSTEM_PROMPT = "ai_system_prompt"
+    # API 프로필 — 이름 붙인 크리덴셜 세트(라벨+base_url+키+모델+캐시)의 목록.
+    # 여러 API(구글 직결·게이트웨이 계정 여러 개)를 드롭다운으로 전환하기 위한 것.
+    # 엔진이 읽는 "라이브" 키(KEY_OCR_GEMINI_*)는 그대로 두고, 프로필 선택 = 그 값을
+    # 라이브 칸에 채우는 것뿐이다(엔진 변경 0). 프로필 묶음은 api_key를 품으므로
+    # main._SECRET_KEYS에 등록돼 JSON 통째로 DPAPI 암호화된다.
+    KEY_AI_PROFILES = "ai_profiles"           # JSON list, DPAPI 암호화(통째)
+    KEY_AI_ACTIVE_PROFILE = "ai_active_profile"  # 마지막 선택 라벨(평문)
     # 구글 드라이브 OAuth(선택) — 연결하면 AI가 내 드라이브 문서를 검색해 근거로 삼는다.
     # client_secret·refresh_token은 main._SECRET_KEYS에 등록돼 DPAPI로 암호화 저장된다.
     KEY_GDRIVE_CLIENT_ID = "gdrive_client_id"
@@ -359,6 +366,10 @@ class SettingsDialog(QDialog):
         self._settings = dict(current_settings)
         # _setup_ui가 콤보에 거는 currentTextChanged 핸들러가 곧바로 읽으므로 먼저 초기화.
         self._probe_run_id = 0
+        # API 프로필 상태. _loading_profiles는 콤보를 프로그램이 채우는 동안 사용자
+        # 선택 핸들러(_on_profile_selected)가 오발동하지 않게 막는 가드.
+        self._profiles: list[dict] = []
+        self._loading_profiles = False
         self._setup_window()
         self._setup_ui()
         self._load_values()
@@ -585,19 +596,20 @@ class SettingsDialog(QDialog):
         # ── AI 연동 그룹 (Gemini / Mindlogic API) ──
         # OCR(텍스트 인식)과 AI 답변(우클릭 'AI에게 질문')이 동일 API를 공유한다.
         # OCR은 별도 엔진 선택 없이 이 API로 처리하므로(WinRT 제거) 항상 키가 필요하다.
-        ai_group = QGroupBox("AI 연동 (Gemini / Mindlogic API)")
+        ai_group = QGroupBox("AI 연동 (API 프로필)")
         self._ai_form = QFormLayout(ai_group)
         ai_form = self._ai_form
         ai_form.setVerticalSpacing(4)
         ai_form.setContentsMargins(10, 8, 10, 8)
 
-        ai_desc = QLabel("AI 호출 및 AI OCR 사용 시 필수 입력.")
+        ai_desc = QLabel(
+            "AI 호출·AI OCR에 쓸 API. 여러 API(구글 직결·게이트웨이 계정)를 프로필로 저장해\n"
+            "드롭다운으로 전환합니다.")
         ai_desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
         ai_desc.setWordWrap(True)
         ai_form.addRow(ai_desc)
 
-        # 크리덴셜 — Mindlogic 게이트웨이 한 벌뿐이다(v1.50.0에서 Google AI Studio 제거).
-        # 크리덴셜 섹션과 모델 섹션은 얇은 구분선으로 나눈다(기능 단축키 그룹과 같은 방식).
+        # 섹션 구분선(프로필 ↔ 크리덴셜 ↔ 모델). 프로필 행이 이미 이걸 쓰므로 여기서 정의.
         def _ai_sep() -> QFrame:
             line = QFrame()
             line.setFrameShape(QFrame.Shape.HLine)
@@ -606,9 +618,45 @@ class SettingsDialog(QDialog):
             line.setFixedHeight(1)
             return line
 
+        # 프로필 행 — 이름 붙인 크리덴셜 세트를 고르면 아래 키·URL·모델이 한 번에 채워진다.
+        self._profile_combo = QComboBox()  # editable 아님(모델 콤보와 달리 라벨 선택기)
+        self._profile_combo.setStyleSheet(_combo_style)
+        self._profile_combo.setToolTip(
+            "저장한 API 프로필. 고르면 API 키·Base URL·모델이 그 프로필 값으로 채워지고\n"
+            "자동으로 연결 테스트가 실행됩니다.")
+        self._profile_combo.currentIndexChanged.connect(self._on_profile_selected)
+        self._profile_save_btn = QPushButton("+ 저장")
+        self._profile_save_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._profile_save_btn.setToolTip("지금 입력한 키·URL·모델을 이름 붙여 새 프로필로 저장")
+        self._profile_save_btn.clicked.connect(self._on_profile_save)
+        self._profile_delete_btn = QPushButton("삭제")
+        self._profile_delete_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._profile_delete_btn.setToolTip("선택한 프로필 삭제 ([저장]을 눌러야 최종 반영)")
+        self._profile_delete_btn.clicked.connect(self._on_profile_delete)
+        prof_row = QHBoxLayout()
+        prof_row.setContentsMargins(0, 0, 0, 0)
+        prof_row.setSpacing(4)
+        prof_row.addWidget(self._profile_combo, 1)
+        prof_row.addWidget(self._profile_save_btn)
+        prof_row.addWidget(self._profile_delete_btn)
+        ai_form.addRow(QLabel("•  API 프로필:"), prof_row)
+
+        ai_form.addRow(_ai_sep())  # 프로필 ↔ 크리덴셜 구분
+
+        # 크리덴셜 — 프로필로 전환하는 (API 키 + Base URL) 한 벌. 게이트웨이든 구글 직결이든
+        # OpenAI 호환 경로라 base_url만 바꾸면 된다(구글: .../v1beta/openai).
         self._gateway_key_edit = QLineEdit()
         self._gateway_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._gateway_key_edit.setPlaceholderText("Mindlogic API 키")
+        self._gateway_key_edit.setPlaceholderText("API 키 (구글 또는 게이트웨이)")
+        # 키 보기 토글 — Password↔평문. 3개 프로필을 오갈 때 '무슨 키가 들었나' 확인용.
+        # ⚠ 이모지(👁)는 Qt 컬러 이모지 폴백으로 버튼에서 깨져 렌더되므로(ai_query.py의
+        # 🕘·🔀 제거 전례) 텍스트로 둔다.
+        self._key_reveal_btn = QPushButton("보기")
+        self._key_reveal_btn.setCheckable(True)
+        self._key_reveal_btn.setFixedWidth(40)
+        self._key_reveal_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._key_reveal_btn.setToolTip("API 키 보기/숨기기")
+        self._key_reveal_btn.toggled.connect(self._on_key_reveal_toggled)
         self._refresh_btn = QPushButton()
         # Qt 내장 표준 아이콘 — 폰트 의존성 없이 모든 환경에서 보장
         self._refresh_btn.setIcon(
@@ -623,12 +671,15 @@ class SettingsDialog(QDialog):
         gw_row.setContentsMargins(0, 0, 0, 0)
         gw_row.setSpacing(4)
         gw_row.addWidget(self._gateway_key_edit, 1)
+        gw_row.addWidget(self._key_reveal_btn)
         gw_row.addWidget(self._refresh_btn)
-        ai_form.addRow(QLabel("•  Mindlogic API 키:"), gw_row)
+        ai_form.addRow(QLabel("•  API 키:"), gw_row)
 
         self._base_url_edit = QLineEdit()
-        self._base_url_edit.setPlaceholderText("예: https://factchat-cloud.mindlogic.ai/v1/gateway")
-        ai_form.addRow(QLabel("•  Mindlogic Base URL:"), self._base_url_edit)
+        self._base_url_edit.setPlaceholderText(
+            "구글: https://generativelanguage.googleapis.com/v1beta/openai"
+            "  /  게이트웨이: https://…mindlogic.ai/v1/gateway")
+        ai_form.addRow(QLabel("•  Base URL:"), self._base_url_edit)
 
         ai_form.addRow(_ai_sep())  # 크리덴셜 ↔ 모델 섹션 구분(OCR 모델 위)
 
@@ -1074,6 +1125,8 @@ class SettingsDialog(QDialog):
         # 모델 슬롯 4행 — 캐시된 모델 목록으로 채우고 저장값을 복원한다.
         self._init_model_slots()
         self._init_compare_slots()
+        # API 프로필 — 크리덴셜·모델 칸을 채운 뒤 호출(자동 이관이 그 값을 읽는다).
+        self._init_profiles()
 
         # 구글 드라이브 — refresh token은 화면에 안 띄운다(비밀이고 사용자가 볼 일도 없다).
         # 있으면 "연결됨"으로만 알린다.
@@ -1119,6 +1172,139 @@ class SettingsDialog(QDialog):
     def _creds(self) -> tuple[str, str]:
         """게이트웨이 (api_key, base_url) — 편집칸에서 직접 읽는다."""
         return self._gateway_key_edit.text().strip(), self._base_url_edit.text().strip()
+
+    def _on_key_reveal_toggled(self, on: bool):
+        """'보기' 토글 — API 키를 평문↔●●● 전환."""
+        self._gateway_key_edit.setEchoMode(
+            QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password)
+        self._key_reveal_btn.setText("숨김" if on else "보기")
+
+    # ── API 프로필 ─────────────────────────────────────────────────────────────
+    # 프로필 = 이름 붙인 (base_url + api_key + 모델 선택 + 모델 캐시) 스냅샷.
+    # 엔진이 읽는 라이브 키는 안 건드리고, 프로필 선택 = 그 값을 UI 칸에 채우는 것뿐이다.
+    def _guess_profile_label(self, base_url: str) -> str:
+        """base_url로 프로필 이름을 추정한다(자동 이관·[+저장] 기본값)."""
+        u = (base_url or "").lower()
+        if "generativelanguage" in u or "googleapis" in u:
+            return "구글"
+        if "mindlogic" in u:
+            return "마인드로직"
+        return "프로필 1"
+
+    def _capture_current_profile(self, label: str) -> dict:
+        """현재 UI 6칸 + 모델 캐시를 프로필 dict로 스냅샷."""
+        api_key, base_url = self._creds()
+        return {
+            "label": label,
+            "base_url": base_url,
+            "api_key": api_key,
+            "model": self._model_combo.currentText().strip(),
+            "ocr_model": self._ocr_model_combo.currentText().strip(),
+            "compare_a": self._compare_value(self._compare_model_a_combo),
+            "compare_b": self._compare_value(self._compare_model_b_combo),
+            "model_cache": self._cached_models(),
+        }
+
+    def _init_profiles(self):
+        """저장된 프로필을 로드하고 드롭다운을 채운다(_load_values에서 크리덴셜·모델
+        칸을 채운 *뒤* 호출 — 자동 이관이 그 값을 읽는다)."""
+        import json
+        self._profiles = []
+        raw = self._settings.get(self.KEY_AI_PROFILES, "")
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, list):
+                    self._profiles = [
+                        p for p in data if isinstance(p, dict) and p.get("label")]
+            except (json.JSONDecodeError, ValueError, TypeError):
+                self._profiles = []
+        # 자동 이관 — 저장된 프로필이 없는데 지금 쓰는 크리덴셜이 있으면, 그것을 첫
+        # 프로필로 시드해 기존 설정이 안 날아가게 한다(이름은 base_url로 추정).
+        if not self._profiles:
+            api_key, base_url = self._creds()
+            if api_key or base_url:
+                self._profiles = [
+                    self._capture_current_profile(self._guess_profile_label(base_url))]
+        self._populate_profile_combo(self._settings.get(self.KEY_AI_ACTIVE_PROFILE, ""))
+
+    def _populate_profile_combo(self, active_label: str = ""):
+        """드롭다운을 프로필 라벨로 채운다. _loading_profiles 가드로 선택 핸들러
+        오발동을 막는다(로드 시 자동 연결 테스트가 튀지 않게)."""
+        self._loading_profiles = True
+        try:
+            self._profile_combo.clear()
+            for p in self._profiles:
+                self._profile_combo.addItem(p["label"])
+            if self._profiles:
+                idx = self._profile_combo.findText(active_label) if active_label else -1
+                self._profile_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        finally:
+            self._loading_profiles = False
+        self._profile_delete_btn.setEnabled(bool(self._profiles))
+
+    def _apply_profile(self, prof: dict):
+        """프로필 값을 UI 6칸 + 모델 캐시에 채운다(선택·저장 안 함)."""
+        import json
+        self._gateway_key_edit.setText(prof.get("api_key", ""))
+        self._base_url_edit.setText(prof.get("base_url", ""))
+        cache = prof.get("model_cache", []) or []
+        self._settings[self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY] = json.dumps(cache)
+        self._refill_model_slots(sorted(set(cache)))
+        # 모델 선택 복원 — _refill_model_slots가 현재 텍스트를 보존하므로 명시 재설정.
+        self._model_combo.setCurrentText(prof.get("model", ""))
+        self._ocr_model_combo.setCurrentText(
+            prof.get("ocr_model", "") or prof.get("model", ""))
+        self._set_compare_text(self._compare_model_a_combo, prof.get("compare_a", ""))
+        self._set_compare_text(self._compare_model_b_combo, prof.get("compare_b", ""))
+
+    def _set_compare_text(self, combo: QComboBox, val: str):
+        """비교 콤보에 값 설정 — 빈 값이면 '(사용 안 함)'으로."""
+        val = (val or "").strip()
+        if not val:
+            idx = combo.findText(self._COMPARE_UNUSED)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            return
+        idx = combo.findText(val)
+        combo.setCurrentIndex(idx) if idx >= 0 else combo.setCurrentText(val)
+
+    def _on_profile_selected(self, idx: int):
+        """드롭다운에서 프로필을 고름 → 값 채우고 자동 연결 테스트."""
+        if self._loading_profiles or idx < 0 or idx >= len(self._profiles):
+            return
+        self._apply_profile(self._profiles[idx])
+        self._on_test_api()  # 전환 직후 자동 연결 테스트
+
+    def _on_profile_save(self):
+        """[+ 저장] — 현재 입력값을 이름 붙여 프로필로 저장(같은 이름이면 갱신)."""
+        cur = self._profile_combo.currentText() if self._profiles else ""
+        default = cur or self._guess_profile_label(self._base_url_edit.text())
+        name, ok = QInputDialog.getText(self, "프로필 저장", "프로필 이름:", text=default)
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            return
+        prof = self._capture_current_profile(name)
+        for i, p in enumerate(self._profiles):
+            if p["label"] == name:
+                self._profiles[i] = prof
+                break
+        else:
+            self._profiles.append(prof)
+        self._populate_profile_combo(name)
+        self._set_status(
+            f"✓ 프로필 '{name}' 저장 — 하단 [저장]을 눌러야 최종 적용됩니다.", ok=True)
+
+    def _on_profile_delete(self):
+        """[삭제] — 선택 프로필 제거([저장] 시 DB 반영)."""
+        idx = self._profile_combo.currentIndex()
+        if idx < 0 or idx >= len(self._profiles):
+            return
+        label = self._profiles[idx]["label"]
+        del self._profiles[idx]
+        self._populate_profile_combo()
+        self._set_status(f"프로필 '{label}' 삭제 — 하단 [저장] 시 반영됩니다.")
 
     def _cached_models(self) -> list[str]:
         """모델 캐시(JSON list)를 파싱해 모델명 목록 반환. 없으면 빈 목록."""
@@ -1409,6 +1595,7 @@ class SettingsDialog(QDialog):
 
     def _on_save(self):
         """저장 버튼 클릭 — 레지스트리 등록은 main._on_settings_changed에서 처리."""
+        import json
         auto_start = self._auto_start_check.isChecked()
 
         new_settings = {
@@ -1450,5 +1637,11 @@ class SettingsDialog(QDialog):
         cache_key = self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY
         if cache_key in self._settings:
             new_settings[cache_key] = self._settings[cache_key]
+
+        # API 프로필 목록 + 마지막 선택 라벨. ai_profiles는 api_key를 품으므로
+        # main._SECRET_KEYS가 JSON 통째로 DPAPI 암호화한다.
+        new_settings[self.KEY_AI_PROFILES] = json.dumps(self._profiles, ensure_ascii=False)
+        new_settings[self.KEY_AI_ACTIVE_PROFILE] = self._profile_combo.currentText()
+
         self.settings_changed.emit(new_settings)
         self.accept()

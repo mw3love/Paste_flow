@@ -545,6 +545,9 @@ _SECRET_KEYS = frozenset({
     # client_id(`gdrive_client_id`)는 비밀이 아니라 평문으로 둔다(구글도 공개 취급).
     "gdrive_client_secret",
     "gdrive_refresh_token",
+    # API 프로필 묶음 — JSON 안에 각 프로필의 api_key가 들어 있어 통째로 비밀이다.
+    # 설정창엔 _get_secret으로 복호화해 넘기고, 저장 시 crypto.protect가 JSON 전체를 암호화.
+    "ai_profiles",
 })
 
 # 과거 빌드의 잔재로 DB에 남았으나 현재 코드 어디서도 참조하지 않는 고아 키.
@@ -2708,6 +2711,9 @@ class PasteFlowApp:
             "ai_compare_model_a": self.db.get_setting("ai_compare_model_a", ""),
             "ai_compare_model_b": self.db.get_setting("ai_compare_model_b", ""),
             "ai_system_prompt": self.db.get_setting("ai_system_prompt", ""),
+            # API 프로필 — 묶음은 api_key를 품어 DPAPI 암호화돼 있으므로 복호화해 넘긴다.
+            "ai_profiles": self._get_secret("ai_profiles"),
+            "ai_active_profile": self.db.get_setting("ai_active_profile", ""),
             # 구글 드라이브 OAuth — secret 2종은 DPAPI 복호화, client_id는 평문.
             "gdrive_client_id": self.db.get_setting("gdrive_client_id", ""),
             "gdrive_client_secret": self._get_secret("gdrive_client_secret"),
