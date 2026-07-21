@@ -83,6 +83,10 @@ _user32.IsIconic.argtypes = [wintypes.HWND]
 _user32.IsIconic.restype = wintypes.BOOL
 _user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(_RECT)]
 _user32.GetWindowRect.restype = wintypes.BOOL
+_user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(_RECT)]
+_user32.GetClientRect.restype = wintypes.BOOL
+_user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(_POINT)]
+_user32.ClientToScreen.restype = wintypes.BOOL
 _dwmapi.DwmGetWindowAttribute.argtypes = [
     wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
 _dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long  # HRESULT
@@ -109,6 +113,25 @@ def _visible_rect(hwnd) -> _RECT | None:
             and r2.right > r2.left and r2.bottom > r2.top:
         return r2
     return None
+
+
+def _client_rect_screen(hwnd) -> _RECT | None:
+    """hwnd 클라이언트 영역의 화면 사각형(물리 픽셀 _RECT). 실패 시 None.
+
+    GetClientRect(원점 0,0 기준 크기) + ClientToScreen(원점을 화면 좌표로)로 조립한다.
+    DPI-aware 프로세스에서 둘 다 물리 픽셀이라 커서(GetCursorPos)·창(DWM) 좌표계와 일치.
+    이 사각형 '밖'이면 커서가 비클라이언트(제목표시줄·창 테두리) 위 = 창 전체 스냅 신호.
+    """
+    rc = _RECT()
+    if not _user32.GetClientRect(hwnd, ctypes.byref(rc)):
+        return None
+    org = _POINT(0, 0)
+    if not _user32.ClientToScreen(hwnd, ctypes.byref(org)):
+        return None
+    w, h = rc.right - rc.left, rc.bottom - rc.top
+    if w <= 0 or h <= 0:
+        return None
+    return _RECT(org.x, org.y, org.x + w, org.y + h)
 
 
 def _enum_top_windows(exclude: set[int]) -> list[tuple[int, int, int, int, int]]:
@@ -419,17 +442,26 @@ class CaptureOverlay:
             return None
         _hwnd, wl, wt, wr, wb = hit
         win_rect = QRect(wl, wt, wr - wl, wb - wt)  # 얼려둔 창 사각형은 이미 DWM 확장프레임(비가시 테두리 제외)
-        try:
-            rect_phys = uia.rect_in_window_at(_hwnd, px, py)
-        except Exception:
-            rect_phys = None
-        if rect_phys is None:
-            rect_phys = win_rect  # 크롬 웹 본문 등 MSAA가 요소를 안 주는 영역 → 창 전체 스냅
+        # 커서가 비클라이언트(제목표시줄·창 테두리) 위면 요소 하강 없이 창 전체로 스냅한다
+        # → Snipaste처럼 "상단바 위 = 제목표시줄 포함 창 통째로". 이 판정은 MSAA가 그 자리에서
+        #   무엇을 짚든(캡션 띠·시스템 버튼·창 루트) 무관하게 구성상 항상 옳다. 요소 스냅은
+        #   클라이언트 영역 안에서만(내용 위) 일어난다.
+        cr = _client_rect_screen(_hwnd)
+        in_client = cr is not None and cr.left <= px < cr.right and cr.top <= py < cr.bottom
+        if not in_client:
+            rect_phys = win_rect
         else:
-            # 요소는 담긴 창보다 클 수 없다 — 오버사이즈 rect가 창 밖으로 삐져나가지 않게 클램프.
-            rect_phys = rect_phys.intersected(win_rect)
-            if rect_phys.isEmpty():
-                rect_phys = win_rect
+            try:
+                rect_phys = uia.rect_in_window_at(_hwnd, px, py)
+            except Exception:
+                rect_phys = None
+            if rect_phys is None:
+                rect_phys = win_rect  # 크롬 웹 본문 등 MSAA가 요소를 안 주는 영역 → 창 전체 스냅
+            else:
+                # 요소는 담긴 창보다 클 수 없다 — 오버사이즈 rect가 창 밖으로 삐져나가지 않게 클램프.
+                rect_phys = rect_phys.intersected(win_rect)
+                if rect_phys.isEmpty():
+                    rect_phys = win_rect
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         if screen is None:
             return None
