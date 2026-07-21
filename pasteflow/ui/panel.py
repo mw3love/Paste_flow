@@ -1099,15 +1099,15 @@ class ClipboardPanel(QWidget):
             )
 
         if item_id in self._queue_item_ids:
-            queue_action = menu.addAction("큐 해제\tAlt+C")
+            queue_action = menu.addAction("큐 해제\tC")
             queue_action.triggered.connect(lambda: self.queue_deselect_requested.emit(item_id))
         else:
-            queue_action = menu.addAction("큐에 추가\tAlt+C")
+            queue_action = menu.addAction("큐에 추가\tC")
             queue_action.triggered.connect(lambda: self.queue_select_requested.emit(item_id))
 
         menu.addSeparator()
 
-        copy_action = menu.addAction("복사\tC")
+        copy_action = menu.addAction("복사\tCtrl+C")
         copy_action.triggered.connect(lambda: self._do_copy(item))
 
         if item.content_type == "image":
@@ -1523,15 +1523,16 @@ class ClipboardPanel(QWidget):
             event.accept()
             return
 
-        # ── 복사: c 또는 Ctrl+C (단일 복사 / 다중 결합 복사) ──
-        #    복사를 자주 써서 단일 키 c도 함께 배정. 큐 토글은 Alt+C로 분리(아래).
-        if key == Qt.Key.Key_C and not mods & Qt.KeyboardModifier.AltModifier:
+        # ── 복사: Ctrl+C (단일 복사 / 다중 결합 복사) ──
+        if key == Qt.Key.Key_C and mods & Qt.KeyboardModifier.ControlModifier:
             self._kbd_copy()
             event.accept()
             return
 
-        # ── Alt+C: 포커스 항목 큐에 추가/해제 토글 ──
-        if key == Qt.Key.Key_C and mods & Qt.KeyboardModifier.AltModifier:
+        # ── c: 포커스 항목 큐에 추가/해제 토글 (수정자 없는 단일키) ──
+        if key == Qt.Key.Key_C and not mods & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.AltModifier):
             self._kbd_queue_toggle()
             event.accept()
             return
@@ -1599,7 +1600,7 @@ class ClipboardPanel(QWidget):
             self.preview_text_requested.emit(item.id)
 
     def _kbd_copy(self):
-        """c / Ctrl+C: 단일 복사, 다중 선택이면 결합 복사"""
+        """Ctrl+C: 단일 복사, 다중 선택이면 결합 복사"""
         if len(self._selected_ids) > 1:
             combined = self._combine_selected_items()
             if combined:
@@ -1610,7 +1611,7 @@ class ClipboardPanel(QWidget):
                 self._do_copy(item)
 
     def _kbd_queue_toggle(self):
-        """Alt+C: 포커스 항목 큐 추가/해제 토글 — 앵커 항목이면 해제, 아니면 교체"""
+        """c: 포커스 항목 큐 추가/해제 토글 — 앵커 항목이면 해제, 아니면 교체"""
         if self._kbd_focus_id is None:
             return
         if self._queue_item_ids and self._kbd_focus_id == self._queue_item_ids[0]:
