@@ -319,7 +319,7 @@ paste_queue_done → _on_paste_queue_done(): _clear_queue_ui() + PasteHud.finish
 2. **키 이벤트를 먹는(consume) 방식으로 구현하지 않는다** — 키를 가로채고 대신 붙여넣기를 실행하는 방식은 타이밍 문제를 일으킴.
 3. **패널 드래그에 `QDrag`(OLE D&D)를 사용하지 않는다** — `Qt.WindowType.Tool | WindowStaysOnTopHint` 창에서 Windows OLE 등록이 불완전해 모든 드롭 대상에 금지커서가 표시됨.
 4. **드래그 붙여넣기에 백그라운드 스레드에서 `SetForegroundWindow` + `SendInput(Ctrl+V)` 조합을 사용하지 않는다** — 백그라운드 스레드에서 Windows 포그라운드 잠금에 막혀 실패함. **예외**: Qt 메인 스레드에서 `AttachThreadInput`으로 포그라운드 잠금을 우회하는 경우, Electron/Chromium 앱 전용 fallback으로 허용한다.
-5. **OCR 결과를 클립보드에 넣을 때 `_self_triggered` 플래그 설정을 누락하지 않는다** — `interceptor._set_clipboard(item)` 호출이 내부적으로 `monitor.set_self_triggered(0.5)`를 처리하므로 반드시 이 경로를 사용할 것. 직접 `win32clipboard`를 쓰면 클립보드 모니터가 재감지해 동일 항목이 큐에 중복 추가됨.
+5. **OCR 결과를 클립보드에 넣을 때 `_self_triggered` 플래그 설정을 누락하지 않는다** — `interceptor._set_clipboard(item)` 호출이 내부적으로 `monitor.mark_self_write(item)`를 처리하므로 반드시 이 경로를 사용할 것. 직접 `win32clipboard`를 쓰면 클립보드 모니터가 재감지해 동일 항목이 큐에 중복 추가됨. `mark_self_write`는 **시간창(0.5초 `_ignore_until`)과 해시 백스톱(`_last_hash`)을 함께** 건다 — 직접 저장 경로(`_persist_clipboard_item`)는 `_last_hash`를 갱신하지 않아, 늦게 도착한 `WM_CLIPBOARDUPDATE`가 0.5초 창을 넘기면 해시 방어가 무력이라 히스토리에 이중 저장됐다(Alt+F2 캡처 등에서 간헐 재현). `mark_self_write`가 쓴 항목의 해시를 미리 등록해 늦은 이벤트도 걸러낸다.
 6. 요청하지 않은 기능 임의 추가 또는 수정.
 7. 여러 기능 동시 구현.
 8. TDD 대상 모듈에서 테스트 없이 구현.

@@ -836,7 +836,9 @@ class PasteInterceptor:
             return
 
         if self.monitor:
-            self.monitor.set_self_triggered(0.5)
+            # 시간창 + 해시 백스톱을 함께 건다 — 늦게 도착한 WM_CLIPBOARDUPDATE가
+            # 0.5초 창을 넘겨도 해시로 걸러져 이중 저장을 막는다(Alt+F2 캡처 등 직접 저장 경로).
+            self.monitor.mark_self_write(item)
 
         try:
             _user32.EmptyClipboard()

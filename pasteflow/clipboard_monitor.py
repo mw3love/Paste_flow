@@ -110,6 +110,19 @@ class ClipboardMonitor:
         with self._lock:
             self._ignore_until = time.monotonic() + duration
 
+    def mark_self_write(self, item: ClipboardItem, duration: float = 0.5):
+        """자체 클립보드 쓰기 — 시간창 + 해시 백스톱을 함께 건다.
+
+        set_self_triggered의 시간창(0.5초)은 WM_CLIPBOARDUPDATE가 그 안에 도착해야
+        효력이 있는데, 대용량 이미지 쓰기·이벤트 배달 지연으로 늦게 오면 만료돼 뚫린다.
+        그때 직접 저장 경로(_persist_clipboard_item)는 _last_hash를 안 갱신해 해시 방어도
+        무력이라 같은 항목이 히스토리에 두 번 저장됐다(Alt+F2 캡처 이중 저장의 원인).
+        여기서 _last_hash를 함께 세팅해, 늦은 이벤트가 시간창을 넘겨도 해시로 걸러지게 한다.
+        """
+        with self._lock:
+            self._ignore_until = time.monotonic() + duration
+            self._last_hash = self._compute_hash(item)
+
     def start(self):
         """클립보드 리스너 등록 (숨겨진 윈도우 생성)"""
         if self._running:
