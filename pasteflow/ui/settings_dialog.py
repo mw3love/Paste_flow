@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize
 from PyQt6.QtGui import QColor, QFontMetrics
 
-from pasteflow.ui.theme import COLORS, PEACH_HOVER, check_icon_url
+from pasteflow.ui.theme import COLORS, PEACH_HOVER, check_icon_url, chevron_icon_url
 
 
 # 모델 콤보에서 "이 행은 계열 헤더" 표시용 커스텀 role. 들여쓰기 델리게이트가 읽는다.
@@ -65,6 +65,8 @@ _TXT = "#d4d4d4"        # 본문 글자
 _TITLE = "#9aa0b0"      # 그룹 제목(차분한 회청)
 
 _CHECK_ICON = check_icon_url()   # 켜진 체크박스에 그릴 코랄 ✓ (아웃라인 방식)
+_CHEV_UP = chevron_icon_url("up")     # 스핀박스 상하 버튼 셰브론(중립)
+_CHEV_DN = chevron_icon_url("down")
 
 DIALOG_STYLE = f"""
     QDialog {{
@@ -103,6 +105,40 @@ DIALOG_STYLE = f"""
     }}
     QLineEdit:focus, QSpinBox:focus {{
         border-color: {COLORS['peach']};
+    }}
+    QLineEdit:hover, QSpinBox:hover {{
+        border-color: {COLORS['peach']};
+    }}
+    /* 스핀박스 상하 버튼 — 네이티브 기본(밝은 화살표 + 버튼 위 I빔 커서) 대신
+       중립 셰브론. 버튼을 명시적으로 스타일링하면 내부 라인에디트가 버튼 영역을
+       덮지 않게 재계산돼 I빔 커서가 버튼 위로 새던 문제도 사라진다(실측). */
+    QSpinBox::up-button {{
+        subcontrol-origin: border;
+        subcontrol-position: top right;
+        width: 20px;
+        border: none;
+        border-left: 1px solid {_LINE};
+        border-top-right-radius: 5px;
+        background: transparent;
+    }}
+    QSpinBox::down-button {{
+        subcontrol-origin: border;
+        subcontrol-position: bottom right;
+        width: 20px;
+        border: none;
+        border-left: 1px solid {_LINE};
+        border-bottom-right-radius: 5px;
+        background: transparent;
+    }}
+    QSpinBox::up-arrow {{
+        image: url("{_CHEV_UP}");
+        width: 9px;
+        height: 9px;
+    }}
+    QSpinBox::down-arrow {{
+        image: url("{_CHEV_DN}");
+        width: 9px;
+        height: 9px;
     }}
     QCheckBox {{
         color: {_TXT};
@@ -205,6 +241,23 @@ DIALOG_STYLE = f"""
         border-bottom: 2px solid {COLORS['peach']};  /* + 코랄 밑줄 */
     }}
 """
+
+
+def _bullet_checkbox_row(checkbox: QCheckBox) -> QWidget:
+    """체크박스를 '•' 불릿과 밀착 배치한 행으로 감싼다. 불릿 있는 다른 옵션 행
+    (「•  히스토리 최대 개수」 등)과 같은 열에 정렬돼, 체크박스가 위 항목의
+    하위처럼 보이지 않고 독립 항목으로 읽히게 한다."""
+    row = QWidget()
+    row.setStyleSheet("background: transparent;")   # 컨테이너가 카드보다 어두운 기본 배경을 칠하지 않게
+    h = QHBoxLayout(row)
+    h.setContentsMargins(0, 0, 0, 0)
+    h.setSpacing(6)
+    bullet = QLabel("•")
+    bullet.setStyleSheet(f"color: {_TXT}; background: transparent;")
+    h.addWidget(bullet)
+    h.addWidget(checkbox)
+    h.addStretch()
+    return row
 
 
 class HotkeyEdit(QPushButton):
@@ -653,6 +706,7 @@ class SettingsDialog(QDialog):
             f"QComboBox {{ background-color: {_INSET}; color: {_TXT}; "
             f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
             f"QComboBox:focus {{ border-color: {COLORS['peach']}; }}"
+            f"QComboBox:hover {{ border-color: {COLORS['peach']}; }}"
         )
 
         # ── AI 연동 그룹 (Gemini / Mindlogic API) ──
@@ -973,10 +1027,10 @@ class SettingsDialog(QDialog):
         general_form.addRow("•  캡처 저장 폴더:", folder_row)
 
         self._auto_start_check = QCheckBox("Windows 시작 시 자동 실행")
-        general_form.addRow(self._auto_start_check)
+        general_form.addRow(_bullet_checkbox_row(self._auto_start_check))
 
         self._notify_copy_check = QCheckBox("복사 시 우하단 알림 표시")
-        general_form.addRow(self._notify_copy_check)
+        general_form.addRow(_bullet_checkbox_row(self._notify_copy_check))
 
         tab_general.addWidget(general_group)
 

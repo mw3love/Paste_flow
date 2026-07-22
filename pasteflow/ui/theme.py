@@ -37,27 +37,48 @@ COLORS = {
 }
 
 
-def check_icon_url() -> str:
-    """켜진 체크박스에 그릴 코랄 체크마크(✓) SVG를 로컬 assets에 쓰고,
-    QSS `image: url(...)`에 넣을 경로(슬래시)를 돌려준다. 실패 시 "".
+def _write_asset(filename: str, svg: str) -> str:
+    """SVG 문자열을 로컬 assets 폴더에 파일로 쓰고 QSS `url(...)`용 경로(슬래시)를
+    돌려준다. 실패 시 "".
 
-    Qt QSS는 `data:` URI를 파일 경로로 오인해 데이터 URI 체크마크가 렌더되지
-    않는다(실측). 그래서 실제 SVG 파일을 만들어 경로로 참조한다. 아웃라인
-    체크박스(테두리만 코랄 + 코랄 ✓, 채우지 않음)에서 켜짐을 표시하는 마크.
+    Qt QSS는 `data:` URI를 파일 경로로 오인해 데이터 URI 이미지가 렌더되지 않는다
+    (실측). 그래서 실제 SVG 파일을 만들어 경로로 참조한다. 체크박스 ✓·스핀박스
+    셰브론 등 QSS 이미지가 필요한 곳이 공유한다.
     """
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local")
     d = os.path.join(base, "PasteFlow", "assets")
     try:
         os.makedirs(d, exist_ok=True)
-        path = os.path.join(d, "check_peach.svg")
+        path = os.path.join(d, filename)
         with open(path, "w", encoding="utf-8") as f:
-            f.write(
-                "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' "
-                "viewBox='0 0 24 24'>"
-                f"<path d='M4 12l6 6L20 5' fill='none' stroke='{PEACH}' "
-                "stroke-width='3.2' stroke-linecap='round' "
-                "stroke-linejoin='round'/></svg>"
-            )
+            f.write(svg)
     except OSError:
         return ""
     return path.replace("\\", "/")
+
+
+def check_icon_url() -> str:
+    """켜진 체크박스에 그릴 코랄 체크마크(✓) SVG 경로. 아웃라인 체크박스
+    (테두리만 코랄 + 코랄 ✓, 채우지 않음)에서 켜짐을 표시하는 마크."""
+    return _write_asset(
+        "check_peach.svg",
+        "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' "
+        "viewBox='0 0 24 24'>"
+        f"<path d='M4 12l6 6L20 5' fill='none' stroke='{PEACH}' "
+        "stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/></svg>",
+    )
+
+
+def chevron_icon_url(direction: str) -> str:
+    """스핀박스 상하 버튼용 셰브론(∧/∨) SVG 경로. direction='up'|'down'.
+    색은 중립(SUBTEXT0) — 네이티브 기본 화살표 대신 테마에 맞는 조용한 셰브론.
+    이 버튼을 스타일링하면 내부 라인에디트가 버튼 영역을 덮지 않게 재계산돼,
+    버튼 위에서 I빔 커서가 새던 문제도 함께 사라진다(실측)."""
+    d = "M5 15l7-7 7 7" if direction == "up" else "M5 9l7 7 7-7"
+    return _write_asset(
+        f"chevron_{direction}.svg",
+        "<svg xmlns='http://www.w3.org/2000/svg' width='9' height='9' "
+        "viewBox='0 0 24 24'>"
+        f"<path d='{d}' fill='none' stroke='{SUBTEXT0}' stroke-width='2.6' "
+        "stroke-linecap='round' stroke-linejoin='round'/></svg>",
+    )
