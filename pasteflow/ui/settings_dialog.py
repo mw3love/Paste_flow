@@ -374,6 +374,13 @@ class SettingsDialog(QDialog):
     # main._SECRET_KEYS에 등록돼 JSON 통째로 DPAPI 암호화된다.
     KEY_AI_PROFILES = "ai_profiles"           # JSON list, DPAPI 암호화(통째)
     KEY_AI_ACTIVE_PROFILE = "ai_active_profile"  # 마지막 선택 라벨(평문)
+    # 구글 AI Studio 직결 프리셋 — base_url이 OpenAI 호환 고정 경로라 매번 외우지 않게
+    # 드롭다운에 상시 제공하는 템플릿 프로필. 고르면 URL이 채워지고 키·모델만 넣으면 된다.
+    # 사용자가 키를 채워 [+ 저장]하면 그 값이 DB에 남아 유지되고, 삭제하면 다음 실행에
+    # 다시 시드된다(템플릿이라 항상 출발점으로 남기는 의도).
+    GOOGLE_PRESET_LABEL = "Google AI Studio"
+    GOOGLE_PRESET_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+    GOOGLE_PRESET_MODEL = "gemini-2.5-flash"  # 비전 가능 → AI·OCR 공용 기본
     # 구글 드라이브 OAuth(선택) — 연결하면 AI가 내 드라이브 문서를 검색해 근거로 삼는다.
     # client_secret·refresh_token은 main._SECRET_KEYS에 등록돼 DPAPI로 암호화 저장된다.
     KEY_GDRIVE_CLIENT_ID = "gdrive_client_id"
@@ -672,9 +679,13 @@ class SettingsDialog(QDialog):
         self._profile_combo = QComboBox()  # editable 아님(모델 콤보와 달리 라벨 선택기)
         self._profile_combo.setStyleSheet(_combo_style)
         self._profile_combo.setToolTip(
-            "저장한 API 프로필. 고르면 API 키·Base URL·모델이 그 프로필 값으로 채워지고\n"
-            "자동으로 연결 테스트가 실행됩니다.")
-        self._profile_combo.currentIndexChanged.connect(self._on_profile_selected)
+            "저장한 API 프로필. 고르면 API 키·Base URL·모델이 그 프로필 값으로 채워집니다\n"
+            "(연결 확인은 [연결 테스트] 버튼을 누르세요).")
+        # activated(사용자 선택 전용) — currentIndexChanged와 달리 ⓐ 프로그램이 콤보를
+        # 채우는 동안엔 안 터지고(가드 불필요) ⓑ 이미 선택된 항목을 다시 골라도 발화한다.
+        # ⓑ가 없으면 활성 프로필과 필드(라이브 크리덴셜)가 어긋난 상태에서 그 프로필을
+        # 다시 눌러도 값이 안 채워진다(같은 인덱스라 currentIndexChanged 침묵).
+        self._profile_combo.activated.connect(self._on_profile_selected)
         self._profile_save_btn = QPushButton("+ 저장")
         self._profile_save_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._profile_save_btn.setToolTip("지금 입력한 키·URL·모델을 이름 붙여 새 프로필로 저장")
@@ -1296,10 +1307,15 @@ class SettingsDialog(QDialog):
     # ── API 프로필 ─────────────────────────────────────────────────────────────
     # 프로필 = 이름 붙인 (base_url + api_key + 모델 선택 + 모델 캐시) 스냅샷.
     # 엔진이 읽는 라이브 키는 안 건드리고, 프로필 선택 = 그 값을 UI 칸에 채우는 것뿐이다.
+    def _is_google_base_url(self, base_url: str) -> bool:
+        """base_url이 구글 AI Studio 직결(OpenAI 호환) 경로인지."""
+        u = (base_url or "").lower()
+        return "generativelanguage" in u or "googleapis" in u
+
     def _guess_profile_label(self, base_url: str) -> str:
         """base_url로 프로필 이름을 추정한다(자동 이관·[+저장] 기본값)."""
         u = (base_url or "").lower()
-        if "generativelanguage" in u or "googleapis" in u:
+        if self._is_google_base_url(base_url):
             return "구글"
         if "mindlogic" in u:
             return "마인드로직"
@@ -1317,6 +1333,19 @@ class SettingsDialog(QDialog):
             "compare_a": self._compare_value(self._compare_model_a_combo),
             "compare_b": self._compare_value(self._compare_model_b_combo),
             "model_cache": self._cached_models(),
+        }
+
+    def _google_preset(self) -> dict:
+        """구글 AI Studio 직결 프리셋(빈 키·기본 모델). base_url만 고정 제공한다."""
+        return {
+            "label": self.GOOGLE_PRESET_LABEL,
+            "base_url": self.GOOGLE_PRESET_BASE_URL,
+            "api_key": "",
+            "model": self.GOOGLE_PRESET_MODEL,
+            "ocr_model": self.GOOGLE_PRESET_MODEL,
+            "compare_a": "",
+            "compare_b": "",
+            "model_cache": [],
         }
 
     def _init_profiles(self):
@@ -1340,6 +1369,21 @@ class SettingsDialog(QDialog):
             if api_key or base_url:
                 self._profiles = [
                     self._capture_current_profile(self._guess_profile_label(base_url))]
+        # 구글 AI Studio는 '관리형 프리셋' — base_url이 구글 직결로 고정이라는 뜻이다.
+        # 같은 이름이 구글이 아닌 URL로 저장돼 있으면(옛 게이트웨이 설정이 이 이름으로
+        # 잘못 저장된 오염 상태) 그 프로필을 URL 기준 이름으로 개명해 데이터를 보존하고,
+        # 캐노니컬 구글 프리셋을 따로 넣는다. 이미 구글 URL이면 사용자가 키·모델을 채운
+        # 것이므로 그대로 둔다(중복 시드 안 함).
+        has_google = False
+        for p in self._profiles:
+            if p.get("label") != self.GOOGLE_PRESET_LABEL:
+                continue
+            if self._is_google_base_url(p.get("base_url", "")):
+                has_google = True
+            else:
+                p["label"] = self._guess_profile_label(p.get("base_url", ""))
+        if not has_google:
+            self._profiles.append(self._google_preset())
         self._populate_profile_combo(self._settings.get(self.KEY_AI_ACTIVE_PROFILE, ""))
 
     def _populate_profile_combo(self, active_label: str = ""):
@@ -1383,11 +1427,14 @@ class SettingsDialog(QDialog):
         combo.setCurrentIndex(idx) if idx >= 0 else combo.setCurrentText(val)
 
     def _on_profile_selected(self, idx: int):
-        """드롭다운에서 프로필을 고름 → 값 채우고 자동 연결 테스트."""
+        """드롭다운에서 프로필을 고름 → 값만 채운다(연결 테스트는 [연결 테스트] 버튼으로).
+
+        예전엔 여기서 자동으로 _on_test_api()를 돌렸으나, 드롭다운을 훑을 때마다 네트워크
+        테스트가 튀어 불편해 제거했다 — 테스트는 사용자가 명시적으로 누를 때만 돈다.
+        """
         if self._loading_profiles or idx < 0 or idx >= len(self._profiles):
             return
         self._apply_profile(self._profiles[idx])
-        self._on_test_api()  # 전환 직후 자동 연결 테스트
 
     def _on_profile_save(self):
         """[+ 저장] — 현재 입력값을 이름 붙여 프로필로 저장(같은 이름이면 갱신)."""
