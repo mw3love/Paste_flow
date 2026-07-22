@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize
 from PyQt6.QtGui import QColor, QFontMetrics
 
-from pasteflow.ui.theme import COLORS, PEACH_HOVER
+from pasteflow.ui.theme import COLORS, PEACH_HOVER, check_icon_url
 
 
 # 모델 콤보에서 "이 행은 계열 헤더" 표시용 커스텀 role. 들여쓰기 델리게이트가 읽는다.
@@ -64,6 +64,8 @@ _BTN_HOVER = "#3a3a3a"
 _TXT = "#d4d4d4"        # 본문 글자
 _TITLE = "#9aa0b0"      # 그룹 제목(차분한 회청)
 
+_CHECK_ICON = check_icon_url()   # 켜진 체크박스에 그릴 코랄 ✓ (아웃라인 방식)
+
 DIALOG_STYLE = f"""
     QDialog {{
         background-color: {_PAGE};
@@ -114,9 +116,12 @@ DIALOG_STYLE = f"""
         border: 1px solid {_LINE};
         background-color: {_INSET};
     }}
-    QCheckBox::indicator:checked {{
-        background-color: {COLORS['peach']};
+    QCheckBox::indicator:hover {{
         border-color: {COLORS['peach']};
+    }}
+    QCheckBox::indicator:checked {{
+        border-color: {COLORS['peach']};
+        image: url("{_CHECK_ICON}");
     }}
     QPushButton {{
         background-color: {_BTN};

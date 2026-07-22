@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QBuffer, QByteArray, QIODevice, QSize, pyqtSignal
 from PyQt6.QtGui import QCursor, QPixmap, QImage, QIcon
 
-from pasteflow.ui.theme import COLORS, PEACH_HOVER
+from pasteflow.ui.theme import COLORS, PEACH_HOVER, check_icon_url
 
 
 class _QuestionEdit(QPlainTextEdit):
@@ -203,9 +203,12 @@ class AiQueryDialog(QDialog):
                 border-radius: 3px;
                 background-color: {COLORS['surface0']};
             }}
-            QCheckBox::indicator:checked {{
-                background-color: {COLORS['peach']};
+            QCheckBox::indicator:hover {{
                 border-color: {COLORS['peach']};
+            }}
+            QCheckBox::indicator:checked {{
+                border-color: {COLORS['peach']};
+                image: url("{check_icon_url()}");
             }}
             QComboBox {{
                 background-color: {COLORS['surface0']};
