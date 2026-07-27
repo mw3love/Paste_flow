@@ -679,6 +679,11 @@ class ClipboardPanel(QWidget):
         self._total = total
         self._rebuild()
 
+    def clear_selection(self):
+        """클릭 선택 상태 초기화 — 큐 소진/클리어 시 선택 코랄 테두리가 큐 잔상처럼 남는 것 방지."""
+        self._selected_ids.clear()
+        self._update_selection_visuals()
+
     def update_queue_highlight(self, pointer: int, total: int, queue_item_ids: list):
         """큐 상태 시각 업데이트 — 위젯 재생성 없이 색상만 변경 (빠름)"""
         self._pointer = pointer

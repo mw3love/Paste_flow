@@ -148,6 +148,7 @@ tools/
   - 고정 항목 **드래그 → 재정렬**: fake drag 방식 (QDrag 미사용). 커서 아래 고정 항목 하이라이트 후 마우스 업 시 순서 교환.
   - 히스토리 항목 **드래그 → 재정렬**: `history_reorder_requested` 시그널 → main이 DB 업데이트.
   - **`update_queue_highlight()`**: 위젯 재생성 없이 색상만 업데이트하는 빠른 경로 (큐 상태 변경 시 사용).
+  - **`clear_selection()`**(v1.58.0): 클릭 선택(`_selected_ids`)을 초기화. `PanelItemWidget._apply_bg_style()`은 `_is_selected`가 `in_queue`/`is_done` 큐 강조보다 **우선**해 코랄로 그리므로, 큐를 걸 때 클릭했던 항목(선택 상태가 남음)은 그 항목이 이미 소진(done)돼 큐 강조가 회색으로 바뀌어도 선택 강조 때문에 계속 코랄로 보인다 — "첫 항목만 안 끝난 것처럼" 헷갈림(2026-07-27 사용자 리포트). main이 두 지점에서 호출해 해소: ① `_clear_queue_ui()`(큐 소진·해제·일반 Ctrl+V 등 공통 클리어 경로) — 큐 전체가 끝나는 시점의 잔여 선택 정리, ② `_on_queue_select()`(큐를 거는 그 순간, 클릭으로 세운 앵커 항목 선택을 바로 해제) — 큐 진행 *중*에도 이미 소진된 항목이 즉시 회색으로 보이게 함(②가 없으면 큐가 다 끝나야만 지워져 진행 중엔 첫 항목이 계속 코랄로 남는다).
   - **`show_near_cursor()`**: 마우스 커서 우하단 +16px에 패널 표시. 화면 경계 초과 시 반전. 단축키/트레이로 패널을 열 때 사용.
   - **자동 닫기 토글 버튼(📌)**: 헤더 우측에 배치. ctypes `SetWindowPos(HWND_TOPMOST/NOTOPMOST)`로 TOPMOST 플래그만 변경(창 재생성·깜빡임 없음). 기본값: 자동 닫기 OFF(항상 위에 ON). `_auto_close` 플래그로 관리 — `False`이면 포커스를 잃어도 자동 닫히지 않음(`changeEvent` 조건: `not self._auto_close`). DB `settings`에 저장. `set_auto_close(value)` 메서드로 외부에서 설정.
   - **`panel_hidden` 시그널**: `hideEvent`에서 emit. (패널 자동 팝업이 제거되어 현재 main에서 소비하지 않음 — 향후 훅 용도로 시그널만 유지.)

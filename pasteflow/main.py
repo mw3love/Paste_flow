@@ -944,6 +944,7 @@ class PasteFlowApp:
         self.queue.clear()
         self.tray.update_queue_status(0, 0)
         self.panel.update_queue_highlight(0, 0, [])
+        self.panel.clear_selection()
 
     def _on_paste_queue_done(self):
         """큐 소진 완료 — 큐/포인터를 클리어하고 진행 HUD를 잠시 뒤 페이드.
@@ -1974,6 +1975,10 @@ class PasteFlowApp:
         queue_item_ids = [item.id for item in self.queue.get_items()]
         self.tray.update_queue_status(pointer, total)
         self.panel.update_queue_highlight(pointer, total, queue_item_ids)
+        # 큐 지정에 쓴 클릭 선택은 여기서 바로 지운다 — 안 지우면 큐 진행 중 그 항목이
+        # 소진(done)돼 큐 강조가 회색으로 바뀌어도 선택 강조(코랄)가 남아 "첫 항목만
+        # 안 끝난 것처럼" 보인다(전체 큐가 다 끝나야 clear_selection이 불려 없어짐).
+        self.panel.clear_selection()
 
     def _on_queue_deselect(self, item_id: int):
         self._clear_queue_ui()
