@@ -1670,8 +1670,30 @@ class PasteFlowApp:
         `_start_ai_worker(question, "")`가 `ocr_engine._ask_prompt`의 '컨텍스트 없음 → 질문만
         전송' 경로를 탄다(우클릭 "AI에게 질문"의 텍스트 분기와 동일 배관, 컨텍스트만 비움).
         답변 표시·위치(커서 모니터 정중앙)는 항목 질의와 동일한 `_on_ai_turn_done`을 공유한다.
+
+        **명령 팔레트(v1.58.0)** — 컨텍스트가 없는 이 경로에서만 `_quick_commands()`를 함께
+        건네 PowerToys Run/Raycast식 빠른 명령 목록을 노출한다(우클릭 항목 질의는 항목 하나에
+        대한 질문이라 명령 목록이 혼란만 주므로 제외).
         """
-        self._open_ai_dialog()
+        self._open_ai_dialog(commands=self._quick_commands())
+
+    def _quick_commands(self) -> list:
+        """자유질문창에 노출할 빠른 명령 목록 — (라벨, 콜백) 쌍.
+
+        전부 기존 단축키 핸들러를 그대로 재사용한다(새 로직 없음, 한 곳에 모아 퍼지검색
+        가능하게 등록만). 순차 핀·순차 경로 붙여넣기처럼 큐 상태에 의존하는 명령은 여기
+        일반 목록에 넣으면 맥락 없이 오발동하기 쉬워 제외했다.
+        """
+        return [
+            ("패널 열기/닫기", self._toggle_panel),
+            ("영역 캡처", self._on_capture_requested),
+            ("텍스트 인식(OCR) 영역 선택", self._on_ocr_requested),
+            ("화면에 핀", self._on_pin_hotkey),
+            ("GIF 녹화 시작", self._on_record_gif_hotkey),
+            ("이미지를 경로로 붙여넣기", self._on_image_to_path_hotkey),
+            ("AI 질문 기록 보기", self._on_ai_history_requested),
+            ("설정 열기", self._open_settings),
+        ]
 
     def _on_pin_hotkey(self):
         """화면에 핀 단축키(기본 Alt+F3) — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다.
@@ -2108,7 +2130,8 @@ class PasteFlowApp:
         if item:
             self._ai_query_for_item(item)
 
-    def _open_ai_dialog(self, context_text: str = "", image_png: "bytes | None" = None):
+    def _open_ai_dialog(self, context_text: str = "", image_png: "bytes | None" = None,
+                       commands: "list | None" = None):
         """AI 질문 입력창을 **비모달로** 띄우고, 질문이 제출되면 그대로 AI 워커에 넘긴다.
 
         자유질문(Alt+`)·텍스트 항목 질의·이미지 항목 질의가 공유하는 단일 경로 — 셋의 차이는
@@ -2141,11 +2164,18 @@ class PasteFlowApp:
         dialog = AiQueryDialog(context_text, None, context_image=image_png,
                                compare_models=compare_models,
                                fetch_all_models=self._fetch_all_ai_models,
-                               open_history=self._on_ai_history_requested)
+                               open_history=self._on_ai_history_requested,
+                               commands=commands)
         self._ai_dialog = dialog
 
         def _finished(code: int):
             self._ai_dialog = None
+            # 명령 팔레트에서 명령을 골랐으면(Enter/클릭) 질문 흐름 대신 그 명령만 실행한다.
+            cmd = dialog.get_command()
+            if cmd is not None:
+                dialog.deleteLater()
+                cmd()
+                return
             if code == QDialog.DialogCode.Accepted:
                 question = dialog.get_question()
                 if question:

@@ -10,7 +10,7 @@ from typing import Callable
 
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
-    QPushButton, QCheckBox, QComboBox, QWidget,
+    QPushButton, QCheckBox, QComboBox, QWidget, QListWidget, QListWidgetItem,
 )
 from PyQt6.QtCore import Qt, QBuffer, QByteArray, QIODevice, QSize, pyqtSignal
 from PyQt6.QtGui import QCursor, QPixmap, QImage, QIcon
@@ -24,20 +24,35 @@ class _QuestionEdit(QPlainTextEdit):
     Enter가 구글로 가는 이유: 실시간 검색·이미지 질의 모두 구글 AI 모드가 더 정확하다는
     실측(web_open.py 모듈 주석) 이후 그쪽이 주 동작이 됐다. API 질의는 답변창·기록·비교가
     필요할 때 쓰는 보조 경로로 내려 Ctrl+Enter에 남긴다(배관은 그대로 — 되돌리기 쉽게).
+
+    **명령 팔레트 연동(v1.58.0)** — `on_nav`/`on_confirm_selection`이 주어지면(자유질문
+    경로에서만) Up/Down·Enter를 먼저 그쪽에 물어본다: 목록에 하이라이트된 명령이 있으면
+    Enter는 그 명령을 실행하고, 없으면 기존 구글/API 분기로 그대로 떨어진다(폴백).
     """
 
-    def __init__(self, on_submit, on_image_paste=None, parent=None):
+    def __init__(self, on_submit, on_image_paste=None, on_nav=None,
+                 on_confirm_selection=None, parent=None):
         super().__init__(parent)
         # on_submit(mode) — mode는 "google"(주) 또는 "api"(보조).
         self._on_submit = on_submit
         self._on_image_paste = on_image_paste
+        # on_nav(direction) -> bool — "up"/"down"을 명령 목록에 위임, 처리했으면 True.
+        self._on_nav = on_nav
+        # on_confirm_selection() -> bool — 하이라이트된 명령을 실행했으면 True(Enter 소비).
+        self._on_confirm_selection = on_confirm_selection
         self.setAcceptDrops(True)
 
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        key = event.key()
+        if key in (Qt.Key.Key_Up, Qt.Key.Key_Down) and self._on_nav is not None:
+            if self._on_nav("up" if key == Qt.Key.Key_Up else "down"):
+                return
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             mods = event.modifiers()
             if mods & Qt.KeyboardModifier.ShiftModifier:
                 super().keyPressEvent(event)
+                return
+            if self._on_confirm_selection is not None and self._on_confirm_selection():
                 return
             self._on_submit("api" if mods & Qt.KeyboardModifier.ControlModifier else "google")
             return
@@ -85,8 +100,15 @@ class AiQueryDialog(QDialog):
     def __init__(self, context_text: str, parent=None, context_image: bytes | None = None,
                  compare_models: list[str] | None = None,
                  fetch_all_models: "Callable[[], list[str]] | None" = None,
-                 open_history: "Callable[[QRect], None] | None" = None):
+                 open_history: "Callable[[QRect], None] | None" = None,
+                 commands: "list[tuple[str, Callable]] | None" = None):
         super().__init__(parent)
+        # 빠른 명령 목록(Raycast/PowerToys Run식 팔레트) — 자유질문(Alt+`)에서만 채워짐.
+        # (label, callback) 쌍. main이 제공하며, 여기선 필터링·하이라이트·실행만 담당한다.
+        self._commands: list[tuple[str, Callable]] = list(commands or [])
+        self._cmd_filtered: list[int] = list(range(len(self._commands)))
+        self._cmd_selected: int = -1  # -1 = 하이라이트 없음(편집 모드)
+        self._pending_command: "Callable | None" = None
         # open_history(frame_geometry)는 트레이 'AI 기록'과 동일한 목록창을 여는 콜백(main
         # 제공) — 질문칸에서 바로 지난 대화를 훑어볼 수 있게 버튼 하나로 노출한다(v1.49.3).
         # 이 창의 프레임을 넘겨 기록창을 그 옆에(겹치지 않게) 열 수 있게 한다.
@@ -229,6 +251,24 @@ class AiQueryDialog(QDialog):
                 border: 1px solid {COLORS['surface2']};
                 outline: none;
             }}
+            /* 명령 팔레트 목록 — 하이라이트=코랄(테마 규칙: 코랄=선택·주목). */
+            QListWidget#cmdList {{
+                background-color: {COLORS['surface0']};
+                color: {COLORS['text']};
+                border: 1px solid {COLORS['surface2']};
+                border-radius: 6px;
+                padding: 2px;
+                font-size: 12px;
+                outline: none;
+            }}
+            QListWidget#cmdList::item {{
+                padding: 5px 8px;
+                border-radius: 4px;
+            }}
+            QListWidget#cmdList::item:selected {{
+                background-color: {COLORS['peach']};
+                color: {COLORS['base']};
+            }}
         """)
 
         layout = QVBoxLayout(self)
@@ -293,12 +333,25 @@ class AiQueryDialog(QDialog):
             head_row.addWidget(history_btn)
         layout.addLayout(head_row)
 
-        self._editor = _QuestionEdit(self._on_editor_submit, on_image_paste=self._on_image_pasted)
+        self._editor = _QuestionEdit(
+            self._on_editor_submit, on_image_paste=self._on_image_pasted,
+            on_nav=self._on_cmd_nav, on_confirm_selection=self._on_cmd_confirm)
         self._editor.setPlaceholderText(
             "질문을 입력하세요 — Enter 구글 AI · Ctrl+Enter 질문(API) · Shift+Enter 줄바꿈 · "
             "이미지는 Ctrl+V/드래그로 첨부")
         self._editor.setFocus()
         layout.addWidget(self._editor, 1)
+
+        # 명령 팔레트(PowerToys Run/Raycast식) — commands가 있을 때만(자유질문 경로).
+        # 입력 필터링 + ↑↓ 탐색 + Enter/클릭 실행. 비어 있으면 항상 숨김.
+        self._cmd_list = QListWidget()
+        self._cmd_list.setObjectName("cmdList")
+        self._cmd_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 키 포커스는 입력칸에 유지
+        self._cmd_list.setMaximumHeight(160)
+        self._cmd_list.itemClicked.connect(self._on_cmd_item_clicked)
+        layout.addWidget(self._cmd_list)
+        self._editor.textChanged.connect(self._refresh_commands)
+        self._refresh_commands()  # 초기 표시(비어 있으면 숨김)
 
         # 모델 선택 — 평소엔 설정된 모델 1·2·3만 보이고(하이브리드, v1.49.1), ↻를 누르면
         # 전체 모델을 불러와 콤보를 채운다. 후보가 하나도 없으면(모델 미설정) 콤보가 비어
@@ -452,6 +505,75 @@ class AiQueryDialog(QDialog):
     def get_web_target(self) -> str:
         """브라우저로 열 대상 — `"google"`·`"drive"`, 평소(AI 질의)엔 `""`."""
         return self._web_target
+
+    def get_command(self) -> "Callable | None":
+        """명령 팔레트에서 실행하기로 한 콜백. 없으면 `None`(평소 질문 흐름)."""
+        return self._pending_command
+
+    # ── 명령 팔레트(PowerToys Run/Raycast식) ─────────────────────────────────────
+    def _refresh_commands(self):
+        """입력 텍스트로 명령 목록을 필터링(대소문자 무시 부분일치)하고 하이라이트를 푼다.
+
+        새 외부 의존성(퍼지매칭 라이브러리) 없이 stdlib만으로 — 명령이 10여 개뿐이라
+        부분일치로 충분하다(CLAUDE.md "새 외부 의존성 0" 원칙과 일치).
+        """
+        if not self._commands:
+            self._cmd_list.setVisible(False)
+            return
+        query = self._editor.toPlainText().strip().lower()
+        self._cmd_filtered = [
+            i for i, (label, _cb) in enumerate(self._commands)
+            if not query or query in label.lower()
+        ]
+        self._cmd_list.clear()
+        for i in self._cmd_filtered:
+            self._cmd_list.addItem(self._commands[i][0])
+        self._cmd_selected = -1
+        self._cmd_list.setVisible(bool(self._cmd_filtered))
+        self._update_cmd_highlight()
+
+    def _update_cmd_highlight(self):
+        self._cmd_list.setCurrentRow(self._cmd_selected)
+
+    def _on_cmd_nav(self, direction: str) -> bool:
+        """입력칸의 Up/Down — 명령 목록이 있으면 하이라이트를 옮기고 True(소비)를 돌려준다."""
+        if not self._commands or not self._cmd_filtered:
+            return False
+        n = len(self._cmd_filtered)
+        # -1(하이라이트 없음)에서 Down은 첫 항목, Up은 마지막 항목으로 — 일반 modulo(-1±1)%n은
+        # Up에서 마지막 대신 마지막에서 하나 앞으로 새는 off-by-one이라 -1은 따로 분기한다.
+        if self._cmd_selected < 0:
+            self._cmd_selected = 0 if direction == "down" else n - 1
+        elif direction == "down":
+            self._cmd_selected = (self._cmd_selected + 1) % n
+        else:
+            self._cmd_selected = (self._cmd_selected - 1) % n
+        self._update_cmd_highlight()
+        return True
+
+    def _on_cmd_confirm(self) -> bool:
+        """입력칸의 Enter — 하이라이트된 명령이 있으면 실행하고 True(소비)를 돌려준다.
+
+        하이라이트가 없으면 False를 돌려줘 기존 구글/API 제출로 그대로 떨어진다(폴백).
+        """
+        if not self._commands or self._cmd_selected < 0:
+            return False
+        if self._cmd_selected >= len(self._cmd_filtered):
+            return False
+        self._run_command(self._cmd_filtered[self._cmd_selected])
+        return True
+
+    def _on_cmd_item_clicked(self, item: QListWidgetItem):
+        row = self._cmd_list.row(item)
+        if 0 <= row < len(self._cmd_filtered):
+            self._run_command(self._cmd_filtered[row])
+
+    def _run_command(self, idx: int):
+        """명령을 '실행 예약'만 하고 창을 닫는다 — 실제 호출은 main의 `finished` 콜백이
+        한다(다이얼로그는 무엇을 골랐는지만 보고하고, 실행은 main이 담당하는 기존 패턴 —
+        `get_web_target()`과 동일한 역할 분리)."""
+        self._pending_command = self._commands[idx][1]
+        self.reject()
 
     def _on_compare_toggled(self, checked: bool):
         """'여러 모델로 비교' on/off — 켜면 단일 모델 선택 행을 흐리게(비활성) 한다.
