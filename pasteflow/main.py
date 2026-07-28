@@ -1663,37 +1663,14 @@ class PasteFlowApp:
             self._on_paste_queue_done()
 
     def _on_ask_ai_hotkey(self):
-        """AI 자유질문 단축키(기본 Alt+`) — 컨텍스트 없이 즉석에서 AI에게 질문한다.
+        """AI 자유질문 단축키(기본 Alt+`) — 컨텍스트 없이 즉석에서 AI 팔레트를 연다.
 
-        상시 켜져 있는 PasteFlow에서 한 키로 질문 입력창을 띄워 자유 질문하고 답변을 받는다.
-        컨텍스트가 없으므로 `AiQueryDialog`는 컨텍스트 미리보기 없이 질문 입력칸만 표시하고,
-        `_start_ai_worker(question, "")`가 `ocr_engine._ask_prompt`의 '컨텍스트 없음 → 질문만
-        전송' 경로를 탄다(우클릭 "AI에게 질문"의 텍스트 분기와 동일 배관, 컨텍스트만 비움).
-        답변 표시·위치(커서 모니터 정중앙)는 항목 질의와 동일한 `_on_ai_turn_done`을 공유한다.
-
-        **명령 팔레트(v1.58.0)** — 컨텍스트가 없는 이 경로에서만 `_quick_commands()`를 함께
-        건네 PowerToys Run/Raycast식 빠른 명령 목록을 노출한다(우클릭 항목 질의는 항목 하나에
-        대한 질문이라 명령 목록이 혼란만 주므로 제외).
+        상시 켜져 있는 PasteFlow에서 한 키로 질문 입력창을 띄워 여러 목적지(구글 AI 모드·
+        구글 드라이브·PasteFlow 답변·사용자가 설정에서 추가한 웹사이트) 중 하나로 질문을
+        보낸다. 목적지 목록은 `_open_ai_dialog`가 매번 DB에서 읽어 넘긴다(설정창에서
+        바꾼 뒤 앱 재시작 없이 바로 반영).
         """
-        self._open_ai_dialog(commands=self._quick_commands())
-
-    def _quick_commands(self) -> list:
-        """자유질문창에 노출할 빠른 명령 목록 — (라벨, 콜백) 쌍.
-
-        전부 기존 단축키 핸들러를 그대로 재사용한다(새 로직 없음, 한 곳에 모아 퍼지검색
-        가능하게 등록만). 순차 핀·순차 경로 붙여넣기처럼 큐 상태에 의존하는 명령은 여기
-        일반 목록에 넣으면 맥락 없이 오발동하기 쉬워 제외했다.
-        """
-        return [
-            ("패널 열기/닫기", self._toggle_panel),
-            ("영역 캡처", self._on_capture_requested),
-            ("텍스트 인식(OCR) 영역 선택", self._on_ocr_requested),
-            ("화면에 핀", self._on_pin_hotkey),
-            ("GIF 녹화 시작", self._on_record_gif_hotkey),
-            ("이미지를 경로로 붙여넣기", self._on_image_to_path_hotkey),
-            ("AI 질문 기록 보기", self._on_ai_history_requested),
-            ("설정 열기", self._open_settings),
-        ]
+        self._open_ai_dialog()
 
     def _on_pin_hotkey(self):
         """화면에 핀 단축키(기본 Alt+F3) — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다.
@@ -2130,12 +2107,16 @@ class PasteFlowApp:
         if item:
             self._ai_query_for_item(item)
 
-    def _open_ai_dialog(self, context_text: str = "", image_png: "bytes | None" = None,
-                       commands: "list | None" = None):
-        """AI 질문 입력창을 **비모달로** 띄우고, 질문이 제출되면 그대로 AI 워커에 넘긴다.
+    def _open_ai_dialog(self, context_text: str = "", image_png: "bytes | None" = None):
+        """AI 질문 입력창을 **비모달로** 띄우고, 고른 타겟에 따라 질문을 라우팅한다.
 
         자유질문(Alt+`)·텍스트 항목 질의·이미지 항목 질의가 공유하는 단일 경로 — 셋의 차이는
         `context_text`(질문에 함께 실을 클립보드 텍스트)와 `image_png`(첫 첨부 이미지)뿐이다.
+
+        **타겟 팔레트(v1.59.0)** — 질문을 API 워커 하나로만 보내지 않고, DB에 저장된
+        `ai_palette_sites`(설정창 "AI 팔레트 타겟" — `pasteflow/ai_palette.py`가 데이터
+        모양·기본값을 소유) 중 사용자가 고른 목적지로 라우팅한다. 매번 다시 읽어 설정 변경이
+        앱 재시작 없이 바로 반영된다.
 
         ⚠ **`exec()`를 쓰지 않는다.** `QDialog.exec()`는 내부적으로 창을 모달로 표시하는데,
         모달리티가 `NonModal`이고 부모도 없으면 Qt가 이를 **ApplicationModal로 승격**시킨다
@@ -2148,8 +2129,8 @@ class PasteFlowApp:
         `_ai_history_dialog`와 같은 재진입 가드를 둔다 — 비모달이라 질문창이 떠 있는 채로
         단축키·우클릭이 다시 들어올 수 있고, 그때 창을 또 만들면 앵커·워커가 뒤엉킨다.
         """
-        from PyQt6.QtWidgets import QDialog
         from pasteflow.ui.ai_query import AiQueryDialog
+        from pasteflow import ai_palette
 
         existing = getattr(self, "_ai_dialog", None)
         if existing is not None:
@@ -2158,6 +2139,7 @@ class PasteFlowApp:
             return
 
         compare_models = self._resolve_compare_models()
+        sites = ai_palette.load_sites(self.db.get_setting("ai_palette_sites", ""))
         # parent=None — self.panel을 부모로 주면 Windows가 이 창을 패널의 "소유 창"으로 취급해
         # 패널 위에 항상 떠 있게 고정한다(모달과 무관한 별개의 Z-order 규칙) — 미리보기 팝업·
         # AI 기록창과 같은 독립 최상위 창 패턴으로 통일한다.
@@ -2165,43 +2147,61 @@ class PasteFlowApp:
                                compare_models=compare_models,
                                fetch_all_models=self._fetch_all_ai_models,
                                open_history=self._on_ai_history_requested,
-                               commands=commands)
+                               sites=sites)
         self._ai_dialog = dialog
 
-        def _finished(code: int):
+        def _finished(_code: int):
             self._ai_dialog = None
-            # 명령 팔레트에서 명령을 골랐으면(Enter/클릭) 질문 흐름 대신 그 명령만 실행한다.
-            cmd = dialog.get_command()
-            if cmd is not None:
+            result = dialog.get_result()
+            if result is None:  # 취소(Esc·취소 버튼)
                 dialog.deleteLater()
-                cmd()
                 return
-            if code == QDialog.DialogCode.Accepted:
-                question = dialog.get_question()
-                if question:
-                    target = dialog.get_web_target()
-                    if target:
-                        # 브라우저 경로 — API에 묻지 않고 크롬에서 연다(web_open.py 참조).
-                        # 첨부 이미지가 있으면 URL로 못 실으므로 주입 경로로 갈린다.
-                        self._open_in_browser(target, question, dialog.get_images())
-                        dialog.deleteLater()
-                        return
-                    # 답변창은 입력창이 "닫힐 때" 있던 자리(모니터) 기준으로 띄운다 — 입력 중
-                    # 다른 모니터로 끌어다 놓았을 수 있어 트리거 시점 커서로는 부정확하다.
-                    self._ai_anchor = dialog.frameGeometry()
-                    images = dialog.get_images()  # 첨부(제거·추가·교체 결과를 존중)
-                    if dialog.is_compare():
-                        self._start_compare_query(question, context_text, images, compare_models)
-                    else:
-                        sel = dialog.get_selected_model()  # 없으면 기본 모델 1
-                        self._start_ai_worker(question, context_text, images=images,
-                                              model=sel or None)
+            site, question = result
+            kind = site.get("kind")
+
+            if kind in (ai_palette.KIND_GOOGLE_AI, ai_palette.KIND_DRIVE):
+                # 브라우저 경로 — API에 묻지 않고 크롬에서 연다(web_open.py 참조).
+                # 첨부 이미지가 있으면 URL로 못 실으므로 주입 경로로 갈린다(구글 AI만 지원).
+                target = "google" if kind == ai_palette.KIND_GOOGLE_AI else "drive"
+                self._open_in_browser(target, question, dialog.get_images())
+                dialog.deleteLater()
+                return
+
+            if kind == ai_palette.KIND_URL:
+                self._open_palette_url(site, question)
+                dialog.deleteLater()
+                return
+
+            # kind == KIND_API (또는 알 수 없는 값 — 안전하게 기본 답변 경로로 열화)
+            # 답변창은 입력창이 "닫힐 때" 있던 자리(모니터) 기준으로 띄운다 — 입력 중
+            # 다른 모니터로 끌어다 놓았을 수 있어 트리거 시점 커서로는 부정확하다.
+            self._ai_anchor = dialog.frameGeometry()
+            images = dialog.get_images()  # 첨부(제거·추가·교체 결과를 존중)
+            if dialog.is_compare():
+                self._start_compare_query(question, context_text, images, compare_models)
+            else:
+                sel = dialog.get_selected_model()  # 없으면 기본 모델 1
+                self._start_ai_worker(question, context_text, images=images,
+                                      model=sel or None)
             dialog.deleteLater()
 
         dialog.finished.connect(_finished)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _open_palette_url(self, site: dict, question: str):
+        """AI 팔레트의 `url` 타겟 — {q} 자리에 질의를 넣어 기본 브라우저로 연다."""
+        from pasteflow import ai_palette
+        from pasteflow import web_open
+        from pasteflow.ui.toast import ToastNotification
+
+        url = ai_palette.build_url(site.get("url", ""), question)
+        label = site.get("label") or "웹사이트"
+        if web_open.open_url(url):
+            ToastNotification(f"{label} 검색 — 브라우저에서 여는 중", icon="🌐")
+        else:
+            ToastNotification("브라우저를 열지 못했습니다", icon="🌐")
 
     def _open_in_browser(self, target: str, question: str,
                          images: "list[bytes] | None" = None):
@@ -2732,6 +2732,7 @@ class PasteFlowApp:
             "hotkey_seq_pin": self.db.get_setting("hotkey_seq_pin", "alt+shift+f3"),
             "hotkey_capture": self.db.get_setting("hotkey_capture", "alt+f2"),
             "hotkey_ask_ai": self.db.get_setting("hotkey_ask_ai", "alt+`"),
+            "ai_palette_sites": self.db.get_setting("ai_palette_sites", ""),
             "hotkey_record_gif": self.db.get_setting("hotkey_record_gif", "ctrl+shift+g"),
             "capture_save_folder": self.db.get_setting("capture_save_folder", "") or _default_capture_folder(),
             "ocr_language": self.db.get_setting("ocr_language", "ko"),

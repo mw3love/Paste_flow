@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize
 from PyQt6.QtGui import QColor, QFontMetrics
 
+from pasteflow import ai_palette
 from pasteflow.ui.theme import COLORS, PEACH_HOVER, check_icon_url, chevron_icon_url
 
 
@@ -36,6 +37,94 @@ class _ModelIndentDelegate(QStyledItemDelegate):
         super().initStyleOption(option, index)
         if not index.data(_HEADER_ROLE):
             option.rect.setLeft(option.rect.left() + _MODEL_INDENT_PX)
+
+
+class _PaletteSiteRow(QWidget):
+    """AI 팔레트(Alt+` 자유질문창) 타겟 한 줄 — 라벨·키워드·종류·URL·삭제.
+
+    순서가 곧 팔레트의 번호(Alt+1~9)이므로 위/아래 이동 버튼으로 순서를 바꿀 수 있다.
+    종류가 `url`이 아니면(구글 AI·드라이브·내부 API 답변) 그 kind는 main.py의 기존
+    배관을 그대로 타므로 URL 칸이 의미가 없어 비활성화한다.
+    """
+
+    remove_requested = pyqtSignal(object)   # self
+    move_up_requested = pyqtSignal(object)
+    move_down_requested = pyqtSignal(object)
+
+    def __init__(self, site: dict, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self.up_btn = QPushButton("▲")
+        self.down_btn = QPushButton("▼")
+        for btn in (self.up_btn, self.down_btn):
+            btn.setFixedWidth(24)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.up_btn.setToolTip("순서를 위로 — 번호(Alt+숫자)가 바뀝니다")
+        self.down_btn.setToolTip("순서를 아래로 — 번호(Alt+숫자)가 바뀝니다")
+        self.up_btn.clicked.connect(lambda: self.move_up_requested.emit(self))
+        self.down_btn.clicked.connect(lambda: self.move_down_requested.emit(self))
+
+        self.label_edit = QLineEdit(site.get("label", ""))
+        self.label_edit.setPlaceholderText("표시 이름")
+        self.label_edit.setFixedWidth(90)
+
+        self.keyword_edit = QLineEdit(site.get("keyword", ""))
+        self.keyword_edit.setPlaceholderText("키워드")
+        self.keyword_edit.setToolTip(
+            "이 글자 뒤에 공백을 붙여 입력하면 자동으로 이 타겟이 선택됩니다\n"
+            "(예: \"yt 고양이\" → 유튜브로 \"고양이\" 검색). 비워 두면 접두어 없음.")
+        self.keyword_edit.setFixedWidth(48)
+
+        self.kind_combo = QComboBox()
+        # 고정 최소폭 — 행마다 콤보가 자기 텍스트 길이로만 자라면 행끼리 열이 안 맞아
+        # 지그재그로 보인다("PasteFlow 답변(API)"가 가장 길다).
+        self.kind_combo.setMinimumWidth(150)
+        for kind, kind_label in ai_palette.KIND_LABELS.items():
+            self.kind_combo.addItem(kind_label, kind)
+        idx = self.kind_combo.findData(site.get("kind", ai_palette.KIND_URL))
+        self.kind_combo.setCurrentIndex(max(0, idx))
+        self.kind_combo.currentIndexChanged.connect(self._on_kind_changed)
+
+        self.url_edit = QLineEdit(site.get("url", ""))
+        self.url_edit.setPlaceholderText("https://example.com/search?q={q}")
+
+        self.remove_btn = QPushButton("✕")
+        self.remove_btn.setFixedWidth(28)
+        self.remove_btn.setToolTip("이 타겟 삭제")
+        self.remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
+
+        layout.addWidget(self.up_btn)
+        layout.addWidget(self.down_btn)
+        layout.addWidget(self.label_edit)
+        layout.addWidget(self.keyword_edit)
+        layout.addWidget(self.kind_combo)
+        layout.addWidget(self.url_edit, 1)
+        layout.addWidget(self.remove_btn)
+
+        self._on_kind_changed()
+
+    def _on_kind_changed(self, *_args):
+        is_url = self.kind_combo.currentData() == ai_palette.KIND_URL
+        self.url_edit.setEnabled(is_url)
+        self.url_edit.setPlaceholderText(
+            "https://example.com/search?q={q}" if is_url else "(내장 — main.py가 처리)")
+
+    def set_endpoints(self, is_first: bool, is_last: bool):
+        """맨 위/맨 아래 행은 그쪽 이동 버튼을 비활성화한다."""
+        self.up_btn.setEnabled(not is_first)
+        self.down_btn.setEnabled(not is_last)
+
+    def to_dict(self) -> dict:
+        return {
+            "label": self.label_edit.text().strip() or "이름 없음",
+            "keyword": self.keyword_edit.text().strip(),
+            "kind": self.kind_combo.currentData(),
+            "url": self.url_edit.text().strip(),
+        }
 
 
 # 프로브 상태 → 상태 줄에 쓸 (말머리, 색). `retry`(429·503)는 판정 불가라 경고색이며,
@@ -405,6 +494,9 @@ class SettingsDialog(QDialog):
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
     KEY_RECORD_GIF_HOTKEY = "hotkey_record_gif"
     KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
+    # AI 팔레트 타겟 — 자유질문창(Alt+`)의 질문을 보낼 목적지 목록(JSON list).
+    # 데이터 모양·기본값·URL 빌더는 pasteflow/ai_palette.py가 소유(main도 이걸 공유).
+    KEY_AI_PALETTE_SITES = "ai_palette_sites"
     KEY_CAPTURE_FOLDER = "capture_save_folder"
     KEY_OCR_ENGINE = "ocr_engine"
     # AI 크리덴셜 — Mindlogic 게이트웨이 한 벌(키 + Base URL)뿐이다.
@@ -932,6 +1024,34 @@ class SettingsDialog(QDialog):
 
         tab_ai.addWidget(ai_group)
 
+        # ── AI 팔레트 타겟 (Alt+` 자유질문창의 목적지 목록) ──
+        # 질문을 어디로 보낼지 사용자가 직접 관리하는 목록 — 순서가 팔레트 번호(Alt+1~9),
+        # 종류가 url이면 {q} 자리에 질의가 채워진다(pasteflow/ai_palette.py 참고).
+        palette_group = QGroupBox("AI 팔레트 타겟 (Alt+` 자유질문 목적지)")
+        palette_layout = QVBoxLayout(palette_group)
+        palette_layout.setSpacing(4)
+        palette_layout.setContentsMargins(10, 8, 10, 8)
+
+        palette_desc = QLabel(
+            "Alt+`로 뜨는 질문창에서 Tab으로 고르거나 Alt+숫자로 즉시 보낼 목적지 목록입니다.\n"
+            "\"종류\"가 \"웹사이트 URL\"이면 URL의 {q} 자리에 입력한 질문이 들어갑니다.\n"
+            "키워드를 정하면 그 글자+공백으로 문장을 시작할 때 자동으로 그 타겟이 선택됩니다.")
+        palette_desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
+        palette_desc.setWordWrap(True)
+        palette_layout.addWidget(palette_desc)
+
+        self._palette_rows_layout = QVBoxLayout()
+        self._palette_rows_layout.setSpacing(4)
+        palette_layout.addLayout(self._palette_rows_layout)
+        self._palette_rows: list[_PaletteSiteRow] = []
+
+        add_site_btn = QPushButton("+ 타겟 추가")
+        add_site_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_site_btn.clicked.connect(self._on_add_palette_site)
+        palette_layout.addWidget(add_site_btn, 0, Qt.AlignmentFlag.AlignLeft)
+
+        tab_ai.addWidget(palette_group)
+
         # ── 구글 드라이브 (선택) — 접이식, 기본 접힘 ──
         # 연결하면 AI 질의가 내 드라이브 문서를 검색해 근거로 삼는다(읽기 전용).
         # 안 하면 도구가 조용히 빠질 뿐 웹 검색·AI 답변은 그대로 동작한다(우아한 열화).
@@ -1264,6 +1384,9 @@ class SettingsDialog(QDialog):
         # API 프로필 — 크리덴셜·모델 칸을 채운 뒤 호출(자동 이관이 그 값을 읽는다).
         self._init_profiles()
 
+        # AI 팔레트 타겟(Alt+` 자유질문 목적지) — 저장된 목록(없으면 기본값)으로 행 구성.
+        self._load_palette_sites()
+
         # 구글 드라이브 — refresh token은 화면에 안 띄운다(비밀이고 사용자가 볼 일도 없다).
         # 있으면 "연결됨"으로만 알린다.
         self._gdrive_client_id_edit.setText(self._settings.get(self.KEY_GDRIVE_CLIENT_ID, ""))
@@ -1525,6 +1648,60 @@ class SettingsDialog(QDialog):
         del self._profiles[idx]
         self._populate_profile_combo()
         self._set_status(f"프로필 '{label}' 삭제 — 하단 [저장] 시 반영됩니다.")
+
+    # ── AI 팔레트 타겟(Alt+` 자유질문 목적지) ────────────────────────────────────
+    def _load_palette_sites(self):
+        """저장된 목록(없으면 기본값)으로 행들을 채운다."""
+        sites = ai_palette.load_sites(self._settings.get(self.KEY_AI_PALETTE_SITES, ""))
+        for site in sites:
+            self._add_palette_row(site)
+        self._refresh_palette_endpoints()
+
+    def _add_palette_row(self, site: dict):
+        row = _PaletteSiteRow(site)
+        row.remove_requested.connect(self._on_remove_palette_row)
+        row.move_up_requested.connect(self._on_move_palette_row_up)
+        row.move_down_requested.connect(self._on_move_palette_row_down)
+        self._palette_rows.append(row)
+        self._palette_rows_layout.addWidget(row)
+
+    def _on_add_palette_site(self):
+        self._add_palette_row({"label": "", "keyword": "", "kind": ai_palette.KIND_URL, "url": ""})
+        self._refresh_palette_endpoints()
+
+    def _on_remove_palette_row(self, row: "_PaletteSiteRow"):
+        if row in self._palette_rows:
+            self._palette_rows.remove(row)
+        self._palette_rows_layout.removeWidget(row)
+        row.deleteLater()
+        self._refresh_palette_endpoints()
+
+    def _on_move_palette_row_up(self, row: "_PaletteSiteRow"):
+        i = self._palette_rows.index(row)
+        if i > 0:
+            self._swap_palette_rows(i, i - 1)
+
+    def _on_move_palette_row_down(self, row: "_PaletteSiteRow"):
+        i = self._palette_rows.index(row)
+        if i < len(self._palette_rows) - 1:
+            self._swap_palette_rows(i, i + 1)
+
+    def _swap_palette_rows(self, i: int, j: int):
+        """순서가 곧 팔레트 번호(Alt+1~9)라, 위젯 자체를 옮기지 않고 값만 맞바꾼다
+        (레이아웃 재삽입보다 단순하고 포커스·스크롤 위치도 안 흔들린다)."""
+        a, b = self._palette_rows[i], self._palette_rows[j]
+        a_dict, b_dict = a.to_dict(), b.to_dict()
+        for row, data in ((a, b_dict), (b, a_dict)):
+            row.label_edit.setText(data["label"])
+            row.keyword_edit.setText(data["keyword"])
+            row.kind_combo.setCurrentIndex(row.kind_combo.findData(data["kind"]))
+            row.url_edit.setText(data["url"])
+
+    def _refresh_palette_endpoints(self):
+        """맨 위/맨 아래 행의 이동 버튼을 비활성화한다."""
+        n = len(self._palette_rows)
+        for i, row in enumerate(self._palette_rows):
+            row.set_endpoints(i == 0, i == n - 1)
 
     def _cached_models(self) -> list[str]:
         """모델 캐시(JSON list)를 파싱해 모델명 목록 반환. 없으면 빈 목록."""
@@ -1867,6 +2044,10 @@ class SettingsDialog(QDialog):
         # main._SECRET_KEYS가 JSON 통째로 DPAPI 암호화한다.
         new_settings[self.KEY_AI_PROFILES] = json.dumps(self._profiles, ensure_ascii=False)
         new_settings[self.KEY_AI_ACTIVE_PROFILE] = self._profile_combo.currentText()
+
+        # AI 팔레트 타겟 — 화면의 각 행을 순서 그대로 직렬화(순서=Alt+숫자 번호).
+        new_settings[self.KEY_AI_PALETTE_SITES] = ai_palette.dump_sites(
+            [row.to_dict() for row in self._palette_rows])
 
         self.settings_changed.emit(new_settings)
         self.accept()
