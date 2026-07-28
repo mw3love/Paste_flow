@@ -52,6 +52,11 @@ _MONITOR_DEFAULTTONEAREST = 2
 _user32 = ctypes.windll.user32
 _dwmapi = ctypes.windll.dwmapi
 
+_HWND_TOPMOST = wintypes.HWND(-1)
+_SWP_NOMOVE = 0x0002
+_SWP_NOSIZE = 0x0001
+_SWP_NOACTIVATE = 0x0010
+
 
 class _POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
@@ -216,9 +221,29 @@ class _CaptureScreen(QWidget):
         self.setGeometry(sg)
         self._hl_local = None
 
+    def _claim_topmost(self):
+        """topmost 밴드의 맨 앞으로 못박는다 — panel.py의 _set_always_on_top와 동일 호출.
+
+        ⚠ Qt의 raise_()는 TOPMOST 창끼리의 순서까지는 못 뒤집는다 — 패널처럼 이미
+        SetWindowPos(HWND_TOPMOST)로 떠 있는 창이 있으면, 이 오버레이가 더 늦게 떠도
+        패널이 그 위에 남아 클릭/드래그를 오버레이 대신 패널이 받는다(패널이 열려 있을 때
+        Alt+F2 캡처가 안 되던 원인 — 2026-07-28 사용자 보고, 실측: `WindowFromPoint`로 클릭
+        좌표의 실제 소유 창을 확인하니 패널이었다). 이 명시적 Win32 호출로 오버레이를
+        topmost 밴드 맨 앞에 세운다. `CaptureOverlay.start()`가 표시 직후와 짧은 지연 후
+        두 번 부른다 — 실측 결과 두 TOPMOST 창이 거의 동시에 자기 자리를 주장하면 어느 쪽이
+        이길지 5회 중 1회꼴로 뒤집히는 레이스가 있어(패널의 재확인 타이밍과 겹칠 때), 한 번의
+        호출만으로는 신뢰할 수 없었다.
+        """
+        hwnd = wintypes.HWND(int(self.winId()))
+        _user32.SetWindowPos(
+            hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
+            _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE,
+        )
+
     def show_overlay(self):
         self.show()
         self.raise_()
+        self._claim_topmost()
         self.repaint()  # 매핑 직후 동기 페인트 강제 → 첫 프레임 빈 화면(깜빡임) 방지
 
     # ── Qt 마우스 이벤트 → 매니저 위임 ─────────────────────────────────────────
@@ -350,6 +375,13 @@ class CaptureOverlay:
         for ov in self._overlays:
             ov.show_overlay()
         self._timer.start()
+        # 표시 직후 한 번 더 topmost를 재확인(_CaptureScreen._claim_topmost docstring의
+        # 레이스 참고) — 패널의 재확인과 겹쳐 이번 라운드를 놓쳤어도 이 지연 호출이 만회한다.
+        QTimer.singleShot(60, self._reclaim_topmost)
+
+    def _reclaim_topmost(self):
+        for ov in self._overlays:
+            ov._claim_topmost()
 
     # ── Qt 마우스 이벤트 (오버레이 위젯에서 위임) ──────────────────────────────
 

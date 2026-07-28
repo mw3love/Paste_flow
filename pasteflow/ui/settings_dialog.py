@@ -57,11 +57,24 @@ class _PaletteSiteRow(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
+        # ⚠ DIALOG_STYLE(전역)엔 :disabled 규칙이 없다 — Qt 기본 비활성 렌더는 이 다크
+        # 테마에서 글자·배경이 거의 같은 톤이 돼(2026-07-29 사용자 보고: "맨 앞 위치조정
+        # 버튼 색이 겹쳐서 안 보임") 첫 행 ▲·마지막 행 ▼가 상시 비활성인 이 위젯에서 특히
+        # 두드러진다. 위젯 자체에 :disabled까지 포함한 스타일을 직접 줘야 한다(ai_query.py의
+        # `QLabel:disabled`/`QComboBox:disabled` 처리와 같은 이유 — "스타일시트로 색을
+        # 명시한 위젯은 Qt 기본 회색화가 안 먹는다").
+        _btn_style = (
+            f"QPushButton {{ background-color: {_BTN}; color: {_TXT}; border: none; "
+            f"border-radius: 6px; padding: 6px 16px; }}"
+            f"QPushButton:hover {{ background-color: {_BTN_HOVER}; }}"
+            f"QPushButton:disabled {{ background-color: {_BTN}; color: #6a6a6a; }}"
+        )
         self.up_btn = QPushButton("▲")
         self.down_btn = QPushButton("▼")
         for btn in (self.up_btn, self.down_btn):
             btn.setFixedWidth(24)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(_btn_style)
         self.up_btn.setToolTip("순서를 위로 — 번호(Alt+숫자)가 바뀝니다")
         self.down_btn.setToolTip("순서를 아래로 — 번호(Alt+숫자)가 바뀝니다")
         self.up_btn.clicked.connect(lambda: self.move_up_requested.emit(self))
@@ -90,6 +103,16 @@ class _PaletteSiteRow(QWidget):
 
         self.url_edit = QLineEdit(site.get("url", ""))
         self.url_edit.setPlaceholderText("https://example.com/search?q={q}")
+        # 같은 이유(:disabled 미정의) — url 아닌 종류(구글 AI·드라이브·API, 기본 6개 중 3개)는
+        # 이 칸이 상시 비활성이라 안내 문구("(내장 — main.py가 처리)")가 안 보이면 그 자체로
+        # "왜 URL 칸이 비었지"가 되므로 대비를 명시적으로 준다.
+        self.url_edit.setStyleSheet(
+            f"QLineEdit {{ background-color: {_INSET}; color: {_TXT}; "
+            f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
+            f"QLineEdit:focus {{ border-color: {COLORS['peach']}; }}"
+            f"QLineEdit:disabled {{ background-color: {_PAGE}; color: #6a6a6a; "
+            f"border: 1px solid {_LINE}; }}"
+        )
 
         self.remove_btn = QPushButton("✕")
         self.remove_btn.setFixedWidth(28)
