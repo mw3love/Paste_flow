@@ -679,6 +679,13 @@ class SettingsDialog(QDialog):
         폭: 콘텐츠가 실제로 필요로 하는 폭에 맞춘다(좁게 고정하면 폼·콤보가 뷰포트를
         넘어 오른쪽이 잘렸다). 높이: 고정 높이로 압박하면 word-wrap 라벨의 heightForWidth가
         매 repaint마다 진동해 드래그 시 떨렸다 — 스크롤 영역으로 분리해 해결.
+
+        ⚠ **크기 조절 가능**(2026-07-29 사용자 요청 — 이전엔 `setFixedSize`라 Base URL
+        같은 긴 값이 입력칸 안에서 잘려 보였는데도 창을 늘려 볼 수 없었다). `setFixedSize`
+        대신 `setMinimumSize`(콘텐츠가 필요로 하는 최소치, 이보다 작아지면 다시 잘림)
+        + `resize`(시작 폭을 최소치보다 조금 더 여유 있게)로 바꿔 사용자가 필요하면
+        가로·세로를 자유롭게 늘릴 수 있다. 세로는 탭 전환으로 다른 탭의 최소 높이보다
+        작아지는 일이 없도록 그대로 '가장 큰 탭' 기준을 최소값으로 쓴다.
         """
         # 탭 분리 후: 창 크기는 '가장 큰 탭 페이지'에 맞춘다(넘으면 그 탭이 스크롤).
         pages = self._tab_pages
@@ -690,9 +697,15 @@ class SettingsDialog(QDialog):
         ag = screen.availableGeometry() if screen else None
         avail_w = ag.width() if ag else 1200
         avail_h = ag.height() if ag else 1000
-        w = min(content_w + 24, avail_w - 80)   # +24: 세로 스크롤바 + 탭 프레임 여유
-        h = min(content_h + tabbar_h + btn_h + 8, avail_h - 64)
-        self.setFixedSize(max(360, w), max(420, h))
+        min_w = min(content_w + 24, avail_w - 80)   # +24: 세로 스크롤바 + 탭 프레임 여유
+        min_h = min(content_h + tabbar_h + btn_h + 8, avail_h - 64)
+        min_w = max(360, min_w)
+        min_h = max(420, min_h)
+        self.setMinimumSize(min_w, min_h)
+        # 시작 폭은 최소치보다 60px 더 넓게 — Base URL 등 긴 입력값이 잘려 보이던 문제
+        # 완화(사용자 실측 스크린샷: "tps://..."로 앞부분이 밀려 보임). 화면을 넘지 않게 cap.
+        start_w = min(min_w + 60, avail_w - 80)
+        self.resize(start_w, min_h)
 
     def _setup_ui(self):
         # 설정이 늘며 단일 스크롤이 화면을 넘어, 탭 2개(일반/AI)로 분리한다.
@@ -934,11 +947,12 @@ class SettingsDialog(QDialog):
         self._key_reveal_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._key_reveal_btn.setToolTip("API 키 보기/숨기기")
         self._key_reveal_btn.toggled.connect(self._on_key_reveal_toggled)
-        self._refresh_btn = QPushButton()
+        # 아이콘만으로는 뜻이 안 와닿는다는 사용자 피드백(2026-07-29)으로 "모델조회"
+        # 텍스트를 붙였다 — 폭은 아이콘+글자에 맞춰 자연스럽게(고정폭 제거).
+        self._refresh_btn = QPushButton("모델조회")
         # Qt 내장 표준 아이콘 — 폰트 의존성 없이 모든 환경에서 보장
         self._refresh_btn.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
-        self._refresh_btn.setFixedWidth(34)
         self._refresh_btn.setToolTip("사용 가능한 모델 목록 가져오기")
         # NoFocus 필수: 클릭 시 setEnabled(False)로 꺼지는데, StrongFocus면 포커스가
         # editable 모델 콤보로 넘어가 텍스트가 전체 선택돼 조회 중 파랗게 반전돼 보인다.
@@ -981,15 +995,15 @@ class SettingsDialog(QDialog):
         self._ocr_model_combo.currentTextChanged.connect(
             lambda _t: self._on_model_text_changed(self._ocr_model_probe_status))
 
-        # 연결 테스트 — 모델 콤보 오른쪽(다른 버튼들과 같은 자리)에 배치. 칸이 좁아
-        # "연결 테스트"(5글자)는 콤보를 심하게 눌러 "테스트"로 줄인다(툴팁에 전체 설명).
-        # ⚠ setFixedWidth로 고정하면 전역 QPushButton padding(6px 16px)+3글자 폭보다
-        # 좁아 글자가 양옆으로 잘린다(2026-07-29 사용자 실측 스크린샷) — sizeHint에 맡긴다.
-        self._test_btn = QPushButton("테스트")
+        # 연결 테스트 — 모델 콤보 오른쪽(다른 버튼들과 같은 자리)에 배치. "테스트"로
+        # 줄였다가(칸이 좁던 시절) 창을 넓힌 뒤 다시 "연결 테스트"로 되돌렸다
+        # (2026-07-29 사용자 요청). setFixedWidth는 쓰지 않는다 — 전역 QPushButton
+        # padding(6px 16px)보다 좁게 고정하면 글자가 양옆으로 잘린다(실측 확인됨).
+        self._test_btn = QPushButton("연결 테스트")
         self._test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._test_btn.setToolTip(
-            "연결 테스트 — 키·연결을 확인하고, OCR 모델에 작은 테스트 이미지를 1회 실제로\n"
-            "보내 그 자리에서 되는지 확인합니다."
+            "키·연결을 확인하고, OCR 모델에 작은 테스트 이미지를 1회 실제로 보내\n"
+            "그 자리에서 되는지 확인합니다."
         )
         self._test_btn.clicked.connect(self._on_test_api)
 
