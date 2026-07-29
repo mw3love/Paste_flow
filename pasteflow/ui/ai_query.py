@@ -186,9 +186,15 @@ class AiQueryDialog(QDialog):
         self._editor = _QuestionEdit(
             self._on_submit, self._on_tab, self._on_alt_number,
             on_image_paste=self._on_image_pasted)
+        # 설정창 "빠른 검색" 그룹의 설명 문구를 없앤 대신(2026-07-29), 실제로 쓰는 이
+        # 자리에 사용법을 옮겨왔다 — 내용이 늘어난 만큼 불릿+들여쓰기로 가독성을 준다.
         self._editor.setPlaceholderText(
-            "질문을 입력하세요 — Tab 타겟 전환 · Alt+숫자 즉시전송 · Enter 실행 · "
-            "Shift+Enter 줄바꿈 · 이미지는 Ctrl+V/드래그로 첨부(1장)")
+            "질문을 입력하세요\n\n"
+            "  •  Tab / Shift+Tab — 타겟 전환\n"
+            "  •  Alt+숫자 — 그 타겟으로 즉시 전송\n"
+            "  •  Enter — 실행 (Shift+Enter는 줄바꿈)\n"
+            "  •  Ctrl+V / 드래그 — 이미지 첨부(1장)\n"
+            "  •  키워드+공백으로 시작 — 예: yt 강아지")
         self._editor.setFocus()
         layout.addWidget(self._editor, 1)
 

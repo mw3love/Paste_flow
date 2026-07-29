@@ -869,12 +869,9 @@ class SettingsDialog(QDialog):
         ai_form.setVerticalSpacing(4)
         ai_form.setContentsMargins(10, 8, 10, 8)
 
-        ai_desc = QLabel(
-            "AI OCR(이미지→텍스트 추출)에 쓸 API. 여러 API(구글 직결·게이트웨이 계정)를\n"
-            "프로필로 저장해 드롭다운으로 전환합니다.")
-        ai_desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
-        ai_desc.setWordWrap(True)
-        ai_form.addRow(ai_desc)
+        # 설명 문구 없음(2026-07-29 사용자 요청 — 군더더기 제거) — "+ 저장" 버튼을 누르면
+        # 뜨는 프로필 이름 입력창 자체가 "지금 입력된 값을 저장한다"는 뜻을 담고 있다
+        # (`_on_profile_save`의 QInputDialog 라벨 참고).
 
         # 섹션 구분선(프로필 ↔ 크리덴셜 ↔ 모델). 프로필 행이 이미 이걸 쓰므로 여기서 정의.
         def _ai_sep() -> QFrame:
@@ -1022,12 +1019,9 @@ class SettingsDialog(QDialog):
         palette_layout.setSpacing(4)
         palette_layout.setContentsMargins(10, 8, 10, 8)
 
-        palette_desc = QLabel(
-            "Alt+`로 뜨는 질문창의 목적지 목록 — Tab/Alt+숫자/키워드로 고릅니다.\n"
-            "예: yt  https://youtube.com/results?search_query={q}")
-        palette_desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
-        palette_desc.setWordWrap(True)
-        palette_layout.addWidget(palette_desc)
+        # 설명 문구 없음(2026-07-29 사용자 요청) — 여기 있던 사용법(Tab/Alt+숫자/키워드)과
+        # 예시는 실제로 그걸 쓰는 자리인 Alt+` 질문창의 입력란 placeholder로 옮겼다
+        # (`ui/ai_query.py`의 `_editor.setPlaceholderText` 참고). 설정창은 목록 편집만.
 
         # 열 제목 — 각 행이 테두리+8px 좌측 패딩을 갖게 됐으므로(_PaletteSiteRow) 헤더도
         # 같은 8px만큼 오른쪽으로 밀어야 아래 입력칸과 열이 맞는다(2026-07-29 사용자 보고:
@@ -1407,10 +1401,18 @@ class SettingsDialog(QDialog):
         self._apply_profile(self._profiles[idx])
 
     def _on_profile_save(self):
-        """[+ 저장] — 현재 입력값을 이름 붙여 프로필로 저장(같은 이름이면 갱신)."""
+        """[+ 저장] — 현재 입력값을 이름 붙여 프로필로 저장(같은 이름이면 갱신).
+
+        위 그룹의 설명 문구를 없앤 대신(2026-07-29), 이 다이얼로그의 라벨 자체가
+        "아래 Base URL·API 키·모델을 먼저 채운 뒤 여기서 이름만 정하면 된다"는 흐름을
+        전달한다 — 버튼만 눌러서는 이름 입력칸만 보여 그 앞뒤 맥락이 빠지기 쉽다.
+        """
         cur = self._profile_combo.currentText() if self._profiles else ""
         default = cur or self._guess_profile_label(self._base_url_edit.text())
-        name, ok = QInputDialog.getText(self, "프로필 저장", "프로필 이름:", text=default)
+        name, ok = QInputDialog.getText(
+            self, "프로필 저장",
+            "지금 입력된 Base URL·API 키·모델을 이 이름으로 저장합니다:",
+            text=default)
         if not ok:
             return
         name = name.strip()
