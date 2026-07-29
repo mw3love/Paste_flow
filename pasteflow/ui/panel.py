@@ -1237,8 +1237,8 @@ class ClipboardPanel(QWidget):
         self._clear_pin_drag_highlight()
         self._pin_drag_target_id = target_w.item_id
         target_w.setStyleSheet(
-            f"background-color: {COLORS['surface1']}; border-radius: 6px;"
-            f"border: 1px dashed {COLORS['peach']};"
+            f"background-color: #4d3320; border-radius: 6px;"
+            f"border: 2px dashed {COLORS['peach']};"
         )
 
     def _clear_pin_drag_highlight(self):
@@ -1270,8 +1270,8 @@ class ClipboardPanel(QWidget):
         self._clear_hist_drag_highlight()
         self._hist_drag_target_id = target_w.item_id
         target_w.setStyleSheet(
-            f"background-color: {COLORS['surface1']}; border-radius: 6px;"
-            f"border: 1px dashed {COLORS['peach']};"
+            f"background-color: #4d3320; border-radius: 6px;"
+            f"border: 2px dashed {COLORS['peach']};"
         )
 
     def _clear_hist_drag_highlight(self):

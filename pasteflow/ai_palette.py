@@ -25,12 +25,6 @@ from urllib.parse import quote_plus
 KIND_URL = "url"
 KIND_GOOGLE_AI = "google_ai"
 
-# 설정창 종류 드롭다운에 쓸 표시 라벨(순서=드롭다운 순서).
-KIND_LABELS: dict[str, str] = {
-    KIND_URL: "웹사이트 URL",
-    KIND_GOOGLE_AI: "Google AI 모드",
-}
-
 # 첫 실행(저장된 값이 없을 때) 기본 타겟 — 순서가 곧 팔레트 번호(Alt+1~9).
 DEFAULT_SITES: list[dict] = [
     {"label": "Google AI", "keyword": "g", "kind": KIND_GOOGLE_AI, "url": ""},
@@ -47,6 +41,28 @@ def load_sites(raw_json: str) -> list[dict]:
         except Exception:
             pass
     return [dict(s) for s in DEFAULT_SITES]
+
+
+def ensure_google_ai(sites: list[dict]) -> list[dict]:
+    """정확히 하나의 Google AI 타겟을 보장한다.
+
+    2026-07-29 설정창 개편(종류 선택 드롭다운 제거)으로 Google AI는 항상 정확히 1개인
+    **고정 타겟**이 됐다. 옛 설정에 저장된 목록은 이 불변식을 보장하지 않을 수 있어
+    (드롭다운이 있던 시절 여러 개 추가했거나, 전부 지웠을 수 있음) 로드 시점에
+    정규화한다: 없으면 맨 앞에 기본값을 추가하고, 여럿이면 첫 번째만 남긴다(멱등 —
+    이미 정확히 1개면 그대로).
+    """
+    result = []
+    seen_google = False
+    for site in sites:
+        if site.get("kind") == KIND_GOOGLE_AI:
+            if seen_google:
+                continue
+            seen_google = True
+        result.append(dict(site))
+    if not seen_google:
+        result.insert(0, dict(DEFAULT_SITES[0]))
+    return result
 
 
 def dump_sites(sites: list[dict]) -> str:

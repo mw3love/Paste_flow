@@ -74,11 +74,15 @@ class _DragHandle(QLabel):
 
 
 class _PaletteSiteRow(QWidget):
-    """AI 팔레트(Alt+` 자유질문창) 타겟 한 줄 — 번호·드래그손잡이·라벨·키워드·종류·URL·삭제.
+    """Gemini 팔레트(Alt+` 자유질문창) 타겟 한 줄 — 번호·드래그손잡이·라벨·키워드·URL·삭제.
 
     순서가 곧 팔레트의 번호(Alt+1~9)이므로 드래그 손잡이로 순서를 바꿀 수 있다(번호는
-    그 순서를 즉시 반영해 표시 — `set_number`). 종류가 `url`이 아니면(구글 AI 모드) 그
-    kind는 main.py의 기존 배관을 그대로 타므로 URL 칸이 의미가 없어 비활성화한다.
+    그 순서를 즉시 반영해 표시 — `set_number`). **종류 선택 드롭다운은 없다**(2026-07-29
+    개편) — Google AI 타겟은 `ensure_google_ai()`가 항상 정확히 1개로 보장하는 **고정
+    타겟**(`fixed=True`: 삭제 불가·URL 칸 없음·main.py의 기존 배관을 그대로 탐)이고,
+    사용자가 추가하는 나머지 타겟은 전부 URL 종류 하나뿐이라 고를 게 없다(추가 버튼이
+    항상 URL 타겟을 만든다 — `_on_add_palette_site`). 두 종류 다 위치(번호)는 드래그로
+    자유롭게 바꿀 수 있다.
     """
 
     remove_requested = pyqtSignal(object)   # self
@@ -88,11 +92,27 @@ class _PaletteSiteRow(QWidget):
 
     def __init__(self, site: dict, parent=None):
         super().__init__(parent)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(2)
+        self._fixed = site.get("kind") == ai_palette.KIND_GOOGLE_AI
 
-        # 위 줄: 손잡이(맨 왼쪽 — 재정렬 그립의 통상 위치)·번호·라벨·키워드·종류·삭제.
+        # 행마다 테두리로 시각적으로 구분(2026-07-29 사용자 요청 — "각 항목을 테두리로
+        # 구분하는게 시인성에 좋을듯"). 배경은 투명 유지(카드색이 그대로 비침) — 테두리만
+        # 더해 목록 항목 사이 경계를 준다.
+        # ⚠ WA_StyledBackground 필수(오프스크린 렌더로 실측·확인 — 2026-07-29): Qt는
+        # 서브클래싱된 QWidget에 한해 setStyleSheet의 배경/테두리를 자동 적용하지 않는다
+        # (순수 QWidget() 인스턴스는 예외적으로 자동 적용됨). 이 속성 없이는 border 자체가
+        # 그려지지 않아 이 기능 추가가 조용히 무효화된다.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("paletteRow")
+        self.setStyleSheet(
+            f"QWidget#paletteRow {{ background: transparent; "
+            f"border: 1px solid {_LINE}; border-radius: 6px; }}"
+        )
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 6, 8, 6)
+        outer.setSpacing(4)
+
+        # 위 줄: 손잡이(맨 왼쪽 — 재정렬 그립의 통상 위치)·번호·라벨·키워드·(고정 배지)·삭제.
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(4)
@@ -105,12 +125,6 @@ class _PaletteSiteRow(QWidget):
         self.number_label.setStyleSheet(f"color: {_TITLE}; font-size: 11px;")
         self.number_label.setToolTip("Alt+숫자로 이 타겟에 바로 보냅니다")
 
-        # ⚠ DIALOG_STYLE(전역)엔 :disabled 규칙이 없다 — Qt 기본 비활성 렌더는 이 다크
-        # 테마에서 글자·배경이 거의 같은 톤이 돼(2026-07-29 사용자 보고: "맨 앞 위치조정
-        # 버튼 색이 겹쳐서 안 보임") URL 칸이 상시 비활성인 이 위젯에서 특히 두드러진다.
-        # 위젯 자체에 :disabled까지 포함한 스타일을 직접 줘야 한다(ai_query.py의
-        # `QLabel:disabled`/`QComboBox:disabled` 처리와 같은 이유 — "스타일시트로 색을
-        # 명시한 위젯은 Qt 기본 회색화가 안 먹는다").
         self.label_edit = QLineEdit(site.get("label", ""))
         self.label_edit.setPlaceholderText("표시 이름")
         self.label_edit.setFixedWidth(90)
@@ -122,65 +136,60 @@ class _PaletteSiteRow(QWidget):
             "(예: \"yt 고양이\" → 유튜브로 \"고양이\" 검색). 비워 두면 접두어 없음.")
         self.keyword_edit.setFixedWidth(48)
 
-        self.kind_combo = QComboBox()
-        # 고정폭 — 헤더 라벨과도 정확히 맞아야 하고, 행마다 콤보가 자기 텍스트 길이로만
-        # 자라면 행끼리 열이 안 맞아 지그재그로 보인다("PasteFlow 답변(API)"가 가장 길다).
-        self.kind_combo.setFixedWidth(150)
-        for kind, kind_label in ai_palette.KIND_LABELS.items():
-            self.kind_combo.addItem(kind_label, kind)
-        idx = self.kind_combo.findData(site.get("kind", ai_palette.KIND_URL))
-        self.kind_combo.setCurrentIndex(max(0, idx))
-        self.kind_combo.currentIndexChanged.connect(self._on_kind_changed)
-
-        # ✕ 삭제 버튼 — 전역 QPushButton 기본 스타일의 padding(6px 16px = 가로 32px)이
-        # setFixedWidth(28)보다 커서 글자가 그려질 내부 폭이 음수가 돼 "✕"가 전혀 안
-        # 보였다(2026-07-29 사용자 보고). 이 버튼만 패딩을 좁힌 전용 스타일로 덮는다.
-        self.remove_btn = QPushButton("✕")
-        self.remove_btn.setFixedWidth(28)
-        self.remove_btn.setToolTip("이 타겟 삭제")
-        self.remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.remove_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {_BTN}; color: {_TXT}; border: none; "
-            f"border-radius: 6px; padding: 4px 2px; }}"
-            f"QPushButton:hover {{ background-color: {_BTN_HOVER}; }}"
-        )
-        self.remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
-
         top.addWidget(self.drag_handle)
         top.addWidget(self.number_label)
         top.addWidget(self.label_edit)
         top.addWidget(self.keyword_edit)
-        top.addWidget(self.kind_combo)
+
+        if self._fixed:
+            # 종류 드롭다운이 있던 자리를 대신하는 고정 배지 — "이건 항상 Google AI"임을 알림.
+            badge = QLabel("Google AI · 고정")
+            badge.setStyleSheet(
+                f"color: {COLORS['peach']}; font-size: 10px; font-weight: 600;")
+            badge.setToolTip(
+                "항상 정확히 1개 있어야 하는 내장 타겟이라 삭제할 수 없습니다.\n"
+                "드래그 손잡이로 순서(번호)는 자유롭게 바꿀 수 있습니다.")
+            top.addWidget(badge)
+
         top.addStretch(1)
-        top.addWidget(self.remove_btn)
+
+        # ✕ 삭제 버튼 — 고정 타겟(Google AI)은 항상 정확히 1개여야 하므로 만들지 않는다.
+        # 전역 QPushButton 기본 스타일의 padding(6px 16px = 가로 32px)이 setFixedWidth(28)
+        # 보다 커서 글자가 그려질 내부 폭이 음수가 돼 "✕"가 전혀 안 보였다(2026-07-29
+        # 사용자 보고). 이 버튼만 패딩을 좁힌 전용 스타일로 덮는다.
+        self.remove_btn = None
+        if not self._fixed:
+            self.remove_btn = QPushButton("✕")
+            self.remove_btn.setFixedWidth(28)
+            self.remove_btn.setToolTip("이 타겟 삭제")
+            self.remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.remove_btn.setStyleSheet(
+                f"QPushButton {{ background-color: {_BTN}; color: {_TXT}; border: none; "
+                f"border-radius: 6px; padding: 4px 2px; }}"
+                f"QPushButton:hover {{ background-color: {_BTN_HOVER}; }}"
+            )
+            self.remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
+            top.addWidget(self.remove_btn)
+
         outer.addLayout(top)
 
-        # 아래 줄: URL — 한 줄에 다 욱여넣으면 너무 잘려서 따로 한 줄 전체 폭을 준다.
-        url_row = QHBoxLayout()
-        url_row.setContentsMargins(20 + 4 + 20 + 4, 0, 0, 0)  # 손잡이+번호 폭만큼 들여써 위 라벨과 시작점을 맞춤
-        url_row.setSpacing(4)
-        self.url_edit = QLineEdit(site.get("url", ""))
-        self.url_edit.setPlaceholderText("https://example.com/search?q={q}")
-        # 같은 이유(:disabled 미정의) — url이 아닌 종류(구글 AI 모드)는 이 칸이 상시
-        # 비활성이라 안내 문구("(내장 — main.py가 처리)")가 안 보이면 그 자체로
-        # "왜 URL 칸이 비었지"가 되므로 대비를 명시적으로 준다.
-        self.url_edit.setStyleSheet(
-            f"QLineEdit {{ background-color: {_INSET}; color: {_TXT}; "
-            f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
-            f"QLineEdit:focus {{ border-color: {COLORS['peach']}; }}"
-            f"QLineEdit:disabled {{ background-color: {_PAGE}; color: #6a6a6a; "
-            f"border: 1px solid {_LINE}; }}"
-        )
-        url_row.addWidget(self.url_edit, 1)
-        outer.addLayout(url_row)
-
-        self._on_kind_changed()
-
-    def _on_kind_changed(self, *_args):
-        is_url = self.kind_combo.currentData() == ai_palette.KIND_URL
-        self.url_edit.setEnabled(is_url)
-        self.url_edit.setPlaceholderText(
-            "https://example.com/search?q={q}" if is_url else "(내장 — main.py가 처리)")
+        # 아래 줄: URL — Google AI 고정 타겟은 URL이 의미 없어(main.py의 기존 배관을
+        # 그대로 탐) 아예 표시하지 않는다. 한 줄에 다 욱여넣으면 너무 잘려서 URL만 따로
+        # 한 줄 전체 폭을 준다.
+        self.url_edit = None
+        if not self._fixed:
+            url_row = QHBoxLayout()
+            url_row.setContentsMargins(20 + 4 + 20 + 4, 0, 0, 0)  # 손잡이+번호 폭만큼 들여써 위 라벨과 시작점을 맞춤
+            url_row.setSpacing(4)
+            self.url_edit = QLineEdit(site.get("url", ""))
+            self.url_edit.setPlaceholderText("https://example.com/search?q={q}")
+            self.url_edit.setStyleSheet(
+                f"QLineEdit {{ background-color: {_INSET}; color: {_TXT}; "
+                f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
+                f"QLineEdit:focus {{ border-color: {COLORS['peach']}; }}"
+            )
+            url_row.addWidget(self.url_edit, 1)
+            outer.addLayout(url_row)
 
     def set_number(self, n: int):
         """드래그·추가·삭제로 순서가 바뀔 때마다 표시 번호(=Alt+숫자)를 갱신."""
@@ -190,8 +199,8 @@ class _PaletteSiteRow(QWidget):
         return {
             "label": self.label_edit.text().strip() or "이름 없음",
             "keyword": self.keyword_edit.text().strip(),
-            "kind": self.kind_combo.currentData(),
-            "url": self.url_edit.text().strip(),
+            "kind": ai_palette.KIND_GOOGLE_AI if self._fixed else ai_palette.KIND_URL,
+            "url": self.url_edit.text().strip() if self.url_edit is not None else "",
         }
 
 
@@ -798,11 +807,10 @@ class SettingsDialog(QDialog):
         # ④ AI 호출(alt+`) / AI OCR
         self._ask_ai_hotkey = HotkeyEdit()
         self._ask_ai_hotkey.setToolTip(
-            "컨텍스트 없이 즉석에서 AI에게 질문하는 입력창을 띄웁니다.\n"
-            "클립보드 항목과 무관하게 아무 때나 한 키로 AI를 호출해 자유 질문하고 답변을 받습니다.\n"
-            "(우클릭 'AI에게 질문'은 선택한 항목을 컨텍스트로 묻는 방식 — 이건 컨텍스트 없는 자유 질문)"
+            "컨텍스트 없이 즉석에서 Gemini에게 질문하는 입력창을 띄웁니다.\n"
+            "클립보드 항목과 무관하게 아무 때나 한 키로 Gemini를 호출해 자유 질문하고 답변을 받습니다."
         )
-        hotkey_form.addRow("•  AI 호출:", self._ask_ai_hotkey)
+        hotkey_form.addRow("•  Gemini 호출:", self._ask_ai_hotkey)
 
         # AI OCR — 화면 영역을 AI(설정된 API)로 텍스트 인식. 별도 엔진 없음.
         self._ocr_hotkey = HotkeyEdit()
@@ -908,6 +916,14 @@ class SettingsDialog(QDialog):
 
         # 크리덴셜 — 프로필로 전환하는 (API 키 + Base URL) 한 벌. 게이트웨이든 구글 직결이든
         # OpenAI 호환 경로라 base_url만 바꾸면 된다(구글: .../v1beta/openai).
+        # Base URL을 API 키보다 먼저 보여준다 — 엔드포인트를 먼저 정하고 그다음 키를
+        # 입력하는 게 자연스러운 순서(어느 API인지 모르는 채로 키부터 채우면 어색하다).
+        self._base_url_edit = QLineEdit()
+        self._base_url_edit.setPlaceholderText(
+            "구글: https://generativelanguage.googleapis.com/v1beta/openai"
+            "  /  게이트웨이: https://…mindlogic.ai/v1/gateway")
+        ai_form.addRow(QLabel("•  Base URL:"), self._base_url_edit)
+
         self._gateway_key_edit = QLineEdit()
         self._gateway_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._gateway_key_edit.setPlaceholderText("API 키 (구글 또는 게이트웨이)")
@@ -939,12 +955,6 @@ class SettingsDialog(QDialog):
         gw_row.addWidget(self._refresh_btn)
         ai_form.addRow(QLabel("•  API 키:"), gw_row)
 
-        self._base_url_edit = QLineEdit()
-        self._base_url_edit.setPlaceholderText(
-            "구글: https://generativelanguage.googleapis.com/v1beta/openai"
-            "  /  게이트웨이: https://…mindlogic.ai/v1/gateway")
-        ai_form.addRow(QLabel("•  Base URL:"), self._base_url_edit)
-
         ai_form.addRow(_ai_sep())  # 크리덴셜 ↔ 모델 섹션 구분
 
         # OCR 모델 — 이미지 입력을 받는 모델이어야 한다.
@@ -974,47 +984,53 @@ class SettingsDialog(QDialog):
         self._ocr_model_combo.currentTextChanged.connect(
             lambda _t: self._on_model_text_changed(self._ocr_model_probe_status))
 
-        ai_form.addRow(self._ocr_model_label, self._stack(
-            self._ocr_model_combo, self._ocr_model_probe_status))
-
-        # API 연결 테스트 — 모델명 바로 아래에 배치(설명 힌트보다 위).
-        self._test_btn = QPushButton("연결 테스트")
+        # 연결 테스트 — 모델 콤보 오른쪽(다른 버튼들과 같은 자리)에 배치. 칸이 좁아
+        # "연결 테스트"(5글자)는 콤보를 심하게 눌러 "테스트"로 줄인다(툴팁에 전체 설명).
+        self._test_btn = QPushButton("테스트")
         self._test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._test_btn.setFixedWidth(56)
         self._test_btn.setToolTip(
-            "키·연결을 확인하고, OCR 모델에 작은 테스트 이미지를 1회 실제로 보내\n"
-            "그 자리에서 되는지 확인합니다."
+            "연결 테스트 — 키·연결을 확인하고, OCR 모델에 작은 테스트 이미지를 1회 실제로\n"
+            "보내 그 자리에서 되는지 확인합니다."
         )
         self._test_btn.clicked.connect(self._on_test_api)
+
+        model_row = QHBoxLayout()
+        model_row.setContentsMargins(0, 0, 0, 0)
+        model_row.setSpacing(4)
+        model_row.addWidget(self._ocr_model_combo, 1)
+        model_row.addWidget(self._test_btn)
+        ai_form.addRow(self._ocr_model_label, model_row)
+
+        # 연결·모델 프로브 결과 — 실행 순서(연결→모델)대로 콤보 아래에 쌓는다.
         self._test_status = QLabel("")
         self._test_status.setWordWrap(True)
         self._test_status.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
-        test_row = QHBoxLayout()
-        test_row.setContentsMargins(0, 0, 0, 0)
-        test_row.setSpacing(8)
-        test_row.addWidget(self._test_btn)
-        test_row.addWidget(self._test_status, 1)
-        ai_form.addRow("", test_row)
+        ai_form.addRow("", self._stack(self._test_status, self._ocr_model_probe_status))
 
         tab_ai.addWidget(ai_group)
 
-        # ── AI 팔레트 타겟 (Alt+` 자유질문창의 목적지 목록) ──
-        # 질문을 어디로 보낼지 사용자가 직접 관리하는 목록 — 순서가 팔레트 번호(Alt+1~9),
-        # 종류가 url이면 {q} 자리에 질의가 채워진다(pasteflow/ai_palette.py 참고).
-        palette_group = QGroupBox("AI 팔레트 타겟 (Alt+` 자유질문 목적지)")
+        # ── Gemini 팔레트 타겟 (Alt+` 자유질문창의 목적지 목록) ──
+        # 질문을 어디로 보낼지 사용자가 직접 관리하는 목록 — 순서가 팔레트 번호(Alt+1~9).
+        # Google AI는 항상 정확히 1개인 고정 타겟, 나머지는 전부 URL 타겟이라 {q} 자리에
+        # 질의가 채워진다(pasteflow/ai_palette.py 참고).
+        palette_group = QGroupBox("Gemini 팔레트 타겟 (Alt+` 자유질문 목적지)")
         palette_layout = QVBoxLayout(palette_group)
         palette_layout.setSpacing(4)
         palette_layout.setContentsMargins(10, 8, 10, 8)
 
         palette_desc = QLabel(
             "Alt+`로 뜨는 질문창에서 Tab으로 고르거나 Alt+숫자로 즉시 보낼 목적지 목록입니다.\n"
-            "\"종류\"가 \"웹사이트 URL\"이면 URL의 {q} 자리에 입력한 질문이 들어갑니다.\n"
+            "Google AI는 항상 1개 고정이고(삭제 불가, 순서만 이동), 추가한 타겟은 URL의 "
+            "{q} 자리에 입력한 질문이 들어갑니다.\n"
             "키워드를 정하면 그 글자+공백으로 문장을 시작할 때 자동으로 그 타겟이 선택됩니다.")
         palette_desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
         palette_desc.setWordWrap(True)
         palette_layout.addWidget(palette_desc)
 
-        # 열 제목 — 행이 위/아래 두 줄(위: 손잡이~종류, 아래: URL 전체폭)이라 제목도 같은
+        # 열 제목 — 행이 위/아래 두 줄(위: 손잡이~키워드, 아래: URL 전체폭)이라 제목도 같은
         # 두 줄 구조로 맞춘다. 폭은 각 행 위젯의 setFixedWidth와 정확히 짝을 이뤄야 칸이 맞는다.
+        # (행 자체가 테두리+8px 패딩을 갖게 되며 8px만큼 살짝 어긋날 수 있으나 무시할 수준.)
         _hdr_style = f"color: {_TITLE}; font-size: 10px; font-weight: 600;"
 
         palette_header_top = QHBoxLayout()
@@ -1040,11 +1056,6 @@ class SettingsDialog(QDialog):
         hdr_keyword.setFixedWidth(48)
         hdr_keyword.setStyleSheet(_hdr_style)
         palette_header_top.addWidget(hdr_keyword)
-
-        hdr_kind = QLabel("종류")
-        hdr_kind.setFixedWidth(150)
-        hdr_kind.setStyleSheet(_hdr_style)
-        palette_header_top.addWidget(hdr_kind)
 
         palette_header_top.addStretch(1)
 
@@ -1431,10 +1442,15 @@ class SettingsDialog(QDialog):
         self._populate_profile_combo()
         self._set_status(f"프로필 '{label}' 삭제 — 하단 [저장] 시 반영됩니다.")
 
-    # ── AI 팔레트 타겟(Alt+` 자유질문 목적지) ────────────────────────────────────
+    # ── Gemini 팔레트 타겟(Alt+` 자유질문 목적지) ────────────────────────────────
     def _load_palette_sites(self):
-        """저장된 목록(없으면 기본값)으로 행들을 채운다."""
-        sites = ai_palette.load_sites(self._settings.get(self.KEY_AI_PALETTE_SITES, ""))
+        """저장된 목록(없으면 기본값)으로 행들을 채운다.
+
+        `ensure_google_ai`로 정규화 — 종류 드롭다운이 있던 옛 설정에 Google AI가 0개나
+        여러 개 저장돼 있어도 여기서 정확히 1개로 맞춘다(멱등, ai_palette.py 참고).
+        """
+        sites = ai_palette.ensure_google_ai(
+            ai_palette.load_sites(self._settings.get(self.KEY_AI_PALETTE_SITES, "")))
         for site in sites:
             self._add_palette_row(site)
         self._renumber_palette_rows()

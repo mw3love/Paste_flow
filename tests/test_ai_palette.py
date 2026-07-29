@@ -32,6 +32,38 @@ class TestLoadSites:
         assert ai_palette.DEFAULT_SITES[0]["label"] != "훼손됨"
 
 
+class TestEnsureGoogleAi:
+    def test_missing_google_ai_is_inserted_first(self):
+        sites = [{"label": "유튜브", "keyword": "yt", "kind": "url", "url": ""}]
+        result = ai_palette.ensure_google_ai(sites)
+        assert result[0]["kind"] == ai_palette.KIND_GOOGLE_AI
+        assert result[1:] == sites
+
+    def test_single_google_ai_is_left_untouched(self):
+        sites = [{"label": "Google AI", "keyword": "g", "kind": "google_ai", "url": ""},
+                  {"label": "유튜브", "keyword": "yt", "kind": "url", "url": ""}]
+        assert ai_palette.ensure_google_ai(sites) == sites
+
+    def test_duplicate_google_ai_keeps_only_first(self):
+        sites = [{"label": "Google AI", "keyword": "g", "kind": "google_ai", "url": ""},
+                  {"label": "유튜브", "keyword": "yt", "kind": "url", "url": ""},
+                  {"label": "옛 구글", "keyword": "g2", "kind": "google_ai", "url": ""}]
+        result = ai_palette.ensure_google_ai(sites)
+        assert [s["kind"] for s in result].count(ai_palette.KIND_GOOGLE_AI) == 1
+        assert result[0]["label"] == "Google AI"
+
+    def test_is_idempotent(self):
+        sites = [{"label": "유튜브", "keyword": "yt", "kind": "url", "url": ""}]
+        once = ai_palette.ensure_google_ai(sites)
+        twice = ai_palette.ensure_google_ai(once)
+        assert once == twice
+
+    def test_does_not_mutate_input(self):
+        sites = [{"label": "유튜브", "keyword": "yt", "kind": "url", "url": ""}]
+        ai_palette.ensure_google_ai(sites)
+        assert sites == [{"label": "유튜브", "keyword": "yt", "kind": "url", "url": ""}]
+
+
 class TestBuildUrl:
     def test_placeholder_replaced(self):
         url = ai_palette.build_url("https://search.danawa.com/dsearch.php?query={q}", "그래픽카드")

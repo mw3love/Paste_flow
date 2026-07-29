@@ -113,7 +113,7 @@ class AiQueryDialog(QDialog):
         self._chips: list[QPushButton] = []
         self._result_index: "int | None" = None
         self._result_query: str = ""
-        self.setWindowTitle("AI에게 질문")
+        self.setWindowTitle("Gemini에게 질문")
         # 항상 위 — 패널이 TOPMOST라(panel._set_always_on_top) 일반 창은 Windows Z-order상
         # 패널 아래에 깔려 클릭해도 앞으로 나오지 못한다(부모를 패널로 두던 시절엔 '소유 창은
         # 소유자 위'라는 별개 규칙에 얹혀 가려지지 않았지만, 그 소유 관계가 바로 패널을 못 누르게
@@ -129,7 +129,8 @@ class AiQueryDialog(QDialog):
         # 포커스를 뺏기며 패널이 자동으로 숨는 것은 panel.py의 changeEvent 예외 목록
         # (AiQueryDialog 포함)이 막는다.
         self.setWindowModality(Qt.WindowModality.NonModal)
-        self.setMinimumSize(420, 200)
+        # 취소 버튼 제거(우상단 X·Esc로 충분)로 그만큼 최소 높이를 줄였다(200→160).
+        self.setMinimumSize(420, 160)
         self.setStyleSheet(f"""
             QDialog {{
                 background-color: {COLORS['base']};
@@ -212,13 +213,9 @@ class AiQueryDialog(QDialog):
         layout.addLayout(chip_row)
         self._editor.textChanged.connect(self._update_highlight)
 
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        cancel_btn = QPushButton("취소")
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-        layout.addLayout(btn_row)
-
+        # 취소 버튼은 두지 않는다 — 우상단 X(네이티브 타이틀바 닫기)와 Esc(QDialog 기본
+        # reject())가 이미 같은 역할을 한다(2026-07-29). 버튼 행이 차지하던 세로 공간은
+        # setMinimumSize에서 함께 줄였다.
         self._update_highlight()  # 초기 하이라이트 반영
 
     def showEvent(self, event):
