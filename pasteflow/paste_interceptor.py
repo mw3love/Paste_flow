@@ -43,6 +43,15 @@ VK_C = 0x43
 VK_CONTROL = 0x11
 VK_SHIFT = 0x10
 VK_MENU = 0x12  # Alt
+# 좌우 구분 변형 — 로우레벨 훅이 모디파이어를 어느 코드로 보고하는지가 Windows 빌드·
+# 드라이버에 따라 갈릴 수 있어(특히 Alt는 SYSKEY라 더) 훅 자체 상태추적(_mod_alt 등,
+# 아래 _low_level_keyboard_proc)이 제네릭/좌우 코드를 전부 매칭하도록 함께 정의한다.
+VK_LCONTROL = 0xA2
+VK_RCONTROL = 0xA3
+VK_LSHIFT = 0xA0
+VK_RSHIFT = 0xA1
+VK_LMENU = 0xA4
+VK_RMENU = 0xA5
 VK_MASK = 0xE8  # 미할당 가상 키 — Ctrl+Shift 조합을 더럽혀 입력기 전환 팝업 방지
 VK_RETURN = 0x0D
 LLKHF_INJECTED = 0x10  # KBDLLHOOKSTRUCT.flags 비트 — SendInput 등으로 주입된 키
@@ -228,6 +237,11 @@ class PasteInterceptor:
     전용 단축키만 suppress하고, 일반 Ctrl+V/C 에는 개입하지 않는다.
     """
 
+    # self._mod_alt가 True로 남은 채 이만큼(초) 지나면 GetAsyncKeyState로 재확인한다
+    # (_low_level_keyboard_proc의 Alt 스테일 보정 참고). Alt+F2 레이스는 두 keydown
+    # 사이 수십ms 안에 끝나므로 이보다 훨씬 짧아 이 마진에 걸리지 않는다.
+    _MOD_ALT_STALE_S = 0.2
+
     def __init__(
         self,
         paste_queue: PasteQueue,
@@ -267,6 +281,14 @@ class PasteInterceptor:
         self._direct_paste_active = False  # direct_paste 중 훅 무시 플래그
         # keydown을 suppress한 키의 vk — 그 짝 keyup도 함께 막기 위해 기억한다(_suppress 참고)
         self._suppressed_vks: set[int] = set()
+        # Alt 눌림 상태 — 훅이 자기 눈으로 본 keydown/keyup으로 직접 추적한다(Ctrl/Shift는
+        # 이 레이스가 보고되지 않아 기존 GetAsyncKeyState 그대로 둔다 — 범위를 실제 증상에만
+        # 맞춘다). GetAsyncKeyState 대신인 이유는 _low_level_keyboard_proc 주석 참고
+        # (2026-07-29 사용자 실측: Alt+F2가 항상 두 번째 누름에야 작동 — GetAsyncKeyState가
+        # Alt의 SYSKEYDOWN을 전역 테이블에 아직 못 반영한 순간의 레이스. Alt는 시스템키라
+        # 유독 이 레이스를 탄다).
+        self._mod_alt = False
+        self._mod_alt_ts = 0.0  # self._mod_alt가 True로 바뀐 시각(모노토닉) — 아래 스테일 보정용
         # 패널 토글 단축키 (파싱된 상태로 저장)
         self._panel_vk: int = 0
         self._panel_need_ctrl: bool = False
@@ -510,6 +532,8 @@ class PasteInterceptor:
             # 앱이 'V가 눌린 채'로 남는다. 물리 키(비주입)만 걸러내면 이 자기충돌이 없다.
             if nCode >= 0 and wParam in (WM_KEYUP, WM_SYSKEYUP):
                 kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                if kbd.vkCode in (VK_MENU, VK_LMENU, VK_RMENU):
+                    self._mod_alt = False
                 if (kbd.vkCode in self._suppressed_vks
                         and not (kbd.flags & LLKHF_INJECTED)):
                     self._suppressed_vks.discard(kbd.vkCode)
@@ -520,9 +544,25 @@ class PasteInterceptor:
                     lParam, ctypes.POINTER(ctypes.c_ulong)
                 ).contents.value
 
+                # Alt는 훅이 직접 추적한 상태를 쓴다(GetAsyncKeyState 미사용) — 그 조회가
+                # Alt 자신의 SYSKEYDOWN 직후 전역 비동기 키 상태 테이블에 아직 반영되기 전인
+                # 순간과 겹치면 "Alt 안 눌림"으로 오판해, Alt+F2 같은 조합이 **두 번째 누름에야
+                # 작동**했다(2026-07-29 사용자 실측 — Alt만 SYSKEY라 이 레이스를 탄다. Ctrl·
+                # Shift는 증상이 없어 그대로 GetAsyncKeyState를 쓴다).
+                if vk_code in (VK_MENU, VK_LMENU, VK_RMENU):
+                    self._mod_alt = True
+                    self._mod_alt_ts = time.monotonic()
+
                 ctrl_pressed = bool(_user32.GetAsyncKeyState(VK_CONTROL) & 0x8000)
                 shift_pressed = bool(_user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
-                alt_pressed = bool(_user32.GetAsyncKeyState(VK_MENU) & 0x8000)
+                alt_pressed = self._mod_alt
+                if alt_pressed and (time.monotonic() - self._mod_alt_ts) > self._MOD_ALT_STALE_S:
+                    # 훅 자체 추적이 오래 True였는데 실제 물리 상태가 아니면(Alt+Tab 등으로
+                    # keyup을 훅이 못 받은 예외) 물리 상태로 재보정한다 — 레이스는 수십ms 안에
+                    # 끝나므로 이 마진을 건드리지 않고, 자가치유만 이 경로로 들어온다.
+                    if not (_user32.GetAsyncKeyState(VK_MENU) & 0x8000):
+                        self._mod_alt = False
+                        alt_pressed = False
 
                 if ctrl_pressed and shift_pressed and not alt_pressed:
                     now = time.monotonic()
