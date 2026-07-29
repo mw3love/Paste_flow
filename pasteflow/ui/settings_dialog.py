@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QStyle, QStyledItemDelegate, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
     QPlainTextEdit, QInputDialog, QTabWidget,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize, QPoint
 from PyQt6.QtGui import QColor, QFontMetrics
 
 from pasteflow import ai_palette
@@ -39,47 +39,79 @@ class _ModelIndentDelegate(QStyledItemDelegate):
             option.rect.setLeft(option.rect.left() + _MODEL_INDENT_PX)
 
 
-class _PaletteSiteRow(QWidget):
-    """AI 팔레트(Alt+` 자유질문창) 타겟 한 줄 — 라벨·키워드·종류·URL·삭제.
+class _DragHandle(QLabel):
+    """행 순서를 바꾸는 손잡이 — 누른 채 위아래로 끌면 소유 행이 드래그 신호를 낸다.
 
-    순서가 곧 팔레트의 번호(Alt+1~9)이므로 위/아래 이동 버튼으로 순서를 바꿀 수 있다.
-    종류가 `url`이 아니면(구글 AI·드라이브·내부 API 답변) 그 kind는 main.py의 기존
-    배관을 그대로 타므로 URL 칸이 의미가 없어 비활성화한다.
+    QDrag(OLE D&D)는 쓰지 않는다(패널 드래그와 같은 이유 회피 — 이 앱은 창 안 재배치에
+    항상 수동 마우스 추적 방식을 쓴다, panel.py의 fake drag와 동일 계열). 눌린 동안의
+    후속 mouseMove/mouseRelease는 Qt의 암묵적 그랩으로 이 위젯이 계속 받는다.
+    """
+
+    def __init__(self, row: "_PaletteSiteRow"):
+        super().__init__("⠿")
+        self._row = row
+        self.setFixedWidth(20)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setStyleSheet(f"color: {_TXT}; font-size: 14px;")
+        self.setToolTip("드래그해서 순서 바꾸기")
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self._row.drag_started.emit(self._row)
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if e.buttons() & Qt.MouseButton.LeftButton:
+            self._row.drag_moved.emit(self._row, int(e.globalPosition().y()))
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self._row.drag_ended.emit(self._row)
+        super().mouseReleaseEvent(e)
+
+
+class _PaletteSiteRow(QWidget):
+    """AI 팔레트(Alt+` 자유질문창) 타겟 한 줄 — 번호·드래그손잡이·라벨·키워드·종류·URL·삭제.
+
+    순서가 곧 팔레트의 번호(Alt+1~9)이므로 드래그 손잡이로 순서를 바꿀 수 있다(번호는
+    그 순서를 즉시 반영해 표시 — `set_number`). 종류가 `url`이 아니면(구글 AI·드라이브·
+    내부 API 답변) 그 kind는 main.py의 기존 배관을 그대로 타므로 URL 칸이 의미가 없어
+    비활성화한다.
     """
 
     remove_requested = pyqtSignal(object)   # self
-    move_up_requested = pyqtSignal(object)
-    move_down_requested = pyqtSignal(object)
+    drag_started = pyqtSignal(object)       # self
+    drag_moved = pyqtSignal(object, int)    # self, global_y
+    drag_ended = pyqtSignal(object)         # self
 
     def __init__(self, site: dict, parent=None):
         super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+
+        # 위 줄: 손잡이(맨 왼쪽 — 재정렬 그립의 통상 위치)·번호·라벨·키워드·종류·삭제.
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(4)
+
+        self.drag_handle = _DragHandle(self)
+
+        self.number_label = QLabel("")
+        self.number_label.setFixedWidth(20)
+        self.number_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.number_label.setStyleSheet(f"color: {_TITLE}; font-size: 11px;")
+        self.number_label.setToolTip("Alt+숫자로 이 타겟에 바로 보냅니다")
 
         # ⚠ DIALOG_STYLE(전역)엔 :disabled 규칙이 없다 — Qt 기본 비활성 렌더는 이 다크
         # 테마에서 글자·배경이 거의 같은 톤이 돼(2026-07-29 사용자 보고: "맨 앞 위치조정
-        # 버튼 색이 겹쳐서 안 보임") 첫 행 ▲·마지막 행 ▼가 상시 비활성인 이 위젯에서 특히
-        # 두드러진다. 위젯 자체에 :disabled까지 포함한 스타일을 직접 줘야 한다(ai_query.py의
+        # 버튼 색이 겹쳐서 안 보임") URL 칸이 상시 비활성인 이 위젯에서 특히 두드러진다.
+        # 위젯 자체에 :disabled까지 포함한 스타일을 직접 줘야 한다(ai_query.py의
         # `QLabel:disabled`/`QComboBox:disabled` 처리와 같은 이유 — "스타일시트로 색을
         # 명시한 위젯은 Qt 기본 회색화가 안 먹는다").
-        _btn_style = (
-            f"QPushButton {{ background-color: {_BTN}; color: {_TXT}; border: none; "
-            f"border-radius: 6px; padding: 6px 16px; }}"
-            f"QPushButton:hover {{ background-color: {_BTN_HOVER}; }}"
-            f"QPushButton:disabled {{ background-color: {_BTN}; color: #6a6a6a; }}"
-        )
-        self.up_btn = QPushButton("▲")
-        self.down_btn = QPushButton("▼")
-        for btn in (self.up_btn, self.down_btn):
-            btn.setFixedWidth(24)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setStyleSheet(_btn_style)
-        self.up_btn.setToolTip("순서를 위로 — 번호(Alt+숫자)가 바뀝니다")
-        self.down_btn.setToolTip("순서를 아래로 — 번호(Alt+숫자)가 바뀝니다")
-        self.up_btn.clicked.connect(lambda: self.move_up_requested.emit(self))
-        self.down_btn.clicked.connect(lambda: self.move_down_requested.emit(self))
-
         self.label_edit = QLineEdit(site.get("label", ""))
         self.label_edit.setPlaceholderText("표시 이름")
         self.label_edit.setFixedWidth(90)
@@ -92,15 +124,42 @@ class _PaletteSiteRow(QWidget):
         self.keyword_edit.setFixedWidth(48)
 
         self.kind_combo = QComboBox()
-        # 고정 최소폭 — 행마다 콤보가 자기 텍스트 길이로만 자라면 행끼리 열이 안 맞아
-        # 지그재그로 보인다("PasteFlow 답변(API)"가 가장 길다).
-        self.kind_combo.setMinimumWidth(150)
+        # 고정폭 — 헤더 라벨과도 정확히 맞아야 하고, 행마다 콤보가 자기 텍스트 길이로만
+        # 자라면 행끼리 열이 안 맞아 지그재그로 보인다("PasteFlow 답변(API)"가 가장 길다).
+        self.kind_combo.setFixedWidth(150)
         for kind, kind_label in ai_palette.KIND_LABELS.items():
             self.kind_combo.addItem(kind_label, kind)
         idx = self.kind_combo.findData(site.get("kind", ai_palette.KIND_URL))
         self.kind_combo.setCurrentIndex(max(0, idx))
         self.kind_combo.currentIndexChanged.connect(self._on_kind_changed)
 
+        # ✕ 삭제 버튼 — 전역 QPushButton 기본 스타일의 padding(6px 16px = 가로 32px)이
+        # setFixedWidth(28)보다 커서 글자가 그려질 내부 폭이 음수가 돼 "✕"가 전혀 안
+        # 보였다(2026-07-29 사용자 보고). 이 버튼만 패딩을 좁힌 전용 스타일로 덮는다.
+        self.remove_btn = QPushButton("✕")
+        self.remove_btn.setFixedWidth(28)
+        self.remove_btn.setToolTip("이 타겟 삭제")
+        self.remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.remove_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {_BTN}; color: {_TXT}; border: none; "
+            f"border-radius: 6px; padding: 4px 2px; }}"
+            f"QPushButton:hover {{ background-color: {_BTN_HOVER}; }}"
+        )
+        self.remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
+
+        top.addWidget(self.drag_handle)
+        top.addWidget(self.number_label)
+        top.addWidget(self.label_edit)
+        top.addWidget(self.keyword_edit)
+        top.addWidget(self.kind_combo)
+        top.addStretch(1)
+        top.addWidget(self.remove_btn)
+        outer.addLayout(top)
+
+        # 아래 줄: URL — 한 줄에 다 욱여넣으면 너무 잘려서 따로 한 줄 전체 폭을 준다.
+        url_row = QHBoxLayout()
+        url_row.setContentsMargins(20 + 4 + 20 + 4, 0, 0, 0)  # 손잡이+번호 폭만큼 들여써 위 라벨과 시작점을 맞춤
+        url_row.setSpacing(4)
         self.url_edit = QLineEdit(site.get("url", ""))
         self.url_edit.setPlaceholderText("https://example.com/search?q={q}")
         # 같은 이유(:disabled 미정의) — url 아닌 종류(구글 AI·드라이브·API, 기본 6개 중 3개)는
@@ -113,20 +172,8 @@ class _PaletteSiteRow(QWidget):
             f"QLineEdit:disabled {{ background-color: {_PAGE}; color: #6a6a6a; "
             f"border: 1px solid {_LINE}; }}"
         )
-
-        self.remove_btn = QPushButton("✕")
-        self.remove_btn.setFixedWidth(28)
-        self.remove_btn.setToolTip("이 타겟 삭제")
-        self.remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
-
-        layout.addWidget(self.up_btn)
-        layout.addWidget(self.down_btn)
-        layout.addWidget(self.label_edit)
-        layout.addWidget(self.keyword_edit)
-        layout.addWidget(self.kind_combo)
-        layout.addWidget(self.url_edit, 1)
-        layout.addWidget(self.remove_btn)
+        url_row.addWidget(self.url_edit, 1)
+        outer.addLayout(url_row)
 
         self._on_kind_changed()
 
@@ -136,10 +183,9 @@ class _PaletteSiteRow(QWidget):
         self.url_edit.setPlaceholderText(
             "https://example.com/search?q={q}" if is_url else "(내장 — main.py가 처리)")
 
-    def set_endpoints(self, is_first: bool, is_last: bool):
-        """맨 위/맨 아래 행은 그쪽 이동 버튼을 비활성화한다."""
-        self.up_btn.setEnabled(not is_first)
-        self.down_btn.setEnabled(not is_last)
+    def set_number(self, n: int):
+        """드래그·추가·삭제로 순서가 바뀔 때마다 표시 번호(=Alt+숫자)를 갱신."""
+        self.number_label.setText(str(n))
 
     def to_dict(self) -> dict:
         return {
@@ -662,7 +708,9 @@ class SettingsDialog(QDialog):
         self.setFixedSize(max(360, w), max(420, h))
 
     def _setup_ui(self):
-        # 설정이 늘며 단일 스크롤이 화면을 넘어, 탭 3개(단축키/AI/일반)로 분리한다.
+        # 설정이 늘며 단일 스크롤이 화면을 넘어, 탭 2개(일반/AI)로 분리한다.
+        # "일반"은 일반 설정 + 단축키를 한 탭에 통합한 것(2026-07-29 요청) — 위에 일반
+        # 설정(히스토리·자동시작 등), 그 아래 단축키(기본→기능) 순으로 쌓는다.
         # 창 높이는 _finalize_size가 '가장 큰 탭'에 맞춰 고정하므로 스크롤이 사실상
         # 사라진다. 버튼 바는 탭 밖에 둬 항상 노출.
         outer = QVBoxLayout(self)
@@ -690,9 +738,8 @@ class SettingsDialog(QDialog):
             self._tab_pages.append(page)
             return pl
 
-        tab_shortcuts = _make_tab("단축키")
-        tab_ai = _make_tab("AI")
         tab_general = _make_tab("일반")
+        tab_ai = _make_tab("AI")
 
         # ── 기능 단축키 그룹 (변경 가능) — 아래 기본 단축키 다음에 배치 ──
         # 인식 편의를 위해 4개 하위 묶음을 얇은 구분선으로 분리(쭉 나열 대신 시각 그룹화):
@@ -813,9 +860,12 @@ class SettingsDialog(QDialog):
             info_layout.addWidget(action_lbl, row, 0)
             info_layout.addWidget(key_lbl, row, 1)
 
-        # 배치 순서: 기본 단축키(고정) 먼저, 그다음 기능 단축키(변경 가능) — 「단축키」 탭
-        tab_shortcuts.addWidget(info_group)
-        tab_shortcuts.addWidget(hotkey_group)
+        # 배치 순서: 기본 단축키(고정) 먼저, 그다음 기능 단축키(변경 가능).
+        # 「일반」 탭 안에서는 일반 설정 그룹이 이 둘보다 위에 와야 하므로(아래 general_group
+        # 참고) 여기선 일단 append하고, general_group 쪽에서 insertWidget(0, ...)로 맨 위로
+        # 끼워 넣는다 — general_group은 파일 순서상 뒤에 만들어지기 때문.
+        tab_general.addWidget(info_group)
+        tab_general.addWidget(hotkey_group)
 
         _combo_style = (
             f"QComboBox {{ background-color: {_INSET}; color: {_TXT}; "
@@ -1063,6 +1113,54 @@ class SettingsDialog(QDialog):
         palette_desc.setWordWrap(True)
         palette_layout.addWidget(palette_desc)
 
+        # 열 제목 — 행이 위/아래 두 줄(위: 손잡이~종류, 아래: URL 전체폭)이라 제목도 같은
+        # 두 줄 구조로 맞춘다. 폭은 각 행 위젯의 setFixedWidth와 정확히 짝을 이뤄야 칸이 맞는다.
+        _hdr_style = f"color: {_TITLE}; font-size: 10px; font-weight: 600;"
+
+        palette_header_top = QHBoxLayout()
+        palette_header_top.setContentsMargins(0, 0, 0, 0)
+        palette_header_top.setSpacing(4)
+
+        hdr_drag = QLabel("")
+        hdr_drag.setFixedWidth(20)
+        palette_header_top.addWidget(hdr_drag)
+
+        hdr_num = QLabel("#")
+        hdr_num.setFixedWidth(20)
+        hdr_num.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hdr_num.setStyleSheet(_hdr_style)
+        palette_header_top.addWidget(hdr_num)
+
+        hdr_label = QLabel("표시 이름")
+        hdr_label.setFixedWidth(90)
+        hdr_label.setStyleSheet(_hdr_style)
+        palette_header_top.addWidget(hdr_label)
+
+        hdr_keyword = QLabel("키워드")
+        hdr_keyword.setFixedWidth(48)
+        hdr_keyword.setStyleSheet(_hdr_style)
+        palette_header_top.addWidget(hdr_keyword)
+
+        hdr_kind = QLabel("종류")
+        hdr_kind.setFixedWidth(150)
+        hdr_kind.setStyleSheet(_hdr_style)
+        palette_header_top.addWidget(hdr_kind)
+
+        palette_header_top.addStretch(1)
+
+        hdr_del = QLabel("")
+        hdr_del.setFixedWidth(28)
+        palette_header_top.addWidget(hdr_del)
+
+        palette_layout.addLayout(palette_header_top)
+
+        palette_header_url = QHBoxLayout()
+        palette_header_url.setContentsMargins(20 + 4 + 20 + 4, 0, 0, 0)  # 행의 URL 줄과 같은 들여쓰기
+        hdr_url = QLabel("URL")
+        hdr_url.setStyleSheet(_hdr_style)
+        palette_header_url.addWidget(hdr_url, 1)
+        palette_layout.addLayout(palette_header_url)
+
         self._palette_rows_layout = QVBoxLayout()
         self._palette_rows_layout.setSpacing(4)
         palette_layout.addLayout(self._palette_rows_layout)
@@ -1135,8 +1233,9 @@ class SettingsDialog(QDialog):
         self._gd_body.setVisible(False)  # 기본 접힘(_load_values가 연결돼 있으면 펼침)
         tab_ai.addWidget(self._gd_body)
 
-        # ── 일반 설정 그룹 ── 「일반」 탭
-        general_group = QGroupBox("일반")
+        # ── 일반 설정 그룹 ── 「일반」 탭의 맨 위(아래 insertWidget(0, ...) 참고).
+        # 탭 제목도 "일반"이라 그룹박스 제목까지 "일반"이면 중복으로 읽혀 "일반 설정"으로 구분.
+        general_group = QGroupBox("일반 설정")
         general_form = QFormLayout(general_group)
         general_form.setVerticalSpacing(4)
         general_form.setContentsMargins(10, 8, 10, 8)
@@ -1175,7 +1274,9 @@ class SettingsDialog(QDialog):
         self._notify_copy_check = QCheckBox("복사 시 우하단 알림 표시")
         general_form.addRow(_bullet_checkbox_row(self._notify_copy_check))
 
-        tab_general.addWidget(general_group)
+        # insertWidget(0, ...) — 기본/기능 단축키 그룹은 이 시점보다 앞서(위쪽) 이미
+        # tab_general에 append돼 있으므로, 맨 위로 오려면 append가 아니라 0번 위치 삽입.
+        tab_general.insertWidget(0, general_group)
 
         # ── 버튼 바 (탭 밖, 항상 노출) ──
         self._btn_bar = QWidget()
@@ -1678,53 +1779,60 @@ class SettingsDialog(QDialog):
         sites = ai_palette.load_sites(self._settings.get(self.KEY_AI_PALETTE_SITES, ""))
         for site in sites:
             self._add_palette_row(site)
-        self._refresh_palette_endpoints()
+        self._renumber_palette_rows()
 
     def _add_palette_row(self, site: dict):
         row = _PaletteSiteRow(site)
         row.remove_requested.connect(self._on_remove_palette_row)
-        row.move_up_requested.connect(self._on_move_palette_row_up)
-        row.move_down_requested.connect(self._on_move_palette_row_down)
+        row.drag_started.connect(self._on_palette_drag_started)
+        row.drag_moved.connect(self._on_palette_drag_moved)
+        row.drag_ended.connect(self._on_palette_drag_ended)
         self._palette_rows.append(row)
         self._palette_rows_layout.addWidget(row)
 
     def _on_add_palette_site(self):
         self._add_palette_row({"label": "", "keyword": "", "kind": ai_palette.KIND_URL, "url": ""})
-        self._refresh_palette_endpoints()
+        self._renumber_palette_rows()
 
     def _on_remove_palette_row(self, row: "_PaletteSiteRow"):
         if row in self._palette_rows:
             self._palette_rows.remove(row)
         self._palette_rows_layout.removeWidget(row)
         row.deleteLater()
-        self._refresh_palette_endpoints()
+        self._renumber_palette_rows()
 
-    def _on_move_palette_row_up(self, row: "_PaletteSiteRow"):
-        i = self._palette_rows.index(row)
-        if i > 0:
-            self._swap_palette_rows(i, i - 1)
+    def _on_palette_drag_started(self, row: "_PaletteSiteRow"):
+        self._palette_drag_row = row
 
-    def _on_move_palette_row_down(self, row: "_PaletteSiteRow"):
-        i = self._palette_rows.index(row)
-        if i < len(self._palette_rows) - 1:
-            self._swap_palette_rows(i, i + 1)
+    def _on_palette_drag_moved(self, row: "_PaletteSiteRow", global_y: int):
+        """드래그 중인 행이 이웃 행의 세로 중심을 넘으면 그 자리로 옮긴다(Sortable류 임계 교차 방식)."""
+        if getattr(self, "_palette_drag_row", None) is not row:
+            return
+        cur_index = self._palette_rows.index(row)
+        for i, other in enumerate(self._palette_rows):
+            if other is row:
+                continue
+            mid_y = other.mapToGlobal(QPoint(0, 0)).y() + other.height() // 2
+            if (i < cur_index and global_y < mid_y) or (i > cur_index and global_y > mid_y):
+                self._move_palette_row(cur_index, i)
+                return
 
-    def _swap_palette_rows(self, i: int, j: int):
-        """순서가 곧 팔레트 번호(Alt+1~9)라, 위젯 자체를 옮기지 않고 값만 맞바꾼다
-        (레이아웃 재삽입보다 단순하고 포커스·스크롤 위치도 안 흔들린다)."""
-        a, b = self._palette_rows[i], self._palette_rows[j]
-        a_dict, b_dict = a.to_dict(), b.to_dict()
-        for row, data in ((a, b_dict), (b, a_dict)):
-            row.label_edit.setText(data["label"])
-            row.keyword_edit.setText(data["keyword"])
-            row.kind_combo.setCurrentIndex(row.kind_combo.findData(data["kind"]))
-            row.url_edit.setText(data["url"])
+    def _on_palette_drag_ended(self, row: "_PaletteSiteRow"):
+        self._palette_drag_row = None
 
-    def _refresh_palette_endpoints(self):
-        """맨 위/맨 아래 행의 이동 버튼을 비활성화한다."""
-        n = len(self._palette_rows)
+    def _move_palette_row(self, from_i: int, to_i: int):
+        """행 위젯을 물리적으로 새 위치로 옮긴다(값 스왑이 아니라 위젯 자체 이동 —
+        드래그는 커서를 따라 실제로 자리를 옮겨야 자연스럽다)."""
+        row = self._palette_rows.pop(from_i)
+        self._palette_rows.insert(to_i, row)
+        self._palette_rows_layout.removeWidget(row)
+        self._palette_rows_layout.insertWidget(to_i, row)
+        self._renumber_palette_rows()
+
+    def _renumber_palette_rows(self):
+        """표시 번호(=Alt+숫자)를 화면 순서에 맞게 갱신한다."""
         for i, row in enumerate(self._palette_rows):
-            row.set_endpoints(i == 0, i == n - 1)
+            row.set_number(i + 1)
 
     def _cached_models(self) -> list[str]:
         """모델 캐시(JSON list)를 파싱해 모델명 목록 반환. 없으면 빈 목록."""

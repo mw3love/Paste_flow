@@ -27,6 +27,15 @@ URL 프리필 실측
 - ⚠ 제미나이 앱(`gemini.google.com/app?q=…`)은 **`q`를 무시한다**(빈 입력칸만 뜬다).
   제미나이를 쓰려면 창을 띄운 뒤 클립보드+키 주입이 필요해 타이밍에 취약하므로,
   같은 일을 URL 한 줄로 해내는 위 두 경로를 먼저 쓴다.
+
+ChatGPT·Claude·Gemini — 클립보드 주입 경로(2026-07-29)
+-------------------------------------------------------
+셋 다 `?q=` 프리필이 안 먹는다(Playwright 실측: ChatGPT는 파라미터가 통째로 지워짐,
+Claude는 비로그인 접근 자체가 `/logout`으로 튕겨 확인 불가, Gemini는 이미 위에서 확인한
+그대로). 그런데 **실제 로그인 화면에서는 셋 다 입력칸에 자동으로 커서가 가 있다**(사용자
+실측 스크린샷, 2026-07-29) — 로그아웃 상태의 자동화 브라우저와 실제 로그인 세션의 차이다.
+자동 포커스가 되므로 구글 AI 모드의 이미지 첨부와 같은 클립보드 붙여넣기 주입이 통한다.
+단, `q=`가 아예 안 먹혀 **텍스트도 주입이 필요**하다(구글은 텍스트는 URL, 이미지만 주입).
 """
 from __future__ import annotations
 
@@ -50,6 +59,21 @@ def google_ai_home_url() -> str:
     바로 Ctrl+V를 쏘면 그 칸에 꽂힌다.
     """
     return f"https://www.google.com/search?{_AI_MODE_PARAM}"
+
+
+def chatgpt_home_url() -> str:
+    """ChatGPT 새 대화 화면. `?q=`가 안 먹혀(2026-07-29 실측) 텍스트도 주입이 필요하다."""
+    return "https://chatgpt.com/"
+
+
+def claude_home_url() -> str:
+    """Claude 새 대화 화면. 마찬가지로 `?q=` 프리필이 안 된다."""
+    return "https://claude.ai/new"
+
+
+def gemini_home_url() -> str:
+    """Gemini 새 대화 화면. `?q=`를 무시하는 건 이미 알려진 사실(위 docstring 참고)."""
+    return "https://gemini.google.com/app"
 
 
 def is_browser_foreground() -> bool:

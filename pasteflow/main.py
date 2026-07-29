@@ -2159,11 +2159,18 @@ class PasteFlowApp:
             site, question = result
             kind = site.get("kind")
 
-            if kind in (ai_palette.KIND_GOOGLE_AI, ai_palette.KIND_DRIVE):
+            _BROWSER_KIND_TARGETS = {
+                ai_palette.KIND_GOOGLE_AI: "google",
+                ai_palette.KIND_DRIVE: "drive",
+                ai_palette.KIND_CHATGPT: "chatgpt",
+                ai_palette.KIND_CLAUDE: "claude",
+                ai_palette.KIND_GEMINI: "gemini",
+            }
+            if kind in _BROWSER_KIND_TARGETS:
                 # 브라우저 경로 — API에 묻지 않고 크롬에서 연다(web_open.py 참조).
-                # 첨부 이미지가 있으면 URL로 못 실으므로 주입 경로로 갈린다(구글 AI만 지원).
-                target = "google" if kind == ai_palette.KIND_GOOGLE_AI else "drive"
-                self._open_in_browser(target, question, dialog.get_images())
+                # 구글 AI는 첨부 이미지가 있을 때만 주입, ChatGPT/Claude/Gemini는 q=가 아예
+                # 안 먹혀 텍스트까지 포함해 항상 주입(ai_palette.INJECT_KINDS 참고).
+                self._open_in_browser(_BROWSER_KIND_TARGETS[kind], question, dialog.get_images())
                 dialog.deleteLater()
                 return
 
@@ -2203,19 +2210,30 @@ class PasteFlowApp:
         else:
             ToastNotification("브라우저를 열지 못했습니다", icon="🌐")
 
+    # 클립보드 주입(이미지+텍스트를 Ctrl+V로 순서대로 붙여넣고 Enter)이 항상 필요한 타겟의
+    # (홈 URL 만드는 함수, 토스트용 라벨). 구글과 달리 q= 프리필이 안 먹혀 텍스트도 주입해야
+    # 한다(ai_palette.INJECT_KINDS·web_open.py 참고, 2026-07-29 사용자 실측: 로그인 상태에서
+    # 셋 다 입력칸 자동 포커스 확인됨).
+    _CHAT_INJECT_TARGETS = {
+        "chatgpt": ("chatgpt_home_url", "ChatGPT"),
+        "claude": ("claude_home_url", "Claude"),
+        "gemini": ("gemini_home_url", "Gemini"),
+    }
+
     def _open_in_browser(self, target: str, question: str,
                          images: "list[bytes] | None" = None):
-        """질문을 브라우저에서 연다 — 구글 검색 AI 모드 또는 내 구글 드라이브 검색.
+        """질문을 브라우저에서 연다 — 구글 검색 AI 모드·내 구글 드라이브 검색·ChatGPT/Claude/Gemini.
 
         API 검색 경로(`web_search.py`)가 구조적으로 못 잡는 것을 위한 우회로다: 실시간
         시세는 페이지 본문에 없어 크롤링 텍스트를 읽는 검색 도구가 영영 볼 수 없는데,
         브라우저로 열면 구글이 금융 피드를 직접 물고 있어 정확한 값이 나온다(web_open.py
         모듈 주석의 2026-07-14 실측 참조).
 
-        **이미지 첨부가 있으면 주입 경로로 갈린다.** 이미지는 URL에 실을 수 없지만 구글
-        입력칸이 Ctrl+V로 이미지를 받으므로, AI 모드 빈 화면을 열고 클립보드+키를 주입한다
-        (`_inject_to_google`). 텍스트만이면 견고한 URL 경로를 그대로 쓴다 — 주입은 타이밍에
-        의존해 본질적으로 약하므로 필요할 때만 내려간다.
+        **이미지 첨부가 있으면(구글은 그때만) 주입 경로로 갈린다.** 이미지는 URL에 실을
+        수 없지만 입력칸이 Ctrl+V로 이미지를 받으므로, 홈 화면을 열고 클립보드+키를 주입한다
+        (`_inject_to_chat`). 구글은 텍스트만이면 견고한 URL 경로를 그대로 쓴다 — 주입은
+        타이밍에 의존해 본질적으로 약하므로 필요할 때만 내려간다. **ChatGPT/Claude/Gemini는
+        q= 자체가 안 먹혀 텍스트만 있어도 항상 주입 경로**다(`_CHAT_INJECT_TARGETS`).
 
         답은 브라우저에 뜨고 끝난다 — PasteFlow가 그 텍스트를 읽지 못하므로 답변창·비교·
         이미지 복사는 이 경로에 적용되지 않는다(의도된 트레이드오프).
@@ -2224,7 +2242,11 @@ class PasteFlowApp:
         from pasteflow.ui.toast import ToastNotification
 
         if target == "google" and images:
-            self._inject_to_google(question, images)
+            self._inject_to_chat("google", question, images)
+            return
+
+        if target in self._CHAT_INJECT_TARGETS:
+            self._inject_to_chat(target, question, images or [])
             return
 
         if target == "drive":
@@ -2242,12 +2264,15 @@ class PasteFlowApp:
     # URL 경로보다 본질적으로 약한 지점이다. 넉넉히 잡는 대신, 주입 직전 포그라운드가
     # 브라우저인지 검사해 엉뚱한 창에 쏘는 사고를 막는다.
     _BROWSER_LOAD_MS = 2500
-    _INJECT_STEP_MS = 700   # 붙여넣기 사이 간격(구글이 첨부 칩을 만들 시간)
+    _INJECT_STEP_MS = 700   # 붙여넣기 사이 간격(첨부 칩을 만들 시간)
 
-    def _inject_to_google(self, question: str, images: "list[bytes]"):
-        """AI 모드 빈 화면을 열고 이미지 → 질문 → Enter를 순서대로 주입한다.
+    def _inject_to_chat(self, target: str, question: str, images: "list[bytes]"):
+        """홈 화면을 열고 이미지 → 질문 → Enter를 순서대로 주입한다(구글·ChatGPT·Claude·Gemini 공용).
 
-        클립보드를 두 번(이미지·텍스트) 갈아끼우는 방식이다 — 한 글자씩 타이핑하는 것보다
+        `_open_in_browser`가 호출자 — 구글은 이미지가 있을 때만, ChatGPT/Claude/Gemini는
+        q=가 안 먹혀 텍스트만 있어도 항상 이 경로를 탄다(`_CHAT_INJECT_TARGETS`).
+
+        클립보드를 여러 번(이미지들·텍스트) 갈아끼우는 방식이다 — 한 글자씩 타이핑하는 것보다
         단순하고, `_set_clipboard`가 `_self_triggered`를 세워 주므로 이 임시 클립보드가
         히스토리에 쌓이지도 않는다(금지 조항 5와 같은 경로).
 
@@ -2260,10 +2285,17 @@ class PasteFlowApp:
         from pasteflow.paste_interceptor import VK_RETURN, VK_V
         from pasteflow.ui.toast import ToastNotification
 
-        if not web_open.open_url(web_open.google_ai_home_url()):
+        if target == "google":
+            home_url, label = web_open.google_ai_home_url(), "구글 AI 모드"
+        else:
+            fn_name, label = self._CHAT_INJECT_TARGETS[target]
+            home_url = getattr(web_open, fn_name)()
+
+        if not web_open.open_url(home_url):
             ToastNotification("브라우저를 열지 못했습니다", icon="🌐")
             return
-        ToastNotification(f"구글 AI 모드로 검색 — 이미지 {len(images)}장 첨부 중", icon="🌐")
+        img_note = f" — 이미지 {len(images)}장 포함" if images else ""
+        ToastNotification(f"{label} 여는 중{img_note}", icon="🌐")
 
         # 붙여넣을 것들을 순서대로 — 이미지들 다음에 질문 텍스트.
         pastes: list[ClipboardItem] = [
