@@ -182,7 +182,7 @@ class _PaletteSiteRow(QWidget):
             url_row.setContentsMargins(20 + 4 + 20 + 4, 0, 0, 0)  # 손잡이+번호 폭만큼 들여써 위 라벨과 시작점을 맞춤
             url_row.setSpacing(4)
             self.url_edit = QLineEdit(site.get("url", ""))
-            self.url_edit.setPlaceholderText("https://example.com/search?q={q}")
+            self.url_edit.setPlaceholderText("URL 입력 (예: https://example.com/search?q={q})")
             self.url_edit.setStyleSheet(
                 f"QLineEdit {{ background-color: {_INSET}; color: {_TXT}; "
                 f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
@@ -986,9 +986,10 @@ class SettingsDialog(QDialog):
 
         # 연결 테스트 — 모델 콤보 오른쪽(다른 버튼들과 같은 자리)에 배치. 칸이 좁아
         # "연결 테스트"(5글자)는 콤보를 심하게 눌러 "테스트"로 줄인다(툴팁에 전체 설명).
+        # ⚠ setFixedWidth로 고정하면 전역 QPushButton padding(6px 16px)+3글자 폭보다
+        # 좁아 글자가 양옆으로 잘린다(2026-07-29 사용자 실측 스크린샷) — sizeHint에 맡긴다.
         self._test_btn = QPushButton("테스트")
         self._test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._test_btn.setFixedWidth(56)
         self._test_btn.setToolTip(
             "연결 테스트 — 키·연결을 확인하고, OCR 모델에 작은 테스트 이미지를 1회 실제로\n"
             "보내 그 자리에서 되는지 확인합니다."
@@ -1010,31 +1011,32 @@ class SettingsDialog(QDialog):
 
         tab_ai.addWidget(ai_group)
 
-        # ── Gemini 팔레트 타겟 (Alt+` 자유질문창의 목적지 목록) ──
+        # ── 빠른 검색 (Alt+` 자유질문창의 목적지 목록) ──
         # 질문을 어디로 보낼지 사용자가 직접 관리하는 목록 — 순서가 팔레트 번호(Alt+1~9).
         # Google AI는 항상 정확히 1개인 고정 타겟, 나머지는 전부 URL 타겟이라 {q} 자리에
-        # 질의가 채워진다(pasteflow/ai_palette.py 참고).
-        palette_group = QGroupBox("Gemini 팔레트 타겟 (Alt+` 자유질문 목적지)")
+        # 질의가 채워진다(pasteflow/ai_palette.py 참고). "Gemini 팔레트"였던 그룹명을
+        # "빠른 검색"으로 단순화했다(2026-07-29 사용자 요청) — Google AI뿐 아니라 네이버
+        # 사전 같은 일반 URL 타겟도 담는 목록이라 더 정확한 이름이기도 하다.
+        palette_group = QGroupBox("빠른 검색")
         palette_layout = QVBoxLayout(palette_group)
         palette_layout.setSpacing(4)
         palette_layout.setContentsMargins(10, 8, 10, 8)
 
         palette_desc = QLabel(
-            "Alt+`로 뜨는 질문창에서 Tab으로 고르거나 Alt+숫자로 즉시 보낼 목적지 목록입니다.\n"
-            "Google AI는 항상 1개 고정이고(삭제 불가, 순서만 이동), 추가한 타겟은 URL의 "
-            "{q} 자리에 입력한 질문이 들어갑니다.\n"
-            "키워드를 정하면 그 글자+공백으로 문장을 시작할 때 자동으로 그 타겟이 선택됩니다.")
+            "Alt+`로 뜨는 질문창의 목적지 목록 — Tab/Alt+숫자/키워드로 고릅니다.\n"
+            "예: yt  https://youtube.com/results?search_query={q}")
         palette_desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
         palette_desc.setWordWrap(True)
         palette_layout.addWidget(palette_desc)
 
-        # 열 제목 — 행이 위/아래 두 줄(위: 손잡이~키워드, 아래: URL 전체폭)이라 제목도 같은
-        # 두 줄 구조로 맞춘다. 폭은 각 행 위젯의 setFixedWidth와 정확히 짝을 이뤄야 칸이 맞는다.
-        # (행 자체가 테두리+8px 패딩을 갖게 되며 8px만큼 살짝 어긋날 수 있으나 무시할 수준.)
+        # 열 제목 — 각 행이 테두리+8px 좌측 패딩을 갖게 됐으므로(_PaletteSiteRow) 헤더도
+        # 같은 8px만큼 오른쪽으로 밀어야 아래 입력칸과 열이 맞는다(2026-07-29 사용자 보고:
+        # "제목란에 표시이름 키워드가 아래쪽 입력칸과 세로줄 안맞음"). URL은 이제 행마다
+        # 빈 칸일 때 placeholder로 안내하므로 별도 헤더 줄이 필요 없어 제거했다.
         _hdr_style = f"color: {_TITLE}; font-size: 10px; font-weight: 600;"
 
         palette_header_top = QHBoxLayout()
-        palette_header_top.setContentsMargins(0, 0, 0, 0)
+        palette_header_top.setContentsMargins(8, 0, 8, 0)
         palette_header_top.setSpacing(4)
 
         hdr_drag = QLabel("")
@@ -1064,13 +1066,6 @@ class SettingsDialog(QDialog):
         palette_header_top.addWidget(hdr_del)
 
         palette_layout.addLayout(palette_header_top)
-
-        palette_header_url = QHBoxLayout()
-        palette_header_url.setContentsMargins(20 + 4 + 20 + 4, 0, 0, 0)  # 행의 URL 줄과 같은 들여쓰기
-        hdr_url = QLabel("URL")
-        hdr_url.setStyleSheet(_hdr_style)
-        palette_header_url.addWidget(hdr_url, 1)
-        palette_layout.addLayout(palette_header_url)
 
         self._palette_rows_layout = QVBoxLayout()
         self._palette_rows_layout.setSpacing(4)
