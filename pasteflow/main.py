@@ -2263,7 +2263,16 @@ class PasteFlowApp:
     # 알 수 없어(브라우저 밖에서 DOM을 못 본다) 고정 지연에 기댈 수밖에 없다 — 주입 경로가
     # URL 경로보다 본질적으로 약한 지점이다. 넉넉히 잡는 대신, 주입 직전 포그라운드가
     # 브라우저인지 검사해 엉뚱한 창에 쏘는 사고를 막는다.
-    _BROWSER_LOAD_MS = 2500
+    #
+    # ⚠ `is_browser_foreground()`는 "크롬 창이 앞에 있는가"만 확인하고 "그 탭의 페이지가
+    # 로딩을 마쳐 입력칸에 포커스가 갔는가"는 확인하지 못한다(크롬은 새 탭이 뜨자마자
+    # 포그라운드가 되므로 그 검사는 페이지가 덜 떴어도 통과한다). 그래서 첫 붙여넣기(항상
+    # 이미지 — `pastes` 순서가 이미지들 다음 텍스트)가 로딩 중인 페이지에 허공으로 사라지고,
+    # 그다음 텍스트 붙여넣기는 그새 로딩이 끝나 성공하는 비대칭 실패가 실측됐다(2026-07-29
+    # 사용자 보고 — 이미지만 빠지고 텍스트+Enter는 항상 성공). `_BROWSER_LOAD_MS`를 넉넉히
+    # 올리고, 이미지가 있을 때는 그 첫 붙여넣기 전에 추가 여유를 더 준다.
+    _BROWSER_LOAD_MS = 3500
+    _BROWSER_LOAD_IMAGE_EXTRA_MS = 1500  # 이미지 포함 시 첫 붙여넣기 전 추가 대기
     _INJECT_STEP_MS = 700   # 붙여넣기 사이 간격(첨부 칩을 만들 시간)
 
     def _inject_to_chat(self, target: str, question: str, images: "list[bytes]"):
@@ -2316,7 +2325,10 @@ class PasteFlowApp:
             else:
                 self.interceptor.send_plain_key(VK_RETURN)
 
-        QTimer.singleShot(self._BROWSER_LOAD_MS, lambda: _step(0))
+        initial_delay = self._BROWSER_LOAD_MS
+        if images:
+            initial_delay += self._BROWSER_LOAD_IMAGE_EXTRA_MS
+        QTimer.singleShot(initial_delay, lambda: _step(0))
 
     def _ai_query_for_item(self, item: ClipboardItem):
         """항목을 컨텍스트로 질문 입력 다이얼로그 표시 → AI 워커.
@@ -2583,6 +2595,22 @@ class PasteFlowApp:
         full_item = self.db.get_item(item_id)
         if not full_item:
             return
+
+        # AI 질문창이 떠 있고 그 위에 이미지를 놓았으면 클립보드/win32 경로를 타지 않고
+        # 곧장 그 창에 첨부한다 — 같은 프로세스 안의 창이라 클립보드를 거칠 이유가 없고,
+        # 패널의 드래그는 실제 OS 드래그앤드롭이 아니라 마우스 위치를 추적하는 자체 구현
+        # (fake drag)이라 Qt의 드롭 이벤트로는 애초에 안 잡힌다 — 여기서 직접 판정해야 한다.
+        ai_dialog = getattr(self, "_ai_dialog", None)
+        if (ai_dialog is not None and full_item.content_type == "image"
+                and full_item.image_data and ai_dialog.frameGeometry().contains(cursor_pos)):
+            try:
+                png = _image_data_to_png_bytes(full_item.image_data)
+            except Exception:
+                png = None
+            if png and ai_dialog.attach_image_bytes(png):
+                ai_dialog.raise_()
+                ai_dialog.activateWindow()
+                return
 
         import win32gui
         import win32con

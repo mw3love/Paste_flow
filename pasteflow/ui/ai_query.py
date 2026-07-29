@@ -24,8 +24,8 @@ from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
     QPushButton, QCheckBox, QComboBox, QWidget,
 )
-from PyQt6.QtCore import Qt, QBuffer, QByteArray, QIODevice, QSize, QTimer, pyqtSignal
-from PyQt6.QtGui import QCursor, QPixmap, QImage, QIcon
+from PyQt6.QtCore import Qt, QBuffer, QByteArray, QIODevice, QTimer, pyqtSignal
+from PyQt6.QtGui import QCursor, QPixmap, QImage
 
 from pasteflow import ai_palette
 from pasteflow.ui.theme import COLORS, PEACH_HOVER, check_icon_url
@@ -275,18 +275,6 @@ class AiQueryDialog(QDialog):
         self._img_strip_layout.setSpacing(6)
         layout.addWidget(self._img_caption)
         layout.addWidget(self._img_strip)
-
-        # 첨부 이미지 제거 행 — 첨부 자체는 버튼 없이 질문칸 Ctrl+V/드래그로만 한다
-        # (v1.49.1 — 전용 버튼 2개 제거). 여러 장 붙었을 때 한 번에 지우는 버튼만 남긴다.
-        attach_row = QHBoxLayout()
-        attach_row.setContentsMargins(0, 0, 0, 0)
-        attach_row.setSpacing(6)
-        self._remove_img_btn = QPushButton("✕ 모두 제거")
-        self._remove_img_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._remove_img_btn.clicked.connect(self._remove_all_images)
-        attach_row.addWidget(self._remove_img_btn)
-        attach_row.addStretch(1)
-        layout.addLayout(attach_row)
 
         self._refresh_image_preview()
 
@@ -636,6 +624,16 @@ class AiQueryDialog(QDialog):
         self._refresh_image_preview()
         return True
 
+    def attach_image_bytes(self, png: bytes) -> bool:
+        """패널에서 이미지 항목을 이 창으로 드래그해 놓았을 때 직접 첨부한다.
+
+        Ctrl+V/드롭(`_on_image_pasted`)과 달리 클립보드를 거치지 않는다 — 패널의
+        드래그는 실제 OS 드래그앤드롭이 아니라 마우스 위치를 추적하는 자체 구현(fake
+        drag)이라 Qt의 `insertFromMimeData`가 발동하지 않는다(main._on_drag_to_app이
+        놓인 지점이 이 창 위인지 직접 판정해 호출).
+        """
+        return self._add_image(png)
+
     def _on_image_pasted(self, image: QImage):
         """질문칸에 Ctrl+V/드롭된 이미지를 첨부한다(_QuestionEdit 콜백)."""
         self._add_image(self._qimage_to_png(image))
@@ -645,12 +643,10 @@ class AiQueryDialog(QDialog):
             del self._images[index]
             self._refresh_image_preview()
 
-    def _remove_all_images(self):
-        self._images.clear()
-        self._refresh_image_preview()
-
     def _refresh_image_preview(self):
-        """첨부 목록에 맞춰 썸네일 스트립·버튼 표시를 갱신한다(각 썸네일 클릭 시 그 장 제거)."""
+        """첨부 목록에 맞춰 썸네일 스트립을 갱신한다 — 각 썸네일 우상단 ✕ 배지가 그 장만
+        개별 제거한다(전체 제거 버튼은 없음 — 장 수가 많지 않아 개별 제거로 충분하고,
+        배지를 썸네일에 직접 붙여야 "이걸 지운다"는 대상이 명확하다)."""
         # 기존 썸네일 위젯 제거
         while self._img_strip_layout.count():
             item = self._img_strip_layout.takeAt(0)
@@ -659,24 +655,49 @@ class AiQueryDialog(QDialog):
                 w.deleteLater()
 
         has_img = bool(self._images)
+        _THUMB = 64
+        _BADGE = 18
         for i, png in enumerate(self._images):
             pix = QPixmap()
             if not (pix.loadFromData(png) and not pix.isNull()):
                 continue
-            thumb = pix.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio,
+            thumb = pix.scaled(_THUMB, _THUMB, Qt.AspectRatioMode.KeepAspectRatio,
                                Qt.TransformationMode.SmoothTransformation)
-            btn = QPushButton()
-            btn.setIcon(QIcon(thumb))
-            btn.setIconSize(QSize(56, 56))
-            btn.setFixedSize(66, 66)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setToolTip("클릭하면 이 이미지를 제거합니다.")
-            btn.clicked.connect(lambda _c, idx=i: self._remove_at(idx))
-            self._img_strip_layout.addWidget(btn)
+
+            cell = QWidget()
+            cell.setFixedSize(_THUMB, _THUMB)
+            img_label = QLabel(cell)
+            img_label.setGeometry(0, 0, _THUMB, _THUMB)
+            img_label.setPixmap(thumb)
+            img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            remove_btn = QPushButton("✕", cell)
+            remove_btn.setGeometry(_THUMB - _BADGE, 0, _BADGE, _BADGE)
+            remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            remove_btn.setToolTip("이 이미지 제거")
+            remove_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            remove_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: rgba(0, 0, 0, 170);
+                    color: white;
+                    border: none;
+                    border-radius: {_BADGE // 2}px;
+                    font-size: 10px;
+                    font-weight: 700;
+                    padding: 0px;
+                }}
+                QPushButton:hover {{
+                    background-color: {COLORS['peach']};
+                    color: {COLORS['base']};
+                }}
+            """)
+            remove_btn.clicked.connect(lambda _c, idx=i: self._remove_at(idx))
+            remove_btn.raise_()
+
+            self._img_strip_layout.addWidget(cell)
         self._img_strip_layout.addStretch(1)
 
         if has_img:
-            self._img_caption.setText(f"이미지 {len(self._images)}장 (질문과 함께 전송 · 클릭 제거):")
+            self._img_caption.setText(f"이미지 {len(self._images)}장 (질문과 함께 전송):")
         self._img_caption.setVisible(has_img)
         self._img_strip.setVisible(has_img)
-        self._remove_img_btn.setVisible(has_img)
