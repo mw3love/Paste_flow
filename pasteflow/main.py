@@ -12,8 +12,6 @@ import json
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer, QObject, pyqtSignal, QBuffer, QRect, Qt
 
-from pasteflow import web_search
-from pasteflow import gdrive
 from pasteflow.database import Database
 from pasteflow.models import ClipboardItem
 from pasteflow.paste_queue import PasteQueue
@@ -541,12 +539,9 @@ def _resolve_db_path() -> str:
 # 읽기/쓰기 시 자동 복호화/암호화. 다른 PC 복호화 불가(설계상 — 동기화 폐지됨).
 _SECRET_KEYS = frozenset({
     "ocr_gemini_api_key_gateway",
-    # 구글 드라이브 OAuth — client_secret과 refresh_token은 비밀이다.
-    # client_id(`gdrive_client_id`)는 비밀이 아니라 평문으로 둔다(구글도 공개 취급).
-    "gdrive_client_secret",
-    "gdrive_refresh_token",
-    # API 프로필 묶음 — JSON 안에 각 프로필의 api_key가 들어 있어 통째로 비밀이다.
-    # 설정창엔 _get_secret으로 복호화해 넘기고, 저장 시 crypto.protect가 JSON 전체를 암호화.
+    # API 프로필 묶음(OCR 크리덴셜 전환용) — JSON 안에 각 프로필의 api_key가 들어 있어
+    # 통째로 비밀이다. 설정창엔 _get_secret으로 복호화해 넘기고, 저장 시 crypto.protect가
+    # JSON 전체를 암호화.
     "ai_profiles",
 })
 
@@ -612,6 +607,36 @@ def _migrate_split_ocr_ai_model(db):
     if src and not db.get_setting("ocr_model_gateway", ""):
         db.set_setting("ocr_model_gateway", src)
         print(f"[Migrate] OCR 모델 슬롯 초기화: {src}")
+
+
+# v1.6x에서 제거된 AI 질의 기능(우클릭 "AI에게 질문"·여러 모델 비교·구글 드라이브 연동)이
+# 남긴 키들. ai_history 테이블의 실제 대화 데이터는 사용자 콘텐츠라 여기서 지우지 않는다
+# (기능만 끈다 — 테이블은 그대로 남지만 어떤 코드도 더는 읽거나 쓰지 않는다).
+_AI_QUERY_FEATURE_KEYS = (
+    "ocr_gemini_model_gateway",   # 옛 "AI 모델 1" 슬롯 — ocr_model_gateway로 이미 승계됨
+    "ai_compare_model_a",
+    "ai_compare_model_b",
+    "ai_system_prompt",
+    "gdrive_client_id",
+    "gdrive_client_secret",
+    "gdrive_refresh_token",
+)
+
+
+def _migrate_drop_ai_query_feature(db):
+    """1회 마이그레이션: AI 질의 기능 제거가 남긴 키 purge. Idempotent.
+
+    ⚠ 순서 주의: `_migrate_split_ocr_ai_model`(ocr_gemini_model_gateway → ocr_model_gateway
+    복사)보다 반드시 뒤에 와야 한다 — 먼저 지우면 아직 마이그레이션 안 된 사용자의 OCR
+    모델이 통째로 빈칸이 된다.
+    """
+    with db._lock:
+        placeholders = ",".join("?" * len(_AI_QUERY_FEATURE_KEYS))
+        db.conn.execute(
+            f"DELETE FROM settings WHERE key IN ({placeholders})",
+            _AI_QUERY_FEATURE_KEYS,
+        )
+        db.conn.commit()
 
 
 # v1.50.0에서 제거된 official(Google AI Studio) 백엔드가 DB에 남긴 키들.
@@ -689,10 +714,6 @@ class _SignalBridge(QObject):
     record_gif         = pyqtSignal()        # 훅 스레드 → 메인: GIF 녹화(영역 선택 오버레이) 띄우기
     gif_saved          = pyqtSignal(str)     # 인코딩 워커 → 메인: 저장된 GIF 경로
     gif_error          = pyqtSignal(str)     # 인코딩 워커 → 메인: 에러 메시지
-    ai_turn_done       = pyqtSignal(object)  # AI 워커 스레드 → 메인: 대화 턴 결과 dict(팝업·답변·히스토리)
-    ai_error           = pyqtSignal(object)  # AI 워커 스레드 → 메인: 에러 dict({popup, msg})
-    ai_searching       = pyqtSignal(str)     # AI 워커 스레드 → 메인: 웹 검색 시작(검색어) / 종료("")
-    ai_prefetch_done   = pyqtSignal(object)  # 공유 검색 워커 → 메인: 검색 자료 dict(jobs·facts·available)
 
 
 class PasteFlowApp:
@@ -732,10 +753,6 @@ class PasteFlowApp:
         self._bridge.record_gif.connect(self._on_record_gif_hotkey)
         self._bridge.gif_saved.connect(self._on_gif_saved)
         self._bridge.gif_error.connect(self._on_gif_error)
-        self._bridge.ai_turn_done.connect(self._on_ai_turn_done)
-        self._bridge.ai_error.connect(self._on_ai_error)
-        self._bridge.ai_searching.connect(self._on_ai_searching)
-        self._bridge.ai_prefetch_done.connect(self._on_ai_prefetch_done)
 
         self._saved_panel_geometry = None
         self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
@@ -824,10 +841,6 @@ class PasteFlowApp:
         # Alt+F3 핀이 이 경로가 클립보드에 남아 있으면 경로 문자열이 아니라 원본 이미지를 핀한다.
         self._last_pasted_image_path: str | None = None
 
-        # 구글 드라이브 액세스 토큰 캐시(만료 2분 전 자동 갱신 + 락).
-        # 자격증명을 값이 아니라 콜러블로 넘긴다 — 설정창에서 재연결하면 다음 호출에 자동 반영.
-        self._gdrive_tokens = gdrive.TokenCache(self._gdrive_creds)
-
         # DB에서 설정 로드 및 적용
         self._apply_settings_from_db()
 
@@ -838,7 +851,6 @@ class PasteFlowApp:
         """모든 시그널 연결"""
         self.tray.quit_requested.connect(self._quit)
         self.tray.panel_toggle_requested.connect(self._toggle_panel)
-        self.tray.ai_history_requested.connect(self._on_ai_history_requested)
         self.tray.settings_requested.connect(self._open_settings)
 
         self.panel.paste_item_requested.connect(self._on_panel_paste)
@@ -853,7 +865,6 @@ class PasteFlowApp:
         self.panel.preview_image_requested.connect(self._on_preview_image)
         self.panel.preview_text_requested.connect(self._on_preview_text)
         self.panel.ocr_item_requested.connect(self._on_ocr_image_by_id)
-        self.panel.ai_query_requested.connect(self._on_ai_query_requested)
         self.panel.copy_image_as_path_requested.connect(self._on_copy_image_as_path)
         self.panel.open_settings_requested.connect(self._open_settings)
         self.panel.quit_requested.connect(self._quit)
@@ -1101,278 +1112,23 @@ class PasteFlowApp:
         from pasteflow.ui.toast import ToastNotification
         ToastNotification(f"GIF 인코딩 실패 — {msg}", icon="🎬")
 
-    def _resolve_gemini_cfg(self, purpose: str = "ai",
-                            model_override: str | None = None) -> tuple[str, str, str]:
-        """게이트웨이 설정을 해석해 (api_key, base_url, model) 반환.
+    def _resolve_gemini_cfg(self) -> tuple[str, str, str]:
+        """게이트웨이 설정을 해석해 (api_key, base_url, model) 반환 — OCR 전용.
 
-        OCR 워커와 AI 질의 워커가 공유하되 **모델만 용도별로 갈린다**(v1.39.0):
-        - purpose="ocr" → `ocr_model_gateway`   (비전 가능 모델만 고를 수 있는 슬롯)
-        - purpose="ai"  → `ocr_gemini_model_gateway` (전 모델. 기존 키 승계)
-
-        분리 이유: 두 용도가 한 모델을 공유하면 AI 답변용으로 고른 비싼 모델(claude-opus 등)이
-        OCR에도 그대로 쓰여 텍스트 추출 한 번에 과금이 커지고, 반대로 텍스트 전용 모델
-        (solar-pro2 등)을 AI용으로 고르면 OCR이 400으로 깨진다.
-
-        model_override가 주어지면 설정의 모델 슬롯 대신 그 모델을 쓴다(여러 모델 비교).
-        DB 접근은 _lock으로 직렬화되어 워커 스레드에서 호출해도 안전.
+        v1.6x에서 AI 질의(우클릭 "AI에게 질문"·비교·드라이브 연동) 기능을 통째로 제거해,
+        이제 API 키를 쓰는 경로는 OCR 하나뿐이다. DB 접근은 _lock으로 직렬화되어 워커
+        스레드에서 호출해도 안전.
         """
         base_url_saved = self.db.get_setting("ocr_gemini_base_url", "")
-
-        if model_override is not None:
-            model = model_override
-        else:
-            model_key = (
-                "ocr_model_gateway" if purpose == "ocr" else "ocr_gemini_model_gateway"
-            )
-            model = self.db.get_setting(model_key, "")
-        if model_override is None and purpose == "ocr" and not model:
-            # OCR 슬롯이 아직 비었으면(마이그레이션 전/초기화됨) AI 모델을 그대로 쓴다.
-            # 빈 문자열이면 OcrEngine이 기본 모델로 폴백하므로 여기서 강제하지 않는다.
-            model = self.db.get_setting("ocr_gemini_model_gateway", "")
-
+        model = self.db.get_setting("ocr_model_gateway", "")
         return (self._get_secret("ocr_gemini_api_key_gateway"), base_url_saved, model)
 
-    def _fetch_all_ai_models(self) -> list[str]:
-        """AI 질문창 모델 드롭다운의 ↻가 백그라운드 스레드에서 호출 — 전체 모델 목록을
-        반환한다(네트워크 호출, DB 접근은 _lock으로 스레드 안전).
-        """
-        from pasteflow.ocr_engine import OcrEngine
-        api_key, base_url, _ = self._resolve_gemini_cfg("ai")
-        return OcrEngine.list_gemini_models(api_key, base_url)
-
-    def _start_ai_worker(self, question: str, context_text: str,
-                         images: list[bytes] | None = None,
-                         model: str | None = None):
-        """AI 질의(첫 턴) — 답변창을 '생각 중' 상태로 즉시 띄우고 워커에 넘긴다.
-
-        여러 모델 비교(`_start_compare_query`)와 동일한 흐름이다(v1.49.3 — 예전엔 커서
-        진행 칩만 뜨다 완성된 창이 나중에 한 번에 나타났는데, 사용자가 비교 모드처럼
-        "창이 먼저 뜨고 답이 채워지는" 쪽을 선호해 통일했다). 창을 `pending_question`으로
-        먼저 열고 `_run_ai_turn`에 그 창을 넘기면, 답이 왔을 때 `_on_ai_turn_done`이
-        `resolve_pending`으로 제자리에서 채운다.
-
-        **크기도 비교 창처럼 고정**한다(v1.49.4 — 사용자 요청): `center=True`(자동
-        크기산정)를 쓰면 '생각 중' 짧은 문구 기준으로 작게 뜬 창이 답 도착 시
-        `_resize_to_content()`로 갑자기 커지는 게 어색해, 비교 창의 `place_rect`(고정
-        사각형+wrap+세로스크롤) 방식을 그대로 가져와 처음부터 최종 크기로 뜬다. 짧은
-        답변은 빈 공간이 남는 트레이드오프가 있지만(비교 창도 동일), '작았다가 갑자기
-        커지는' 점프보다 사용자가 이쪽을 선호했다.
-
-        첫 user 턴의 컨텐츠는 `build_ask_prompt`로 컨텍스트를 임베드한 프롬프트이고, 화면
-        표시용 원문 질문은 `display`에 따로 담는다(트랜스크립트 렌더는 display를 쓴다).
-        이후 후속 질문은 `_on_ai_followup`이 같은 히스토리에 쌓아 재질의한다.
-        `images`는 여러 장 첨부 가능(첫 user 턴에만 멀티모달로 실림).
-        `model`은 AI 질문창의 모델 드롭다운에서 고른 값(v1.49.1) — None이면 기본(모델 1)
-        사용, `_run_ai_turn`이 그대로 override로 넘긴다.
-        """
-        from pasteflow.ocr_engine import build_ask_prompt
-        from PyQt6.QtWidgets import QApplication
-        prompt = build_ask_prompt(question, context_text)
-        conversation = [{"role": "user", "content": prompt, "display": question}]
-
-        anchor = getattr(self, "_ai_anchor", None) or self.panel.geometry()
-        screen = QApplication.screenAt(anchor.center()) or QApplication.primaryScreen()
-        avail = screen.availableGeometry()
-        margin_v = max(24, int(avail.height() * 0.08))  # 비교 창과 동일한 상하 여백 비율
-        box_h = avail.height() - margin_v * 2
-        box_w = min(700, avail.width() - 80)
-        place_rect = QRect(
-            avail.left() + (avail.width() - box_w) // 2, avail.top() + margin_v,
-            max(280, box_w), box_h)
-
-        item = ClipboardItem(content_type="text", text_content="", preview_text=question[:200])
-        popup = TextPreviewPopup.open_new(
-            item, anchor, editable=False, markdown=True,
-            pending_question=question, place_rect=place_rect)
-        popup.copy_requested.connect(self._on_copy_item)
-        popup.copy_as_image_requested.connect(self._on_answer_image_copy)
-        popup.copy_text_requested.connect(self._on_copy_selected_text)
-        popup.followup_requested.connect(
-            lambda text, p=popup: self._on_ai_followup(p, text))
-
-        self._run_ai_turn(conversation, images, popup=popup, model=model)
-
-    def _run_ai_turn(self, conversation: list, images: list[bytes] | None, popup,
-                     model: str | None = None, tools_enabled: bool = True):
-        """대화 한 턴을 백그라운드에서 질의한다(첫 질문·후속 질문·비교 질의 공용).
-
-        `tools_enabled=False`는 **공유 검색 모드**(여러 모델 비교) — 검색은 앞단에서 이미
-        한 번 끝났고 그 자료가 프롬프트에 주입돼 있으므로, 모델이 또 검색하지 못하게 도구를
-        뗀다. 그래야 세 모델이 같은 자료를 본다.
-
-        OCR과 동일한 게이트웨이 배관(`OcrEngine.ask_messages`)을 재사용한다. OCR 엔진
-        설정과 무관하게 항상 gemini 경로. `images`(여러 장 가능)는 첫 user 턴에만 실린다.
-        `model`이 주어지면 설정 모델 대신 그 모델로 질의한다(비교 창은 자기 모델로 이어감).
-        `popup`은 항상 이미 떠 있는(pending 또는 라이브) 답변창이다(v1.49.3 — 모든 호출자가
-        먼저 창을 연다) — 그 창이 자체 '생각 중'을 표시하므로 여기서 별도 진행 칩을 띄우지
-        않는다. 결과/에러는 `ai_turn_done`/`ai_error` 시그널로 메인 스레드에 통지(둘 다 팝업
-        참조를 실어 여러 워커가 병렬로 돌아도 서로 섞이지 않는다).
-        """
-        # 엔진에는 role/content만 넘긴다(display는 표시 전용 — 트랜스크립트 렌더에서만 사용).
-        messages = [{"role": t["role"], "content": t["content"]} for t in conversation]
-
-        def _run():
-            try:
-                import time
-                from pasteflow.ocr_engine import OcrEngine
-                api_key, base_url, model_id = self._resolve_gemini_cfg(
-                    model_override=model)
-                system_prompt = self.db.get_setting("ai_system_prompt", "")
-                # 드라이브 토큰(연결 안 했으면 "") — 있으면 검색 도구에 드라이브가 함께 실린다.
-                # 만료 2분 전 자동 갱신, 갱신 실패도 ""라 AI 질의 자체는 절대 안 깨진다.
-                engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url,
-                                   model=model_id, system_prompt=system_prompt,
-                                   gdrive_token=self._gdrive_tokens.access_token())
-                # 웹 검색이 끼면 응답이 2~3배 느려진다(LLM 왕복 2회 + 검색 2~4초).
-                # "멈춘 게 아니라 검색 중"임을 진행 칩에 보여준다(첫 턴 한정 — 후속·비교
-                # 창은 팝업 자체가 '생각 중'을 표시하므로 슬롯이 무시한다).
-                engine.on_tool_progress = self._bridge.ai_searching.emit
-                t0 = time.monotonic()
-                answer = engine.ask_messages(messages, images=images,
-                                             tools_enabled=tools_enabled)
-                elapsed = time.monotonic() - t0  # 이 답변에 걸린 실제 시간(답변창 상단 표시)
-                if engine.last_fallback_from and engine.last_used_model:
-                    self._bridge.ocr_fallback.emit(engine.last_fallback_from, engine.last_used_model)
-                new_conv = conversation + [{"role": "assistant", "content": answer}]
-                self._bridge.ai_turn_done.emit({
-                    "popup": popup, "answer": answer,
-                    "conversation": new_conv, "images": images,
-                    "model": model, "elapsed": elapsed,
-                })
-            except Exception as e:
-                self._bridge.ai_error.emit({"popup": popup, "msg": str(e)})
-
-        threading.Thread(target=_run, daemon=True, name="ai-worker").start()
-
-    def _resolve_compare_models(self) -> list[str]:
-        """여러 모델 비교에 쓸 모델명 목록 반환.
-
-        [기본 AI 모델(모델 1), 비교 A(모델 2), 비교 B(모델 3)] 중 비어있지 않은 것을 순서대로,
-        중복 제거해 반환한다. 2개 미만이면 비교가 무의미하므로 호출부가 그때 체크박스를 숨긴다.
-        """
-        raw = [
-            self.db.get_setting("ocr_gemini_model_gateway", ""),
-            self.db.get_setting("ai_compare_model_a", ""),
-            self.db.get_setting("ai_compare_model_b", ""),
-        ]
-        models: list[str] = []
-        for model in raw:
-            model = (model or "").strip()
-            if model and model not in models:
-                models.append(model)
-        return models
-
-    def _start_compare_query(self, question: str, context_text: str,
-                             images: list[bytes] | None, models: list[str]):
-        """질문을 여러 모델로 동시에 질의하고 답변창을 모니터 N등분 타일로 나란히 띄운다.
-
-        각 창은 '생각 중' 펜딩 상태로 먼저 뜨고(어느 모델이 아직인지 보임) 각자 답이 도착하면
-        채워진다. 창마다 자기 모델을 기억해 '이어서 질문'도 그 모델로 이어간다.
-
-        **검색은 앞단에서 한 번만 한다**(`_start_shared_search` → `web_search.prefetch`).
-        모델별로 각자 검색하게 두면 같은 질문에도 서로 다른 수치가 나와, 비교가 "누가 더 잘
-        정리하나"가 아니라 "각자 뭘 찾았나"로 오염된다(2026-07-11 실측: 같은 날씨 질문에
-        36/25 · 36/24 · "인터넷 없어서 모름" 3인3색 → 공유 후 셋 다 36/24 일치).
-        """
-        from pasteflow.ocr_engine import build_ask_prompt
-        from pasteflow.ui.text_preview import TextPreviewPopup
-        from PyQt6.QtWidgets import QApplication
-        from PyQt6.QtCore import QRect
-        from PyQt6.QtGui import QCursor
-
-        anchor = getattr(self, "_ai_anchor", None)
-        pt = anchor.topLeft() if anchor else QCursor.pos()
-        screen = QApplication.screenAt(pt) or QApplication.primaryScreen()
-        avail = screen.availableGeometry()
-        n = len(models)
-        gap = 12
-        margin_v = max(24, int(avail.height() * 0.08))
-        tile_h = avail.height() - margin_v * 2
-        col_w = max(280, (avail.width() - gap * (n + 1)) // n)
-
-        prompt = build_ask_prompt(question, context_text)
-        # 비교 그룹이 공유하는 검색 자료 캐시(질문 → 검색 결과). 후속 질문(Q2+)도 이 캐시를
-        # 타야 "그럼 모레는?" 한 마디에 모델들이 각자 검색해 수치가 갈리는 것을 막는다.
-        cache: dict[str, str] = {}
-        jobs = []
-        for i, model in enumerate(models):
-            x = avail.left() + gap + i * (col_w + gap)
-            rect = QRect(x, avail.top() + margin_v, col_w, tile_h)
-            item = ClipboardItem(content_type="text", text_content="",
-                                 preview_text=question[:200])
-            popup = TextPreviewPopup.open_new(
-                item, QRect(pt.x(), pt.y(), 1, 1), editable=False, markdown=True,
-                model_title=model, pending_question=question, place_rect=rect)
-            popup.copy_requested.connect(self._on_copy_item)
-            popup.copy_as_image_requested.connect(self._on_answer_image_copy)
-            popup.copy_text_requested.connect(self._on_copy_selected_text)
-            popup.followup_requested.connect(
-                lambda text, p=popup: self._on_ai_followup(p, text))
-            popup._shared_cache = cache   # 후속 질문도 공유 검색 경로로
-            conversation = [{"role": "user", "content": prompt, "display": question}]
-            jobs.append({"popup": popup, "model": model, "conversation": conversation})
-
-        # 한 번 검색해 같은 자료를 전 모델에게 물린다(정리력 비교).
-        self._start_shared_search(question, jobs, images, cache)
-
-    def _start_shared_search(self, question: str, jobs: list[dict],
-                             images: list[bytes] | None, cache: dict):
-        """비교 질의의 웹 검색을 **앞단에서 한 번만** 수행하고 그 자료로 전 모델을 질의한다.
-
-        각 모델이 스스로 검색하면(v1.45.0까지의 동작) 같은 질문에도 서로 다른 자료를 찾아와
-        수치가 갈리고, 비교가 "누가 더 잘 정리하나"가 아니라 "각자 뭘 찾았나"가 되어 버린다
-        (2026-07-11 실측: 같은 날씨 질문에 36/25 · 36/24+출처불신 · "인터넷 없어서 모름" 3인3색).
-        검색 비용도 모델 수만큼 든다. 그래서 `web_search.prefetch`(nano 심부름꾼)가 **검색
-        필요 여부 판단과 검색을 한 콜로** 끝내고, 그 결과를 프롬프트에 주입한 뒤 모델 도구는
-        끈다(`tools_enabled=False` — 안 끄면 모델이 또 검색해 공유가 무의미해진다).
-
-        심부름꾼을 못 쓰면(공식 백엔드·nano 권한 없음·네트워크) `available=False`로 돌아오고,
-        그때는 **현행 동작으로 열화**한다(각 모델이 자기 도구로 검색). "못 썼다"를 "검색
-        불필요"로 읽으면 실시간 질문에 도구도 없이 답하게 되므로 둘을 구분한다.
-        """
-        def _run():
-            facts = cache.get(question)
-            available = True
-            if facts is None:
-                api_key, base_url, _ = self._resolve_gemini_cfg()
-                res = web_search.prefetch(question, api_key=api_key, base_url=base_url,
-                                          images=images,
-                                          gdrive_token=self._gdrive_tokens.access_token())
-                available, facts = res.available, res.facts
-                if available:
-                    cache[question] = facts   # ""(검색 불필요)도 캐시 — 재판정 비용 절약
-            self._bridge.ai_prefetch_done.emit({
-                "jobs": jobs, "facts": facts, "available": available, "images": images,
-            })
-
-        threading.Thread(target=_run, daemon=True, name="ai-prefetch").start()
-
-    def _on_ai_prefetch_done(self, payload: dict):
-        """공유 검색이 끝났다 — 같은 자료를 각 모델 프롬프트에 주입해 병렬 질의를 띄운다.
-
-        검색 자료는 **그 턴의 user 메시지**에 끼운다(첫 턴이든 후속 턴이든 방금 던진 질문에
-        대한 자료이므로). 자료가 실린 대화가 그대로 팝업 히스토리에 남아 다음 턴에서도 모델이
-        무엇을 근거로 답했는지 기억한다.
-        """
-        from pasteflow.ocr_engine import build_facts_prompt
-
-        facts, available = payload["facts"], payload["available"]
-        images = payload["images"]
-        for job in payload["jobs"]:
-            conv = [dict(t) for t in job["conversation"]]
-            if facts:
-                conv[-1]["content"] = build_facts_prompt(conv[-1]["content"], facts)
-            # 심부름꾼이 돌았으면 모델 도구를 뗀다(공유 자료만 보게). 못 썼으면 현행대로
-            # 모델이 자기 도구로 검색하게 둔다 — 안 그러면 실시간 질문에 답할 길이 사라진다.
-            self._run_ai_turn(conv, images, popup=job["popup"], model=job["model"],
-                              tools_enabled=not available)
-
     def _start_cursor_progress(self, prefix: str, icon: str, anchor):
-        """진행 칩 — 지속형 토스트(클릭 통과) + 0.5초 간격 경과시간 갱신.
+        """진행 칩 — 지속형 토스트(클릭 통과) + 0.5초 간격 경과시간 갱신. OCR 전용.
 
-        OCR·AI 질의가 공유. anchor(QPoint)로 **커서가 있는 모니터**를 고른 뒤 그 모니터
-        정중앙에 표시한다(예측 가능·가장자리 잘림 없음). 예전엔 주 모니터 우하단 고정이라
-        보조 모니터 작업 시 시선을 돌려야 했음.
+        anchor(QPoint)로 **커서가 있는 모니터**를 고른 뒤 그 모니터 정중앙에 표시한다
+        (예측 가능·가장자리 잘림 없음). 예전엔 주 모니터 우하단 고정이라 보조 모니터
+        작업 시 시선을 돌려야 했음.
         """
         import time
         from pasteflow.ui.toast import ToastNotification
@@ -1386,19 +1142,6 @@ class PasteFlowApp:
         self._progress_timer.setInterval(500)
         self._progress_timer.timeout.connect(self._tick_cursor_progress)
         self._progress_timer.start()
-
-    def _on_ai_searching(self, query: str):
-        """AI가 웹 검색을 시작(query)/종료("")할 때 진행 칩 문구를 바꾼다.
-
-        v1.49.3부터 모든 AI 질의가 답변창을 먼저 띄우고 그 창의 '생각 중' 탭으로 진행을
-        표시하므로(`_start_ai_worker` 참고), 이 커서 진행 칩은 이제 AI 경로에서는 절대 뜨지
-        않는다(`_progress_toast`가 항상 None) — OCR(`_start_cursor_progress` 다른 호출부)이
-        떠 있을 때만 이 시그널이 온다면 조용히 무시하면 그만이라 가드는 그대로 둔다.
-        """
-        if getattr(self, "_progress_toast", None) is None:
-            return
-        self._progress_prefix = f"웹 검색: {query[:18]}…" if query else "AI 생각 중…"
-        self._tick_cursor_progress()  # 다음 0.5초 틱을 기다리지 않고 즉시 반영
 
     def _tick_cursor_progress(self):
         import time
@@ -1462,7 +1205,7 @@ class PasteFlowApp:
                 from pasteflow.ocr_engine import OcrEngine
                 # OCR은 별도 엔진 선택 없이 항상 AI(Gemini 공식 / Mindlogic 게이트웨이) API로 처리.
                 # (WinRT 엔진 제거 — 설정에서 엔진/언어 선택 UI도 삭제됨. AI 답변과 동일 배관 재사용.)
-                api_key, base_url, model = self._resolve_gemini_cfg("ocr")
+                api_key, base_url, model = self._resolve_gemini_cfg()
                 engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url, model=model)
                 text = engine.recognize(pil_img)
                 if engine.last_fallback_from and engine.last_used_model:
@@ -1717,7 +1460,6 @@ class PasteFlowApp:
         # 핀 창에서도 복사·OCR·AI 질문·경로 복사·Space 주석 편집 후 복사/저장이 동작하도록 연결
         popup.copy_requested.connect(self._on_copy_item)
         popup.ocr_requested.connect(self._on_ocr_image_item)
-        popup.ai_requested.connect(self._ai_query_for_item)
         popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
         popup.annotated_copy_requested.connect(self._on_annotation_copy)
         popup.export_file_requested.connect(self._on_annotation_export)
@@ -1767,7 +1509,6 @@ class PasteFlowApp:
             popup = ImagePreviewPopup.open_new(item, anchor, native=True)
             popup.copy_requested.connect(self._on_copy_item)
             popup.ocr_requested.connect(self._on_ocr_image_item)
-            popup.ai_requested.connect(self._ai_query_for_item)
             popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
             popup.annotated_copy_requested.connect(self._on_annotation_copy)
             popup.export_file_requested.connect(self._on_annotation_export)
@@ -2030,7 +1771,6 @@ class PasteFlowApp:
             popup = ImagePreviewPopup.open_new(item, self.panel.geometry())
             popup.copy_requested.connect(self._on_copy_item)
             popup.ocr_requested.connect(self._on_ocr_image_item)
-            popup.ai_requested.connect(self._ai_query_for_item)
             popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
             # 인라인 주석 편집(Space) 완료 액션 — 같은 창에서 emit
             popup.annotated_copy_requested.connect(self._on_annotation_copy)
@@ -2101,33 +1841,27 @@ class PasteFlowApp:
             if new_text != (item.text_content or ""):
                 self._on_edit_item(item_id, new_text)
 
-    def _on_ai_query_requested(self, item_id: int):
-        """패널 우클릭 "AI에게 질문"(item_id 기반) → DB 로드 후 항목 기반 코어로 위임."""
-        item = self.db.get_item(item_id)
-        if item:
-            self._ai_query_for_item(item)
+    def _open_ai_dialog(self):
+        """AI 자유질문 단축키(Alt+`) — 질문 입력창을 **비모달로** 띄우고, 고른 타겟에 따라
+        질문을 라우팅한다.
 
-    def _open_ai_dialog(self, context_text: str = "", image_png: "bytes | None" = None):
-        """AI 질문 입력창을 **비모달로** 띄우고, 고른 타겟에 따라 질문을 라우팅한다.
-
-        자유질문(Alt+`)·텍스트 항목 질의·이미지 항목 질의가 공유하는 단일 경로 — 셋의 차이는
-        `context_text`(질문에 함께 실을 클립보드 텍스트)와 `image_png`(첫 첨부 이미지)뿐이다.
-
-        **타겟 팔레트(v1.59.0)** — 질문을 API 워커 하나로만 보내지 않고, DB에 저장된
-        `ai_palette_sites`(설정창 "AI 팔레트 타겟" — `pasteflow/ai_palette.py`가 데이터
-        모양·기본값을 소유) 중 사용자가 고른 목적지로 라우팅한다. 매번 다시 읽어 설정 변경이
-        앱 재시작 없이 바로 반영된다.
+        **타겟 팔레트** — 질문을 API 워커로 보내지 않고, DB에 저장된 `ai_palette_sites`
+        (설정창 "AI 팔레트 타겟" — `pasteflow/ai_palette.py`가 데이터 모양·기본값을 소유)
+        중 사용자가 고른 목적지로 라우팅한다. 매번 다시 읽어 설정 변경이 앱 재시작 없이 바로
+        반영된다. v1.6x에서 API 답변·비교·기록·드라이브 연동을 통째로 제거해, 이제 기본
+        타겟은 **Google AI 모드 하나뿐**이다(실사용 결과 가장 견고했다 — web_open.py 참고).
+        사용자가 설정에서 추가한 웹사이트(`url` 타겟)는 그대로 지원한다.
 
         ⚠ **`exec()`를 쓰지 않는다.** `QDialog.exec()`는 내부적으로 창을 모달로 표시하는데,
         모달리티가 `NonModal`이고 부모도 없으면 Qt가 이를 **ApplicationModal로 승격**시킨다
         (2026-07-13 PyQt6 실측: `setWindowModality(NonModal)` 후 `exec()` →
         `QWindow.modality == ApplicationModal`, `show()`만 NonModal 유지). 그래서 v1.49.4의
         `setWindowModality(NonModal)`은 무력했고, 질문창이 떠 있는 동안 **패널 클릭·영역
-        캡처(Alt+F2)·AI 기록창이 전부 앱 모달에 막혀 있었다**(사용자 보고). 결과 수신을
-        `finished` 콜백으로 바꿔 `show()`로 띄운다.
+        캡처(Alt+F2)가 전부 앱 모달에 막혀 있었다**(사용자 보고). 결과 수신을 `finished`
+        콜백으로 바꿔 `show()`로 띄운다.
 
-        `_ai_history_dialog`와 같은 재진입 가드를 둔다 — 비모달이라 질문창이 떠 있는 채로
-        단축키·우클릭이 다시 들어올 수 있고, 그때 창을 또 만들면 앵커·워커가 뒤엉킨다.
+        재진입 가드를 둔다 — 비모달이라 질문창이 떠 있는 채로 단축키가 다시 들어올 수 있고,
+        그때 창을 또 만들면 앵커가 뒤엉킨다.
         """
         from pasteflow.ui.ai_query import AiQueryDialog
         from pasteflow import ai_palette
@@ -2138,16 +1872,11 @@ class PasteFlowApp:
             existing.activateWindow()
             return
 
-        compare_models = self._resolve_compare_models()
         sites = ai_palette.load_sites(self.db.get_setting("ai_palette_sites", ""))
         # parent=None — self.panel을 부모로 주면 Windows가 이 창을 패널의 "소유 창"으로 취급해
-        # 패널 위에 항상 떠 있게 고정한다(모달과 무관한 별개의 Z-order 규칙) — 미리보기 팝업·
-        # AI 기록창과 같은 독립 최상위 창 패턴으로 통일한다.
-        dialog = AiQueryDialog(context_text, None, context_image=image_png,
-                               compare_models=compare_models,
-                               fetch_all_models=self._fetch_all_ai_models,
-                               open_history=self._on_ai_history_requested,
-                               sites=sites)
+        # 패널 위에 항상 떠 있게 고정한다(모달과 무관한 별개의 Z-order 규칙) — 미리보기 팝업과
+        # 같은 독립 최상위 창 패턴으로 통일한다.
+        dialog = AiQueryDialog(parent=None, sites=sites)
         self._ai_dialog = dialog
 
         def _finished(_code: int):
@@ -2159,37 +1888,16 @@ class PasteFlowApp:
             site, question = result
             kind = site.get("kind")
 
-            _BROWSER_KIND_TARGETS = {
-                ai_palette.KIND_GOOGLE_AI: "google",
-                ai_palette.KIND_DRIVE: "drive",
-                ai_palette.KIND_CHATGPT: "chatgpt",
-                ai_palette.KIND_CLAUDE: "claude",
-                ai_palette.KIND_GEMINI: "gemini",
-            }
-            if kind in _BROWSER_KIND_TARGETS:
-                # 브라우저 경로 — API에 묻지 않고 크롬에서 연다(web_open.py 참조).
-                # 구글 AI는 첨부 이미지가 있을 때만 주입, ChatGPT/Claude/Gemini는 q=가 아예
-                # 안 먹혀 텍스트까지 포함해 항상 주입(ai_palette.INJECT_KINDS 참고).
-                self._open_in_browser(_BROWSER_KIND_TARGETS[kind], question, dialog.get_images())
-                dialog.deleteLater()
-                return
-
-            if kind == ai_palette.KIND_URL:
+            if kind == ai_palette.KIND_GOOGLE_AI:
+                self._open_in_browser(question, dialog.get_images())
+            elif kind == ai_palette.KIND_URL:
                 self._open_palette_url(site, question)
-                dialog.deleteLater()
-                return
-
-            # kind == KIND_API (또는 알 수 없는 값 — 안전하게 기본 답변 경로로 열화)
-            # 답변창은 입력창이 "닫힐 때" 있던 자리(모니터) 기준으로 띄운다 — 입력 중
-            # 다른 모니터로 끌어다 놓았을 수 있어 트리거 시점 커서로는 부정확하다.
-            self._ai_anchor = dialog.frameGeometry()
-            images = dialog.get_images()  # 첨부(제거·추가·교체 결과를 존중)
-            if dialog.is_compare():
-                self._start_compare_query(question, context_text, images, compare_models)
             else:
-                sel = dialog.get_selected_model()  # 없으면 기본 모델 1
-                self._start_ai_worker(question, context_text, images=images,
-                                      model=sel or None)
+                # 옛 설정에 남은 미지원 kind(드라이브·ChatGPT 등, v1.6x에서 제거) — 설정에서
+                # 타겟을 다시 확인해 달라고 안내한다(조용한 무반응 대신).
+                from pasteflow.ui.toast import ToastNotification
+                ToastNotification("더 이상 지원하지 않는 타겟입니다 — 설정에서 확인해 주세요",
+                                  icon="🌐")
             dialog.deleteLater()
 
         dialog.finished.connect(_finished)
@@ -2210,80 +1918,47 @@ class PasteFlowApp:
         else:
             ToastNotification("브라우저를 열지 못했습니다", icon="🌐")
 
-    # 클립보드 주입(이미지+텍스트를 Ctrl+V로 순서대로 붙여넣고 Enter)이 항상 필요한 타겟의
-    # (홈 URL 만드는 함수, 토스트용 라벨). 구글과 달리 q= 프리필이 안 먹혀 텍스트도 주입해야
-    # 한다(ai_palette.INJECT_KINDS·web_open.py 참고, 2026-07-29 사용자 실측: 로그인 상태에서
-    # 셋 다 입력칸 자동 포커스 확인됨).
-    _CHAT_INJECT_TARGETS = {
-        "chatgpt": ("chatgpt_home_url", "ChatGPT"),
-        "claude": ("claude_home_url", "Claude"),
-        "gemini": ("gemini_home_url", "Gemini"),
-    }
-
-    def _open_in_browser(self, target: str, question: str,
-                         images: "list[bytes] | None" = None):
-        """질문을 브라우저에서 연다 — 구글 검색 AI 모드·내 구글 드라이브 검색·ChatGPT/Claude/Gemini.
-
-        API 검색 경로(`web_search.py`)가 구조적으로 못 잡는 것을 위한 우회로다: 실시간
-        시세는 페이지 본문에 없어 크롤링 텍스트를 읽는 검색 도구가 영영 볼 수 없는데,
-        브라우저로 열면 구글이 금융 피드를 직접 물고 있어 정확한 값이 나온다(web_open.py
-        모듈 주석의 2026-07-14 실측 참조).
-
-        **이미지 첨부가 있으면(구글은 그때만) 주입 경로로 갈린다.** 이미지는 URL에 실을
-        수 없지만 입력칸이 Ctrl+V로 이미지를 받으므로, 홈 화면을 열고 클립보드+키를 주입한다
-        (`_inject_to_chat`). 구글은 텍스트만이면 견고한 URL 경로를 그대로 쓴다 — 주입은
-        타이밍에 의존해 본질적으로 약하므로 필요할 때만 내려간다. **ChatGPT/Claude/Gemini는
-        q= 자체가 안 먹혀 텍스트만 있어도 항상 주입 경로**다(`_CHAT_INJECT_TARGETS`).
-
-        답은 브라우저에 뜨고 끝난다 — PasteFlow가 그 텍스트를 읽지 못하므로 답변창·비교·
-        이미지 복사는 이 경로에 적용되지 않는다(의도된 트레이드오프).
-        """
-        from pasteflow import web_open
-        from pasteflow.ui.toast import ToastNotification
-
-        if target == "google" and images:
-            self._inject_to_chat("google", question, images)
-            return
-
-        if target in self._CHAT_INJECT_TARGETS:
-            self._inject_to_chat(target, question, images or [])
-            return
-
-        if target == "drive":
-            url, label = web_open.drive_search_url(question), "내 드라이브에서 검색"
-        else:
-            url, label = web_open.google_ai_url(question), "구글 AI 모드로 검색"
-
-        if web_open.open_url(url):
-            ToastNotification(f"{label} — 브라우저에서 여는 중", icon="🌐")
-        else:
-            ToastNotification("브라우저를 열지 못했습니다", icon="🌐")
-
     # 페이지가 뜨고 입력칸에 포커스가 갈 때까지 기다리는 시간. 프로그램은 로드 완료 시점을
     # 알 수 없어(브라우저 밖에서 DOM을 못 본다) 고정 지연에 기댈 수밖에 없다 — 주입 경로가
     # URL 경로보다 본질적으로 약한 지점이다. 넉넉히 잡는 대신, 주입 직전 포그라운드가
     # 브라우저인지 검사해 엉뚱한 창에 쏘는 사고를 막는다.
-    #
-    # ⚠ `is_browser_foreground()`는 "크롬 창이 앞에 있는가"만 확인하고 "그 탭의 페이지가
-    # 로딩을 마쳐 입력칸에 포커스가 갔는가"는 확인하지 못한다(크롬은 새 탭이 뜨자마자
-    # 포그라운드가 되므로 그 검사는 페이지가 덜 떴어도 통과한다). 그래서 첫 붙여넣기(항상
-    # 이미지 — `pastes` 순서가 이미지들 다음 텍스트)가 로딩 중인 페이지에 허공으로 사라지고,
-    # 그다음 텍스트 붙여넣기는 그새 로딩이 끝나 성공하는 비대칭 실패가 실측됐다(2026-07-29
-    # 사용자 보고 — 이미지만 빠지고 텍스트+Enter는 항상 성공). `_BROWSER_LOAD_MS`를 넉넉히
-    # 올리고, 이미지가 있을 때는 그 첫 붙여넣기 전에 추가 여유를 더 준다.
     _BROWSER_LOAD_MS = 3500
     _BROWSER_LOAD_IMAGE_EXTRA_MS = 1500  # 이미지 포함 시 첫 붙여넣기 전 추가 대기
     _INJECT_STEP_MS = 700   # 붙여넣기 사이 간격(첨부 칩을 만들 시간)
 
-    def _inject_to_chat(self, target: str, question: str, images: "list[bytes]"):
-        """홈 화면을 열고 이미지 → 질문 → Enter를 순서대로 주입한다(구글·ChatGPT·Claude·Gemini 공용).
+    def _open_in_browser(self, question: str, images: "list[bytes] | None" = None):
+        """질문을 구글 AI 모드로 브라우저에서 연다.
 
-        `_open_in_browser`가 호출자 — 구글은 이미지가 있을 때만, ChatGPT/Claude/Gemini는
-        q=가 안 먹혀 텍스트만 있어도 항상 이 경로를 탄다(`_CHAT_INJECT_TARGETS`).
+        API 검색 경로가 구조적으로 못 잡는 것을 위한 유일한 목적지다: 실시간 시세는 페이지
+        본문에 없어 크롤링 텍스트를 읽는 검색 도구가 영영 볼 수 없는데, 브라우저로 열면
+        구글이 금융 피드를 직접 물고 있어 정확한 값이 나온다(web_open.py 모듈 주석의
+        2026-07-14 실측 참조).
 
-        클립보드를 여러 번(이미지들·텍스트) 갈아끼우는 방식이다 — 한 글자씩 타이핑하는 것보다
-        단순하고, `_set_clipboard`가 `_self_triggered`를 세워 주므로 이 임시 클립보드가
-        히스토리에 쌓이지도 않는다(금지 조항 5와 같은 경로).
+        **이미지 첨부가 있으면 주입 경로로 갈린다.** 이미지는 URL에 실을 수 없지만 입력칸이
+        Ctrl+V로 이미지를 받으므로, 홈 화면을 열고 클립보드+키를 주입한다(`_inject_to_google`).
+        텍스트만이면 견고한 URL 경로를 그대로 쓴다 — 주입은 타이밍에 의존해 본질적으로
+        약하므로 필요할 때만 내려간다. 구글 AI 모드는 이미지를 **1장만** 지원한다(2026-07-29
+        사용자 실사용 확인 — `ai_query.py`의 첨부 UI가 이미 1장으로 제한한다).
+        """
+        from pasteflow import web_open
+        from pasteflow.ui.toast import ToastNotification
+
+        if images:
+            self._inject_to_google(question, images)
+            return
+
+        if web_open.open_url(web_open.google_ai_url(question)):
+            ToastNotification("구글 AI 모드로 검색 — 브라우저에서 여는 중", icon="🌐")
+        else:
+            ToastNotification("브라우저를 열지 못했습니다", icon="🌐")
+
+    def _inject_to_google(self, question: str, images: "list[bytes]"):
+        """구글 AI 모드 홈 화면을 열고 이미지 → 질문 → Enter를 순서대로 주입한다.
+
+        `_open_in_browser`가 호출자 — 이미지가 있을 때만 이 경로를 탄다. 클립보드를 여러 번
+        (이미지·텍스트) 갈아끼우는 방식이다 — 한 글자씩 타이핑하는 것보다 단순하고,
+        `_set_clipboard`가 `_self_triggered`를 세워 주므로 이 임시 클립보드가 히스토리에
+        쌓이지도 않는다(금지 조항 5와 같은 경로).
 
         각 단계는 QTimer로 이어 붙인다(sleep으로 UI를 막지 않는다). 매 단계 직전
         포그라운드가 브라우저인지 확인하고, 아니면 즉시 중단한다 — 사용자가 그 사이 다른
@@ -2294,19 +1969,15 @@ class PasteFlowApp:
         from pasteflow.paste_interceptor import VK_RETURN, VK_V
         from pasteflow.ui.toast import ToastNotification
 
-        if target == "google":
-            home_url, label = web_open.google_ai_home_url(), "구글 AI 모드"
-        else:
-            fn_name, label = self._CHAT_INJECT_TARGETS[target]
-            home_url = getattr(web_open, fn_name)()
+        images = images[:1]  # 구글 AI 모드는 이미지 1장만 지원(2026-07-29 사용자 확인)
 
-        if not web_open.open_url(home_url):
+        if not web_open.open_url(web_open.google_ai_home_url()):
             ToastNotification("브라우저를 열지 못했습니다", icon="🌐")
             return
-        img_note = f" — 이미지 {len(images)}장 포함" if images else ""
-        ToastNotification(f"{label} 여는 중{img_note}", icon="🌐")
+        img_note = " — 이미지 포함" if images else ""
+        ToastNotification(f"구글 AI 모드 여는 중{img_note}", icon="🌐")
 
-        # 붙여넣을 것들을 순서대로 — 이미지들 다음에 질문 텍스트.
+        # 붙여넣을 것들을 순서대로 — 이미지 다음에 질문 텍스트.
         pastes: list[ClipboardItem] = [
             ClipboardItem(content_type="image", image_data=png) for png in images
         ]
@@ -2329,255 +2000,6 @@ class PasteFlowApp:
         if images:
             initial_delay += self._BROWSER_LOAD_IMAGE_EXTRA_MS
         QTimer.singleShot(initial_delay, lambda: _step(0))
-
-    def _ai_query_for_item(self, item: ClipboardItem):
-        """항목을 컨텍스트로 질문 입력 다이얼로그 표시 → AI 워커.
-
-        텍스트 항목은 텍스트를 컨텍스트로, 이미지 항목은 이미지를 멀티모달로 전송(시각 질의).
-        DB id가 없는 임시 항목(화면 핀 등)도 받을 수 있도록 ClipboardItem을 직접 받는다.
-        """
-        from pasteflow.ui.toast import ToastNotification
-
-        if item.content_type == "image":
-            if not item.image_data:
-                ToastNotification("이미지 데이터를 찾을 수 없습니다", icon="🤖")
-                return
-            try:
-                image_png = _image_data_to_png_bytes(item.image_data)
-            except Exception as e:
-                ToastNotification(f"이미지 변환 실패 — {e}", icon="🤖")
-                return
-            # 이미지는 첨부로 싣고 텍스트 컨텍스트는 비운다(질문+이미지 멀티모달 질의).
-            self._open_ai_dialog("", image_png)
-            return
-
-        self._open_ai_dialog(item.text_content or item.preview_text or "")
-
-    def _on_ai_turn_done(self, payload: dict):
-        """AI 대화 턴 결과 → 펜딩 탭을 실제 답변으로 채운다(첫 턴·후속 턴 공용).
-
-        v1.49.3부터 모든 호출자(`_start_ai_worker`/`_start_compare_query`/`_on_ai_followup`)가
-        `_run_ai_turn` 호출 전에 답변창을 이미 pending 상태로 띄워 두므로, `popup`은 여기서
-        항상 살아 있다 — 창을 새로 만드는 대신 `resolve_pending`으로 제자리를 채우기만 한다.
-        답변창은 대화를 '턴 탭'(Q1/Q2/…)으로 나눠 보여준다 — 이어질수록 스크롤이 무한정
-        길어지지 않게(사용자 요청). 모델은 전체 대화(payload['conversation'])를 인지한다.
-        """
-        popup = payload["popup"]
-        answer = payload["answer"]
-        conversation = payload["conversation"]
-        images = payload["images"]
-
-        if not answer.strip():
-            # 비교 창(단일 펜딩 턴)은 "답 없음"을 그 창에 남기고, 후속 턴은 펜딩 탭만 제거.
-            popup.fail_pending("답변이 비어 있어요.")
-            return
-
-        # 후속 턴 — 엔터 즉시(또는 첫 질문 제출 즉시) 만든 펜딩 탭(생각 중)을 실제 답변으로 교체.
-        popup.resolve_pending(answer)
-
-        # 대화 상태를 답변창에 보관 — 다음 후속 질문에 사용(이미지는 첫 턴에만 실림).
-        popup._conversation = conversation
-        popup._images = images
-        # 이 창이 후속 질문 시 쓸 모델(비교 창은 자기 모델로 이어감, 단일 창은 None=기본).
-        popup._ai_model = payload.get("model")
-        elapsed = payload.get("elapsed")
-        if elapsed is not None:
-            popup.set_elapsed(elapsed)  # 이 답변에 걸린 시간을 답변창 상단에 표시
-        self._sync_ai_history(popup)
-
-    def _sync_ai_history(self, popup):
-        """popup._conversation을 ai_history에 자동 저장/갱신한다(v1.49.2) — 답변창을
-        닫아도(표시 전용이라 DB 미보존) 트레이 'AI 기록'에서 다시 볼 수 있게. 이미지는
-        저장하지 않는다(용량 때문 — 재열람 후 후속 질문은 텍스트만 이어간다).
-
-        popup._ai_history_id가 없으면(이번이 첫 턴) 새 row를 만들고, 있으면(후속 질문 —
-        방금 만든 창이든 트레이에서 재조회해 이어간 창이든) 그 row를 갱신한다.
-        """
-        conversation = getattr(popup, "_conversation", None)
-        if not conversation:
-            return
-        conv_json = json.dumps(conversation, ensure_ascii=False)
-        hid = getattr(popup, "_ai_history_id", None)
-        if hid is None:
-            title = (conversation[0].get("display") or conversation[0].get("content") or "")[:100]
-            # backend 컬럼은 v1.50.0에서 backend 개념이 사라져 늘 ""로 저장한다. 컬럼 자체는
-            # 남긴다 — 옛 기록의 값은 그 시절의 사실이므로 덮어쓰지 않는다.
-            hid = self.db.save_ai_conversation(
-                title, conv_json, popup._ai_model or "", "")
-            popup._ai_history_id = hid
-        else:
-            self.db.update_ai_conversation(hid, conv_json)
-
-    def _on_ai_history_requested(self, near: "QRect | None" = None):
-        """트레이 'AI 기록' 또는 AI 질문창의 '🕘 기록' 버튼 — 저장된 AI 대화 목록을
-        보여주고 더블클릭으로 재열람한다.
-
-        parent를 주지 않는다(미리보기 팝업과 동일한 독립 최상위 창) — AI 질문창
-        (`AiQueryDialog`)의 '🕘 기록' 버튼으로 열 때 같은 부모의 형제 창이면 모달 전파에
-        함께 막힐 수 있기 때문이다(질문창은 `_open_ai_dialog`에서 비모달로 띄운다). 재진입
-        가드(이미 열려 있으면 새로 안 만들고 앞으로 가져오기만)로 창이 중복되지 않게 한다.
-
-        `near`가 주어지면(질문창 버튼 — 그 창의 `frameGeometry()`) 이미지 미리보기가 패널
-        옆에 뜨는 것과 같은 배치 함수(`compute_preview_pos`)로 그 옆에 이어 붙여, 겹쳐서
-        수동으로 옮겨야 하는 번거로움을 없앤다(사용자 요청, 2026-07-13). 트레이에서 열 때는
-        `near`가 없으므로 커서 옆에 연다.
-        """
-        from pasteflow.ui.ai_history import AiHistoryDialog
-        from pasteflow.ui.image_preview import compute_preview_pos
-        from PyQt6.QtGui import QCursor
-        from PyQt6.QtWidgets import QApplication
-
-        existing = getattr(self, "_ai_history_dialog", None)
-        if existing is not None:
-            existing.raise_()
-            existing.activateWindow()
-            return
-        dialog = AiHistoryDialog(self.db)
-        dialog.open_requested.connect(self._open_ai_history_item)
-        dialog.finished.connect(lambda *_: setattr(self, "_ai_history_dialog", None))
-        self._ai_history_dialog = dialog
-
-        anchor = near if isinstance(near, QRect) else QRect(QCursor.pos(), QCursor.pos())
-        screen = QApplication.screenAt(anchor.center()) or QApplication.primaryScreen()
-        dialog.adjustSize()  # 위치 계산에 쓸 sizeHint 확정(아직 show 전)
-        if screen:
-            dialog.move(compute_preview_pos(anchor, dialog.size(), screen))
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
-
-    def _open_ai_history_item(self, history_id: int):
-        """AI 기록 목록에서 고른 대화를 답변창으로 다시 연다(읽기 전용 재구성).
-
-        저장된 conversation(role/content/display 리스트)을 문답 쌍으로 재구성해 첫 턴은
-        `initial_turn`으로, 나머지는 `add_turn`으로 채운다. `_conversation`/`_ai_model`/
-        `_ai_history_id`도 그대로 복원해 이어서 질문(follow-up)이 실시간 답변창과 동일하게
-        동작한다 — 단 이미지는 저장하지 않았으므로(`_sync_ai_history` 참고) 원래 이미지
-        질의였어도 후속 질문은 텍스트만으로 이어간다.
-        """
-        row = self.db.get_ai_conversation(history_id)
-        if row is None:
-            return
-        try:
-            conversation = json.loads(row["conversation"])
-        except (TypeError, ValueError):
-            return
-        turns = []
-        for i in range(0, len(conversation) - 1, 2):
-            q = conversation[i].get("display") or conversation[i].get("content", "")
-            a = conversation[i + 1].get("content", "")
-            turns.append((q, a))
-        if not turns:
-            return
-
-        item = ClipboardItem(content_type="text", text_content="", preview_text=turns[-1][1][:200])
-        popup = TextPreviewPopup.open_new(
-            item, self.panel.geometry(), editable=False, markdown=True, center=True,
-            initial_turn=turns[0])
-        for q, a in turns[1:]:
-            popup.add_turn(q, a)
-        popup._conversation = conversation
-        popup._images = None
-        popup._ai_model = row.get("model") or None
-        popup._ai_history_id = history_id
-        popup.copy_requested.connect(self._on_copy_item)
-        popup.copy_as_image_requested.connect(self._on_answer_image_copy)
-        popup.copy_text_requested.connect(self._on_copy_selected_text)
-        popup.followup_requested.connect(
-            lambda text, p=popup: self._on_ai_followup(p, text))
-
-    def _on_ai_followup(self, popup, text: str):
-        """답변창 하단 입력칸 Enter → 이전 문답을 인지한 상태로 후속 질의.
-
-        답변창이 보관한 대화 히스토리에 새 user 질문을 쌓아 같은 창을 대상으로 재질의한다.
-        진행 표시는 팝업 입력칸의 'AI 생각 중…'(팝업이 이미 잠금) — 별도 진행 칩 없음.
-        """
-        conversation = getattr(popup, "_conversation", None)
-        if conversation is None:
-            return
-        images = getattr(popup, "_images", None)
-        model = getattr(popup, "_ai_model", None)      # 비교 창은 자기 모델로 이어감
-        new_conv = conversation + [{"role": "user", "content": text, "display": text}]
-
-        cache = getattr(popup, "_shared_cache", None)
-        if cache is not None:
-            # 비교 창 — 후속 질문도 공유 검색 경로로 보낸다. 첫 턴만 공유하고 후속을 모델에
-            # 맡기면 "그럼 모레는?" 한 마디에 세 모델이 각자 검색해 수치 분기가 되살아난다.
-            # 같은 후속 질문을 다른 창에도 던지면 캐시가 같은 자료를 재사용한다.
-            job = {"popup": popup, "model": model, "conversation": new_conv}
-            self._start_shared_search(text, [job], images, cache)
-            return
-
-        self._run_ai_turn(new_conv, images, popup=popup, model=model)
-
-    def _on_copy_selected_text(self, text: str):
-        """AI 답변창 '선택→복사' 모드 — 드래그로 선택한 부분 텍스트를 클립보드+히스토리에 저장.
-
-        선택 즉시 복사되어 다른 곳에 바로 붙여넣을 수 있다(부분 발췌용). 클립보드·히스토리
-        처리는 답변 이미지 복사와 동일 패턴(_set_clipboard로 모니터 재감지 차단 → 히스토리 저장).
-        """
-        from pasteflow.ui.toast import ToastNotification
-
-        if not text.strip():
-            return
-        item = ClipboardItem(
-            content_type="text",
-            text_content=text,
-            preview_text=text[:200],
-        )
-        self.interceptor._set_clipboard(item)
-        self._persist_clipboard_item(item)
-        ToastNotification("선택한 텍스트 복사됨", icon="📋")
-
-    def _on_answer_image_copy(self, pixmap):
-        """AI 답변창 우클릭 '이미지로 복사' — 렌더된 답변 픽맵을 클립보드(DIB)+히스토리에 저장.
-
-        클립보드·히스토리 처리는 영역 캡처(_on_capture_region)와 동일 패턴: _set_clipboard로
-        모니터 재감지를 막은 뒤 _persist_clipboard_item으로 히스토리·큐에 추가. 붙여넣기
-        호환성이 가장 넓은 CF_DIB로 넣는다.
-        """
-        from pasteflow.ui.toast import ToastNotification
-
-        if pixmap is None or pixmap.isNull():
-            ToastNotification("이미지를 만들지 못했습니다", icon="🖼")
-            return
-        dib = _qpixmap_to_dib(pixmap)
-        item = ClipboardItem(
-            content_type="image",
-            image_data=dib,
-            thumbnail=self.monitor._create_thumbnail(dib),
-        )
-        self.interceptor._set_clipboard(item)
-        self._persist_clipboard_item(item)
-        # 렌더된 픽맵을 PNG로 실어 썸네일 표시(다른 이미지 복사 토스트와 일관).
-        # 썸네일이 카테고리를 대신하므로 이모지 아이콘은 생략(icon="").
-        from PyQt6.QtCore import QBuffer, QByteArray
-        _ba = QByteArray()
-        _buf = QBuffer(_ba)
-        _buf.open(QBuffer.OpenModeFlag.WriteOnly)
-        _png = pixmap.save(_buf, "PNG")
-        _buf.close()
-        _thumb = bytes(_ba) if _png else None
-        ToastNotification("답변을 이미지로 복사 + 히스토리 저장됨",
-                          icon="" if _thumb else "🖼", image_bytes=_thumb)
-
-    def _on_ai_error(self, payload):
-        """AI 질의 실패 — 항상 이미 떠 있는 답변창(pending)에 오류를 표시한다(v1.49.3부터
-        popup이 없는 경로가 없다). 창 안에 표시되므로(비교 창은 어느 모델이 실패했는지 그대로
-        보임) 별도 토스트로 도배하지 않는다 — API 키 미설정만 예외로 토스트+설정창을 띄운다.
-        """
-        from pasteflow.ui.toast import ToastNotification
-
-        popup = payload.get("popup") if isinstance(payload, dict) else None
-        msg = payload.get("msg", "") if isinstance(payload, dict) else str(payload)
-        if popup is not None:
-            popup.fail_pending(msg)
-
-        # API 키 미설정 → 설정 다이얼로그 자동 열기 (OCR 에러 처리와 동일 패턴, 재진입 가드가
-        # 여러 창의 동시 실패에서 중복 오픈을 막는다).
-        if "API 키" in msg:
-            ToastNotification("API 키를 설정해 주세요", icon="🤖")
-            QTimer.singleShot(300, self._open_settings)
 
     def _on_clear_history(self):
         self.db.clear_history()
@@ -2715,19 +2137,6 @@ class PasteFlowApp:
         from pasteflow.crypto import unprotect
         return unprotect(self.db.get_setting(key, default) or default)
 
-    def _gdrive_creds(self) -> tuple[str, str, str]:
-        """드라이브 OAuth 자격증명 (client_id, client_secret, refresh_token).
-
-        TokenCache가 **매 토큰 요청마다** 호출한다 — 값이 아니라 함수를 넘기는 이유가 이것이다.
-        설정창에서 재연결하면 다음 호출이 곧바로 새 자격증명을 본다(앱 재시작 불필요).
-        DB 접근은 Database._lock으로 직렬화되어 워커 스레드에서 호출해도 안전하다.
-        """
-        return (
-            self.db.get_setting("gdrive_client_id", ""),
-            self._get_secret("gdrive_client_secret"),
-            self._get_secret("gdrive_refresh_token"),
-        )
-
     def _save_annot_last_values(self, width, font, badge):
         """주석 편집기 마지막 값(두께·글자·번호 크기)을 DB에 저장 — 재시작 후에도 유지.
         _EditorMixin._persist_cb로 등록돼 값 변경(주석 위 휠) 시 호출된다."""
@@ -2744,6 +2153,10 @@ class PasteFlowApp:
         # 초기화가 읽는 ocr_gemini_model_gateway는 안 건드리지만, 비교 슬롯의 backend 키를
         # 지우므로 그걸 읽는 마이그레이션보다 뒤에 와야 한다.
         _migrate_drop_official_backend(self.db)
+
+        # AI 질의 기능(우클릭 질문·비교·드라이브 연동) 제거가 남긴 키 purge. 위 OCR 슬롯
+        # 초기화보다 반드시 뒤에 와야 한다(ocr_gemini_model_gateway를 여기서 지운다).
+        _migrate_drop_ai_query_feature(self.db)
 
         # 시크릿 암호화 + 고아 키 purge. Idempotent.
         _migrate_secrets(self.db)
@@ -2799,21 +2212,13 @@ class PasteFlowApp:
             "ocr_engine": self.db.get_setting("ocr_engine", "gemini"),  # OCR은 항상 AI API(엔진 선택 제거)
             "ocr_gemini_base_url": self.db.get_setting("ocr_gemini_base_url", ""),
             "ocr_gemini_api_key_gateway": self._get_secret("ocr_gemini_api_key_gateway"),
-            "ocr_gemini_model_gateway": self.db.get_setting("ocr_gemini_model_gateway", ""),
             "ocr_gemini_model_cache_gateway": self.db.get_setting("ocr_gemini_model_cache_gateway", ""),
-            # OCR 전용 모델 슬롯 (AI 질의 모델과 분리 — 비전 가능 모델만 고를 수 있다)
+            # OCR 전용 모델 슬롯 (API 키를 쓰는 유일한 경로 — v1.6x에서 AI 질의 기능 제거)
             "ocr_model_gateway": self.db.get_setting("ocr_model_gateway", ""),
-            # 여러 모델 비교(선택) — 기본 AI 모델에 더해 동시에 물어볼 모델 2개.
-            "ai_compare_model_a": self.db.get_setting("ai_compare_model_a", ""),
-            "ai_compare_model_b": self.db.get_setting("ai_compare_model_b", ""),
-            "ai_system_prompt": self.db.get_setting("ai_system_prompt", ""),
-            # API 프로필 — 묶음은 api_key를 품어 DPAPI 암호화돼 있으므로 복호화해 넘긴다.
+            # API 프로필(OCR 크리덴셜 전환용) — 묶음은 api_key를 품어 DPAPI 암호화돼
+            # 있으므로 복호화해 넘긴다.
             "ai_profiles": self._get_secret("ai_profiles"),
             "ai_active_profile": self.db.get_setting("ai_active_profile", ""),
-            # 구글 드라이브 OAuth — secret 2종은 DPAPI 복호화, client_id는 평문.
-            "gdrive_client_id": self.db.get_setting("gdrive_client_id", ""),
-            "gdrive_client_secret": self._get_secret("gdrive_client_secret"),
-            "gdrive_refresh_token": self._get_secret("gdrive_refresh_token"),
             "notify_on_copy": self.db.get_setting("notify_on_copy", "1"),
             "queue_idle_reset_sec": self.db.get_setting("queue_idle_reset_sec", "10"),
         }

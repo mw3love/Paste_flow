@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,
     QStyle, QStyledItemDelegate, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
-    QPlainTextEdit, QInputDialog, QTabWidget,
+    QInputDialog, QTabWidget,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize, QPoint
 from PyQt6.QtGui import QColor, QFontMetrics
@@ -77,9 +77,8 @@ class _PaletteSiteRow(QWidget):
     """AI 팔레트(Alt+` 자유질문창) 타겟 한 줄 — 번호·드래그손잡이·라벨·키워드·종류·URL·삭제.
 
     순서가 곧 팔레트의 번호(Alt+1~9)이므로 드래그 손잡이로 순서를 바꿀 수 있다(번호는
-    그 순서를 즉시 반영해 표시 — `set_number`). 종류가 `url`이 아니면(구글 AI·드라이브·
-    내부 API 답변) 그 kind는 main.py의 기존 배관을 그대로 타므로 URL 칸이 의미가 없어
-    비활성화한다.
+    그 순서를 즉시 반영해 표시 — `set_number`). 종류가 `url`이 아니면(구글 AI 모드) 그
+    kind는 main.py의 기존 배관을 그대로 타므로 URL 칸이 의미가 없어 비활성화한다.
     """
 
     remove_requested = pyqtSignal(object)   # self
@@ -162,8 +161,8 @@ class _PaletteSiteRow(QWidget):
         url_row.setSpacing(4)
         self.url_edit = QLineEdit(site.get("url", ""))
         self.url_edit.setPlaceholderText("https://example.com/search?q={q}")
-        # 같은 이유(:disabled 미정의) — url 아닌 종류(구글 AI·드라이브·API, 기본 6개 중 3개)는
-        # 이 칸이 상시 비활성이라 안내 문구("(내장 — main.py가 처리)")가 안 보이면 그 자체로
+        # 같은 이유(:disabled 미정의) — url이 아닌 종류(구글 AI 모드)는 이 칸이 상시
+        # 비활성이라 안내 문구("(내장 — main.py가 처리)")가 안 보이면 그 자체로
         # "왜 URL 칸이 비었지"가 되므로 대비를 명시적으로 준다.
         self.url_edit.setStyleSheet(
             f"QLineEdit {{ background-color: {_INSET}; color: {_TXT}; "
@@ -570,23 +569,12 @@ class SettingsDialog(QDialog):
     KEY_OCR_ENGINE = "ocr_engine"
     # AI 크리덴셜 — Mindlogic 게이트웨이 한 벌(키 + Base URL)뿐이다.
     # v1.50.0: Google AI Studio(공식) 백엔드를 제거하고 backend 개념 자체를 없앴다.
-    # 사용 빈도가 낮은 데 비해 backend 분기가 코드 전반(설정·main·엔진)에 퍼져 있었고,
-    # Gemini 모델은 게이트웨이에도 그대로 있어 잃는 것이 없다(웹 검색도 nano 심부름꾼이
-    # google_search grounding보다 낫다는 실측이 있다 — web_search.py 참조).
     KEY_OCR_GEMINI_BASE_URL = "ocr_gemini_base_url"
     KEY_OCR_GEMINI_API_KEY_GATEWAY = "ocr_gemini_api_key_gateway"
-    KEY_OCR_GEMINI_MODEL_GATEWAY = "ocr_gemini_model_gateway"
     KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY = "ocr_gemini_model_cache_gateway"
-    # OCR 전용 모델 슬롯 — AI 질의 모델(KEY_OCR_GEMINI_MODEL_*)과 분리(v1.39.0).
-    # OCR은 이미지를 보내므로 비전 가능 모델만 고를 수 있고, 저렴한 모델을 따로 둘 수 있다.
+    # OCR 전용 모델 슬롯 — API 키를 쓰는 유일한 경로(v1.6x에서 AI 질의 기능 제거).
     KEY_OCR_MODEL_GATEWAY = "ocr_model_gateway"
-    # 여러 모델 비교(선택) — 기본 AI 질의 모델(모델 1)에 더해 동시에 물어볼 추가 모델 2개.
-    # 빈 값이면 미사용. 질문창 체크박스가 켜졌을 때만 발동한다.
-    KEY_AI_COMPARE_MODEL_A = "ai_compare_model_a"
-    KEY_AI_COMPARE_MODEL_B = "ai_compare_model_b"
-    # AI 질의 시스템 프롬프트(멘토 페르소나). 빈 값이면 ocr_engine.AI_SYSTEM_PROMPT로 폴백.
-    KEY_AI_SYSTEM_PROMPT = "ai_system_prompt"
-    # API 프로필 — 이름 붙인 크리덴셜 세트(라벨+base_url+키+모델+캐시)의 목록.
+    # API 프로필 — 이름 붙인 크리덴셜 세트(라벨+base_url+키+OCR모델+캐시)의 목록.
     # 여러 API(구글 직결·게이트웨이 계정 여러 개)를 드롭다운으로 전환하기 위한 것.
     # 엔진이 읽는 "라이브" 키(KEY_OCR_GEMINI_*)는 그대로 두고, 프로필 선택 = 그 값을
     # 라이브 칸에 채우는 것뿐이다(엔진 변경 0). 프로필 묶음은 api_key를 품으므로
@@ -599,22 +587,13 @@ class SettingsDialog(QDialog):
     # 다시 시드된다(템플릿이라 항상 출발점으로 남기는 의도).
     GOOGLE_PRESET_LABEL = "Google AI Studio"
     GOOGLE_PRESET_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
-    GOOGLE_PRESET_MODEL = "gemini-2.5-flash"  # 비전 가능 → AI·OCR 공용 기본
-    # 구글 드라이브 OAuth(선택) — 연결하면 AI가 내 드라이브 문서를 검색해 근거로 삼는다.
-    # client_secret·refresh_token은 main._SECRET_KEYS에 등록돼 DPAPI로 암호화 저장된다.
-    KEY_GDRIVE_CLIENT_ID = "gdrive_client_id"
-    KEY_GDRIVE_CLIENT_SECRET = "gdrive_client_secret"
-    KEY_GDRIVE_REFRESH_TOKEN = "gdrive_refresh_token"
+    GOOGLE_PRESET_MODEL = "gemini-2.5-flash"  # 비전 가능 → OCR 기본
     KEY_QUEUE_IDLE_RESET = "queue_idle_reset_sec"
-    # 비교 콤보의 '미사용' 표시값 — 저장 시 빈 문자열로 환원한다(editable 콤보라 텍스트=값).
-    _COMPARE_UNUSED = "(사용 안 함)"
 
     # 워커 스레드 → UI 안전 통신용 내부 시그널 (models, error_msg)
     _models_fetched = pyqtSignal(list, str)  # (models, error)
-    # 드라이브 동의 결과 (refresh_token, error_msg) — 워커 스레드 → UI 안전 통신.
-    _gdrive_done = pyqtSignal(str, str)
     # 연결 테스트 단계별 결과 (run_id, slot, status, detail).
-    # slot: "conn" | "chat" | "ocr" | "__end__"(버튼 복구 신호)
+    # slot: "conn" | "ocr" | "__end__"(버튼 복구 신호)
     # status: ProbeResult.status + "run"(진행 중) / "skip"(앞 단계 실패로 건너뜀)
     # run_id: 이 결과를 만든 테스트 회차. 최신 회차가 아니면 UI가 버린다(아래 _on_probe_done).
     _probe_done = pyqtSignal(int, str, str, str)
@@ -634,7 +613,6 @@ class SettingsDialog(QDialog):
         self._finalize_size()
         self._models_fetched.connect(self._on_models_fetched)
         self._probe_done.connect(self._on_probe_done)
-        self._gdrive_done.connect(self._on_gdrive_done)
 
     def _setup_window(self):
         self.setWindowTitle("PasteFlow 설정")
@@ -874,18 +852,18 @@ class SettingsDialog(QDialog):
             f"QComboBox:hover {{ border-color: {COLORS['peach']}; }}"
         )
 
-        # ── AI 연동 그룹 (Gemini / Mindlogic API) ──
-        # OCR(텍스트 인식)과 AI 답변(우클릭 'AI에게 질문')이 동일 API를 공유한다.
-        # OCR은 별도 엔진 선택 없이 이 API로 처리하므로(WinRT 제거) 항상 키가 필요하다.
-        ai_group = QGroupBox("AI 연동 (API 프로필)")
+        # ── AI 연동 그룹 (OCR 전용 API 프로필) ──
+        # v1.6x에서 AI 질의(우클릭 "AI에게 질문"·비교·드라이브 연동)를 통째로 제거해,
+        # 이제 이 API 키를 쓰는 경로는 OCR(이미지에서 텍스트 추출) 하나뿐이다.
+        ai_group = QGroupBox("OCR 연동 (API 프로필)")
         self._ai_form = QFormLayout(ai_group)
         ai_form = self._ai_form
         ai_form.setVerticalSpacing(4)
         ai_form.setContentsMargins(10, 8, 10, 8)
 
         ai_desc = QLabel(
-            "AI 호출·AI OCR에 쓸 API. 여러 API(구글 직결·게이트웨이 계정)를 프로필로 저장해\n"
-            "드롭다운으로 전환합니다.")
+            "AI OCR(이미지→텍스트 추출)에 쓸 API. 여러 API(구글 직결·게이트웨이 계정)를\n"
+            "프로필로 저장해 드롭다운으로 전환합니다.")
         ai_desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
         ai_desc.setWordWrap(True)
         ai_form.addRow(ai_desc)
@@ -967,19 +945,9 @@ class SettingsDialog(QDialog):
             "  /  게이트웨이: https://…mindlogic.ai/v1/gateway")
         ai_form.addRow(QLabel("•  Base URL:"), self._base_url_edit)
 
-        ai_form.addRow(_ai_sep())  # 크리덴셜 ↔ 모델 섹션 구분(OCR 모델 위)
+        ai_form.addRow(_ai_sep())  # 크리덴셜 ↔ 모델 섹션 구분
 
-        # 모델 콤보 2개 — OCR(이미지 입력 필요)과 AI 질의(전 모델)를 분리한다.
-        # 같은 모델을 공유하면 답변용 고가 모델이 OCR에도 쓰이거나(과금), 텍스트 전용
-        # 모델을 고르면 OCR이 400으로 깨진다. ↻ 새로고침 1회로 두 콤보를 함께 채운다.
-        self._model_label = QLabel("•  AI 모델 1:")
-        self._model_combo = QComboBox()
-        self._model_combo.setEditable(True)
-        self._model_combo.setStyleSheet(_combo_style)
-        self._model_combo.setToolTip(
-            "AI 질문·답변의 기본 모델. 평소엔 이 모델만 답하고,\n"
-            "질문창에서 '여러 모델로 비교'를 켜면 모델 1·2·3으로 동시에 질의합니다.")
-
+        # OCR 모델 — 이미지 입력을 받는 모델이어야 한다.
         self._ocr_model_label = QLabel("•  OCR 모델:")
         self._ocr_model_combo = QComboBox()
         self._ocr_model_combo.setEditable(True)
@@ -989,86 +957,32 @@ class SettingsDialog(QDialog):
             "이미지 입력을 받는 모델이어야 합니다 — [연결 테스트]로 확인하세요."
         )
 
-        # 질의 모델 2·3 (선택) — 질의 모델 1에 더해 '여러 모델로 비교' 시 동시에 물어볼 모델.
-        # 질문창에서 '여러 모델로 비교'를 켜면 이 모델들로 함께 질의한다. 미설정(사용 안 함)이
-        # 기본이며, 모델 1을 포함해 2개 이상 설정돼야 질문창 체크박스가 나타난다.
-        _cmp_tip = "비교 질의에 함께 쓸 모델(선택). '여러 모델로 비교'를 켜면 함께 답합니다."
-        self._compare_a_label = QLabel("•  AI 모델 2:")
-        self._compare_model_a_combo = QComboBox()
-        self._compare_model_a_combo.setEditable(True)
-        self._compare_model_a_combo.setStyleSheet(_combo_style)
-        self._compare_model_a_combo.setToolTip(_cmp_tip)
-        self._compare_b_label = QLabel("•  AI 모델 3:")
-        self._compare_model_b_combo = QComboBox()
-        self._compare_model_b_combo.setEditable(True)
-        self._compare_model_b_combo.setStyleSheet(_combo_style)
-        self._compare_model_b_combo.setToolTip(_cmp_tip)
-
         # 콤보 초기 채우기는 _load_values(_init_model_slots)에서 캐시를 읽어 수행한다.
         # 캐시가 없으면 빈 콤보라, 무엇을 해야 할지 placeholder로 안내한다(빈 값은 엔진
         # 기본 모델로 폴백).
-        for combo in (self._model_combo, self._ocr_model_combo):
-            le = combo.lineEdit()
-            if le is not None:
-                le.setPlaceholderText("↻를 눌러 모델 목록을 불러오세요")
-            # 계열 헤더 아래 모델명을 들여써 상하위를 구분(팝업 view 한정 — 닫힌 콤보는 불변).
-            # 델리게이트는 combo를 부모로 둬야 GC로 사라지지 않는다.
-            combo.view().setItemDelegate(_ModelIndentDelegate(combo))
-        # 비교 콤보도 같은 들여쓰기 델리게이트를 쓴다(placeholder는 '(사용 안 함)'이 대신).
-        for combo in (self._compare_model_a_combo, self._compare_model_b_combo):
-            combo.view().setItemDelegate(_ModelIndentDelegate(combo))
+        le = self._ocr_model_combo.lineEdit()
+        if le is not None:
+            le.setPlaceholderText("↻를 눌러 모델 목록을 불러오세요")
+        # 계열 헤더 아래 모델명을 들여써 상하위를 구분(팝업 view 한정 — 닫힌 콤보는 불변).
+        # 델리게이트는 combo를 부모로 둬야 GC로 사라지지 않는다.
+        self._ocr_model_combo.view().setItemDelegate(_ModelIndentDelegate(self._ocr_model_combo))
 
-        # 모델별 프로브 결과 줄 — 연결 테스트가 각 모델을 실호출해 여기에 개별로 쓴다.
-        # 상태 줄 하나에 뭉치면 "뭐가 성공했다는 거지?"가 되므로 콤보마다 따로 둔다.
-        self._model_probe_status = self._make_probe_label()
+        # 프로브 결과 줄 — 연결 테스트가 실호출해 여기에 쓴다.
         self._ocr_model_probe_status = self._make_probe_label()
-        self._compare_a_probe_status = self._make_probe_label()
-        self._compare_b_probe_status = self._make_probe_label()
 
         # 모델을 바꾸면 직전 결과는 다른 모델 이야기다 — 낡은 ✓를 남기면 그게 거짓말이 된다.
-        # 진행 중인 테스트가 있다면 그 결과도 무효화한다(도착해도 화면의 모델과 다른 모델 얘기).
-        for combo, probe_label in ((self._model_combo, self._model_probe_status),
-                                   (self._ocr_model_combo, self._ocr_model_probe_status),
-                                   (self._compare_model_a_combo, self._compare_a_probe_status),
-                                   (self._compare_model_b_combo, self._compare_b_probe_status)):
-            combo.currentTextChanged.connect(
-                lambda _t, lbl=probe_label: self._on_model_text_changed(lbl))
+        self._ocr_model_combo.currentTextChanged.connect(
+            lambda _t: self._on_model_text_changed(self._ocr_model_probe_status))
 
-        # 배치: OCR 모델을 위로, 질의 모델 1·2·3을 이어 묶어 "함께 쓰는 질의 모델군"임을
-        # 시각적으로 드러낸다(모델 1=평소 답변, 2·3=비교 시 추가).
         ai_form.addRow(self._ocr_model_label, self._stack(
             self._ocr_model_combo, self._ocr_model_probe_status))
-        ai_form.addRow(self._model_label, self._stack(
-            self._model_combo, self._model_probe_status))
 
-        # 모델 2·3(비교용)은 '여러 모델 비교 사용' 체크박스 뒤로 숨긴다 — 평소엔 안 보이게
-        # 해 설정창을 줄인다. 켜져 있을 때만 이 두 행이 뜨고, 저장도 그때만 된다.
-        self._compare_enable_check = QCheckBox("여러 모델 비교 사용 (모델 2·3 추가)")
-        self._compare_enable_check.setToolTip(
-            "켜면 질문창에서 여러 모델로 동시에 물어볼 수 있습니다.\n"
-            "끄면 모델 2·3은 저장되지 않아 질문창의 비교 옵션도 사라집니다.")
-        self._compare_enable_check.toggled.connect(self._on_compare_toggle)
-        ai_form.addRow(self._compare_enable_check)
-
-        self._compare_box = QWidget()
-        cbox = QFormLayout(self._compare_box)
-        cbox.setContentsMargins(0, 0, 0, 0)
-        cbox.setVerticalSpacing(4)
-        cbox.addRow(self._compare_a_label, self._stack(
-            self._compare_model_a_combo, self._compare_a_probe_status))
-        cbox.addRow(self._compare_b_label, self._stack(
-            self._compare_model_b_combo, self._compare_b_probe_status))
-        self._compare_box.setVisible(False)  # 기본 접힘(로드 시 저장값 있으면 펼침)
-        ai_form.addRow(self._compare_box)
-
-        # API 연결 테스트 — 모델명 바로 아래에 배치(설명 힌트보다 위). 힌트를 그룹 맨 아래로
-        # 내려 워드랩 공간을 넉넉히 확보한다.
+        # API 연결 테스트 — 모델명 바로 아래에 배치(설명 힌트보다 위).
         self._test_btn = QPushButton("연결 테스트")
         self._test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._test_btn.setToolTip(
-            "키·연결을 확인하고, 설정한 AI 모델(1·2·3)과 OCR 모델을 실제로 한 번씩\n"
-            "호출해 각 줄에 결과를 보여줍니다. (AI 모델은 이미지 첨부 질문 1회, OCR 모델은\n"
-            "작은 테스트 이미지 1회. AI 모델 2·3은 설정했을 때만 테스트)"
+            "키·연결을 확인하고, OCR 모델에 작은 테스트 이미지를 1회 실제로 보내\n"
+            "그 자리에서 되는지 확인합니다."
         )
         self._test_btn.clicked.connect(self._on_test_api)
         self._test_status = QLabel("")
@@ -1080,20 +994,6 @@ class SettingsDialog(QDialog):
         test_row.addWidget(self._test_btn)
         test_row.addWidget(self._test_status, 1)
         ai_form.addRow("", test_row)
-
-        # ── AI 시스템 프롬프트(멘토 페르소나) ──
-        # 답변 톤·구조를 정하는 프롬프트. 크고 드물게 손대므로 별도 편집창으로 접는다.
-        # _ai_prompt_edit은 화면에 안 붙는 '데이터 홀더'다(편집은 _open_prompt_editor 창이
-        # 자기 에디터에 복사해 하고, 확인 시 여기로 되쓴다). _on_save가 이걸 그대로 읽는다.
-        # 비워 두면 엔진이 기본값(ocr_engine.AI_SYSTEM_PROMPT)으로 폴백한다.
-        self._ai_prompt_edit = QPlainTextEdit()  # 홀더 — 레이아웃에 추가하지 않음
-        self._prompt_edit_btn = QPushButton("프롬프트 편집…")
-        self._prompt_edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._prompt_edit_btn.setToolTip(
-            "AI 답변의 톤·구조를 정하는 시스템 프롬프트를 편집합니다.\n"
-            "OCR(글자 추출)에는 영향이 없습니다. 비워 두면 기본값이 적용됩니다.")
-        self._prompt_edit_btn.clicked.connect(self._open_prompt_editor)
-        ai_form.addRow(QLabel("•  AI 시스템 프롬프트:"), self._prompt_edit_btn)
 
         tab_ai.addWidget(ai_group)
 
@@ -1173,66 +1073,6 @@ class SettingsDialog(QDialog):
 
         tab_ai.addWidget(palette_group)
 
-        # ── 구글 드라이브 (선택) — 접이식, 기본 접힘 ──
-        # 연결하면 AI 질의가 내 드라이브 문서를 검색해 근거로 삼는다(읽기 전용).
-        # 안 하면 도구가 조용히 빠질 뿐 웹 검색·AI 답변은 그대로 동작한다(우아한 열화).
-        # 자주 안 쓰므로 헤더 클릭으로 펼치는 접이식으로 감춘다(삭제 아님 — 배관·연결 상태 보존).
-        self._gd_toggle = QPushButton("▸  구글 드라이브 (선택)")
-        self._gd_toggle.setCheckable(True)
-        self._gd_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._gd_toggle.setStyleSheet(
-            f"QPushButton {{ text-align:left; border:none; padding:6px 2px; "
-            f"color:{_TITLE}; font-weight:600; background:transparent; }}"
-            f"QPushButton:hover {{ color:{COLORS['peach']}; }}")
-        self._gd_toggle.toggled.connect(self._on_gd_toggle)
-        tab_ai.addWidget(self._gd_toggle)
-
-        self._gd_body = QWidget()
-        gd_form = QFormLayout(self._gd_body)
-        gd_form.setVerticalSpacing(4)
-        gd_form.setContentsMargins(10, 4, 10, 8)
-
-        gd_desc = QLabel(
-            "연결하면 AI가 내 구글 드라이브 문서를 찾아 근거로 답합니다(읽기 전용). "
-            "Google Cloud Console에서 「데스크톱 앱」 OAuth 클라이언트를 만들어 아래에 입력하세요."
-        )
-        gd_desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
-        gd_desc.setWordWrap(True)
-        gd_form.addRow(gd_desc)
-
-        self._gdrive_client_id_edit = QLineEdit()
-        self._gdrive_client_id_edit.setPlaceholderText("...apps.googleusercontent.com")
-        gd_form.addRow(QLabel("•  클라이언트 ID:"), self._gdrive_client_id_edit)
-
-        self._gdrive_client_secret_edit = QLineEdit()
-        self._gdrive_client_secret_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._gdrive_client_secret_edit.setPlaceholderText("GOCSPX-...")
-        gd_form.addRow(QLabel("•  클라이언트 보안 비밀번호:"), self._gdrive_client_secret_edit)
-
-        self._gdrive_connect_btn = QPushButton("연결")
-        self._gdrive_connect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._gdrive_connect_btn.setToolTip(
-            "브라우저에서 구글 동의를 받아 드라이브 읽기 권한을 연결합니다.\n"
-            "('확인되지 않은 앱' 경고가 뜨면 [고급] → [계속]으로 넘기세요.)"
-        )
-        self._gdrive_connect_btn.clicked.connect(self._on_gdrive_connect)
-        self._gdrive_disconnect_btn = QPushButton("연결 해제")
-        self._gdrive_disconnect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._gdrive_disconnect_btn.setToolTip("저장된 구글 인증을 지웁니다(드라이브 검색 중지).")
-        self._gdrive_disconnect_btn.clicked.connect(self._on_gdrive_disconnect)
-        self._gdrive_status = QLabel("")
-        self._gdrive_status.setWordWrap(True)
-        gd_btn_row = QHBoxLayout()
-        gd_btn_row.setContentsMargins(0, 0, 0, 0)
-        gd_btn_row.setSpacing(8)
-        gd_btn_row.addWidget(self._gdrive_connect_btn)
-        gd_btn_row.addWidget(self._gdrive_disconnect_btn)
-        gd_btn_row.addWidget(self._gdrive_status, 1)
-        gd_form.addRow("", gd_btn_row)
-
-        self._gd_body.setVisible(False)  # 기본 접힘(_load_values가 연결돼 있으면 펼침)
-        tab_ai.addWidget(self._gd_body)
-
         # ── 일반 설정 그룹 ── 「일반」 탭의 맨 위(아래 insertWidget(0, ...) 참고).
         # 탭 제목도 "일반"이라 그룹박스 제목까지 "일반"이면 중복으로 읽혀 "일반 설정"으로 구분.
         general_group = QGroupBox("일반 설정")
@@ -1296,59 +1136,35 @@ class SettingsDialog(QDialog):
         outer.addWidget(self._btn_bar)
 
     def _on_test_api(self):
-        """연결 테스트 — 키·연결 + **설정한 질의 모델(1·2·3)과 OCR 모델**을 실호출해 각 줄에
-        개별 보고(워커 스레드). 질의 모델 2·3은 설정됐을 때만 테스트하고, 미설정이면 줄을 숨긴다.
+        """연결 테스트 — 키·연결 + OCR 모델을 실호출해 결과를 콤보 아래에 보고한다(워커 스레드).
 
         옛 버전은 모델 목록 조회 하나만 하고 "연결 성공 — API 키가 유효합니다"를 띄웠다.
-        모델 콤보가 둘인 화면에서 그 문구는 "고른 모델이 된다"로 읽히지만, 실제로는 **어느
-        모델도 호출하지 않았다** — 특히 OCR 모델의 이미지 입력 지원 여부는 목록 조회로
-        절대 알 수 없어, 텍스트 전용 모델을 골라도 ✓가 떴다가 캡처할 때 400이 났다.
+        그 문구는 "고른 모델이 된다"로 읽히지만 실제로는 **모델을 호출하지 않았다** —
+        OCR 모델의 이미지 입력 지원 여부는 목록 조회로 절대 알 수 없어, 텍스트 전용 모델을
+        골라도 ✓가 떴다가 캡처할 때 400이 났다.
 
-        이제 세 단계를 순서대로 돌리고 각 결과를 제 자리(연결=상태 줄, 모델=콤보 아래)에
-        따로 쓴다. 앞 단계가 실패하면 뒤 단계는 'skip'으로 남겨 원인을 흐리지 않는다.
+        연결과 OCR 모델을 순서대로 실호출하고 각 결과를 제 자리(연결=상태 줄, 모델=콤보
+        아래)에 따로 쓴다. 연결이 실패하면 모델 테스트는 'skip'으로 남겨 원인을 흐리지 않는다.
         """
         # creds는 UI 스레드에서 미리 읽어 넣는다(워커에서 위젯 접근 금지).
         api_key, base_url = self._creds()
-        chat_model = self._model_combo.currentText().strip()
         ocr_model = self._ocr_model_combo.currentText().strip()
-        # 비교가 꺼져 있으면 모델 2·3은 테스트하지 않는다(저장도 안 되는 값이라).
-        compare_on = self._compare_enable_check.isChecked()
-        cmp_a = self._compare_value(self._compare_model_a_combo) if compare_on else ""
-        cmp_b = self._compare_value(self._compare_model_b_combo) if compare_on else ""
 
-        # (slot, 모델, is_ocr). OCR을 맨 앞에 둔다 — 텍스트 전용 모델 오선택으로 캡처 시
-        # 400이 가장 자주 나는 지점이라 결과를 먼저 보여준다.
-        targets: list[tuple[str, str, bool]] = [
-            ("ocr", ocr_model, True),
-            ("chat", chat_model, False),
-        ]
-        if cmp_a:
-            targets.append(("chat2", cmp_a, False))
-        if cmp_b:
-            targets.append(("chat3", cmp_b, False))
-
-        # 회차 번호. 테스트 도중 사용자가 모델을 바꾸거나 다시 누르면 이 값이 올라가고,
-        # 뒤늦게 도착한 옛 회차의 결과는 버려진다 — 안 그러면 A 모델의 ✓가 화면에 떠 있는
-        # B 모델 아래에 찍힌다.
+        # 테스트 도중 사용자가 모델을 바꾸거나 다시 누르면 이 값이 올라가고, 뒤늦게 도착한
+        # 옛 회차의 결과는 버려진다.
         self._probe_run_id += 1
         run_id = self._probe_run_id
 
         self._test_btn.setEnabled(False)
         self._set_probe_status(self._test_status, "run", "연결 확인 중…")
         self._set_probe_status(self._ocr_model_probe_status, "run", "대기 중…")
-        self._set_probe_status(self._model_probe_status, "run", "대기 중…")
-        # 미설정 질의 모델(2·3)은 줄을 비워 숨긴다(빈 detail → 라벨 hidden).
-        self._set_probe_status(self._compare_a_probe_status, "run", "대기 중…" if cmp_a else "")
-        self._set_probe_status(self._compare_b_probe_status, "run", "대기 중…" if cmp_b else "")
 
         import threading
 
         def _worker():
             try:
-                from pasteflow.ocr_engine import (
-                    probe_chat_model, probe_connection, probe_ocr_model,
-                )
-                # 연결 프로브 1회 — 실패하면 모델 프로브는 전부 skip해 원인을 흐리지 않는다.
+                from pasteflow.ocr_engine import probe_connection, probe_ocr_model
+                # 연결 프로브 1회 — 실패하면 모델 프로브는 skip해 원인을 흐리지 않는다.
                 if not api_key:
                     conn_ok = False
                     self._probe_done.emit(
@@ -1358,19 +1174,15 @@ class SettingsDialog(QDialog):
                     conn_ok = c.status == "ok"
                     self._probe_done.emit(run_id, "conn", c.status, c.detail)
 
-                for slot, model, is_ocr in targets:
-                    if not model:
-                        self._probe_done.emit(
-                            run_id, slot, "skip", "모델이 비어 있습니다 — ↻로 목록을 불러오세요.")
-                        continue
-                    if not conn_ok:
-                        self._probe_done.emit(
-                            run_id, slot, "skip", "연결이 안 돼 건너뛰었습니다.")
-                        continue
-                    self._probe_done.emit(run_id, slot, "run", f"{model} 호출 중…")
-                    probe = probe_ocr_model if is_ocr else probe_chat_model
-                    result = probe(api_key, base_url, model)
-                    self._probe_done.emit(run_id, slot, result.status, result.detail)
+                if not ocr_model:
+                    self._probe_done.emit(
+                        run_id, "ocr", "skip", "모델이 비어 있습니다 — ↻로 목록을 불러오세요.")
+                elif not conn_ok:
+                    self._probe_done.emit(run_id, "ocr", "skip", "연결이 안 돼 건너뛰었습니다.")
+                else:
+                    self._probe_done.emit(run_id, "ocr", "run", f"{ocr_model} 호출 중…")
+                    result = probe_ocr_model(api_key, base_url, ocr_model)
+                    self._probe_done.emit(run_id, "ocr", result.status, result.detail)
             except Exception as e:
                 # 프로브 함수 밖의 예상 못 한 오류(패키지 미설치 등)
                 self._probe_done.emit(run_id, "conn", "fail", f"테스트 실행 실패: {e}")
@@ -1395,63 +1207,9 @@ class SettingsDialog(QDialog):
             return
         label = {
             "conn": self._test_status,
-            "chat": self._model_probe_status,
-            "chat2": self._compare_a_probe_status,
-            "chat3": self._compare_b_probe_status,
             "ocr": self._ocr_model_probe_status,
         }[slot]
         self._set_probe_status(label, status, detail)
-
-    # ── 구글 드라이브 연결 ──────────────────────────────────────────────────
-    #
-    # refresh token은 `연결`이 성공한 즉시 DB에 쓰지 않고 `self._gdrive_refresh`에 들고 있다가
-    # [저장]에서 함께 emit한다 — 다른 모든 설정과 같은 규칙(취소하면 아무것도 안 바뀜).
-
-    def _on_gdrive_connect(self):
-        """`연결` — 브라우저 동의를 받아 refresh token을 얻는다(워커 스레드).
-
-        동의에 수십 초가 걸리므로 UI 스레드에서 부르면 설정창이 통째로 얼어붙는다.
-        """
-        client_id = self._gdrive_client_id_edit.text().strip()
-        client_secret = self._gdrive_client_secret_edit.text().strip()
-        if not (client_id and client_secret):
-            self._set_gdrive_status("✗ 클라이언트 ID와 보안 비밀번호를 먼저 입력하세요.", "fail")
-            return
-
-        self._gdrive_connect_btn.setEnabled(False)
-        self._set_gdrive_status("브라우저에서 구글 동의를 진행하세요…", "run")
-
-        import threading
-
-        def _worker():
-            try:
-                from pasteflow import gdrive
-                token = gdrive.authorize(client_id, client_secret)
-                self._gdrive_done.emit(token, "")
-            except Exception as e:
-                self._gdrive_done.emit("", str(e))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _on_gdrive_done(self, refresh_token: str, err: str):
-        """동의 결과 반영 (Qt 메인 스레드)."""
-        self._gdrive_connect_btn.setEnabled(True)
-        if err:
-            self._set_gdrive_status(f"✗ 연결 실패 — {err}", "fail")
-            return
-        self._gdrive_refresh = refresh_token
-        self._set_gdrive_status("✓ 연결됨 — [저장]을 눌러야 적용됩니다.", "ok")
-
-    def _on_gdrive_disconnect(self):
-        """`연결 해제` — 보관 중인 인증을 지운다(저장 시 DB에서도 비워진다)."""
-        self._gdrive_refresh = ""
-        self._set_gdrive_status("연결 해제됨 — [저장]을 눌러야 적용됩니다.", "run")
-
-    def _set_gdrive_status(self, message: str, status: str):
-        """드라이브 상태 줄. status는 _PROBE_STYLE 키(ok/fail/run…)와 색을 공유한다."""
-        _, color = _PROBE_STYLE.get(status, _PROBE_STYLE["run"])
-        self._gdrive_status.setStyleSheet(f"color: {color}; font-size: 11px;")
-        self._gdrive_status.setText(message)
 
     def _pick_capture_folder(self):
         """캡처 저장 폴더 선택 다이얼로그"""
@@ -1495,34 +1253,13 @@ class SettingsDialog(QDialog):
         self._gateway_key_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_API_KEY_GATEWAY, ""))
         self._base_url_edit.setText(self._settings.get(self.KEY_OCR_GEMINI_BASE_URL, ""))
 
-        # 모델 슬롯 4행 — 캐시된 모델 목록으로 채우고 저장값을 복원한다.
+        # OCR 모델 슬롯 — 캐시된 모델 목록으로 채우고 저장값을 복원한다.
         self._init_model_slots()
-        self._init_compare_slots()
-        # 저장된 비교 모델(2·3)이 있으면 체크박스를 켜 그 두 행을 펼친다(setChecked가
-        # _on_compare_toggle을 불러 _compare_box를 보이게 한다). 없으면 접힌 채로.
-        has_compare = bool(
-            (self._settings.get(self.KEY_AI_COMPARE_MODEL_A, "") or "").strip()
-            or (self._settings.get(self.KEY_AI_COMPARE_MODEL_B, "") or "").strip())
-        self._compare_enable_check.setChecked(has_compare)
-        self._compare_box.setVisible(has_compare)
         # API 프로필 — 크리덴셜·모델 칸을 채운 뒤 호출(자동 이관이 그 값을 읽는다).
         self._init_profiles()
 
         # AI 팔레트 타겟(Alt+` 자유질문 목적지) — 저장된 목록(없으면 기본값)으로 행 구성.
         self._load_palette_sites()
-
-        # 구글 드라이브 — refresh token은 화면에 안 띄운다(비밀이고 사용자가 볼 일도 없다).
-        # 있으면 "연결됨"으로만 알린다.
-        self._gdrive_client_id_edit.setText(self._settings.get(self.KEY_GDRIVE_CLIENT_ID, ""))
-        self._gdrive_client_secret_edit.setText(
-            self._settings.get(self.KEY_GDRIVE_CLIENT_SECRET, ""))
-        self._gdrive_refresh = self._settings.get(self.KEY_GDRIVE_REFRESH_TOKEN, "")
-        if self._gdrive_refresh:
-            self._set_gdrive_status("✓ 연결됨", "ok")
-        else:
-            self._set_gdrive_status("연결되지 않음 — AI가 드라이브를 검색하지 않습니다.", "run")
-        # 이미 연결돼 있으면 접이식 드라이브 섹션을 펼쳐 상태가 바로 보이게 한다.
-        self._gd_toggle.setChecked(bool(self._gdrive_refresh))
 
         try:
             history_max = int(self._settings.get(self.KEY_HISTORY_MAX, "50"))
@@ -1540,65 +1277,6 @@ class SettingsDialog(QDialog):
         self._notify_copy_check.setChecked(
             self._settings.get(self.KEY_NOTIFY_ON_COPY, "1") == "1"
         )
-        # AI 시스템 프롬프트 — 저장값이 비었으면 기본 멘토 프롬프트를 보여준다(비워 두면
-        # 엔진이 기본값으로 폴백하므로, 화면엔 '실제로 쓰이는 프롬프트'를 노출).
-        saved_prompt = self._settings.get(self.KEY_AI_SYSTEM_PROMPT, "")
-        self._ai_prompt_edit.setPlainText(saved_prompt or self._default_ai_prompt())
-
-    def _default_ai_prompt(self) -> str:
-        """기본 AI 시스템 프롬프트(멘토 페르소나) — ocr_engine 모듈 상수."""
-        from pasteflow.ocr_engine import AI_SYSTEM_PROMPT
-        return AI_SYSTEM_PROMPT
-
-    def _open_prompt_editor(self):
-        """[프롬프트 편집…] — 시스템 프롬프트를 별도 창에서 편집한다.
-
-        _ai_prompt_edit(홀더)의 내용을 이 창의 에디터로 복사해 편집하고, [확인]이면
-        되쓴다([취소]면 안 건드림). _on_save는 그대로 _ai_prompt_edit를 읽는다.
-        """
-        dlg = QDialog(self)
-        dlg.setWindowTitle("AI 시스템 프롬프트 편집")
-        dlg.setWindowModality(Qt.WindowModality.WindowModal)
-        v = QVBoxLayout(dlg)
-        desc = QLabel(
-            "AI 답변의 톤·구조를 정하는 프롬프트입니다. 비우면 기본값으로 동작합니다.\n"
-            "OCR(글자 추출)에는 영향이 없습니다.")
-        desc.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
-        desc.setWordWrap(True)
-        edit = QPlainTextEdit()
-        edit.setPlainText(self._ai_prompt_edit.toPlainText())
-        edit.setMinimumSize(460, 320)
-        edit.setStyleSheet(
-            f"QPlainTextEdit {{ background-color: {_INSET}; color: {_TXT}; "
-            f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
-            f"QPlainTextEdit:focus {{ border-color: {COLORS['peach']}; }}")
-        reset_btn = QPushButton("기본값으로 되돌리기")
-        reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        reset_btn.clicked.connect(lambda: edit.setPlainText(self._default_ai_prompt()))
-        cancel_btn = QPushButton("취소")
-        cancel_btn.clicked.connect(dlg.reject)
-        ok_btn = QPushButton("확인")
-        ok_btn.setObjectName("saveBtn")
-        ok_btn.clicked.connect(dlg.accept)
-        row = QHBoxLayout()
-        row.addWidget(reset_btn)
-        row.addStretch(1)
-        row.addWidget(cancel_btn)
-        row.addWidget(ok_btn)
-        v.addWidget(desc)
-        v.addWidget(edit, 1)
-        v.addLayout(row)
-        if dlg.exec():
-            self._ai_prompt_edit.setPlainText(edit.toPlainText())
-
-    def _on_compare_toggle(self, on: bool):
-        """'여러 모델 비교 사용' — 모델 2·3 행을 펼치거나 접는다."""
-        self._compare_box.setVisible(on)
-
-    def _on_gd_toggle(self, on: bool):
-        """구글 드라이브 접이식 헤더 — 본문 표시/숨김 + 화살표(▸/▾) 전환."""
-        self._gd_body.setVisible(on)
-        self._gd_toggle.setText(("▾" if on else "▸") + "  구글 드라이브 (선택)")
 
     def _creds(self) -> tuple[str, str]:
         """게이트웨이 (api_key, base_url) — 편집칸에서 직접 읽는다."""
@@ -1628,16 +1306,13 @@ class SettingsDialog(QDialog):
         return "프로필 1"
 
     def _capture_current_profile(self, label: str) -> dict:
-        """현재 UI 6칸 + 모델 캐시를 프로필 dict로 스냅샷."""
+        """현재 UI 칸 + 모델 캐시를 프로필 dict로 스냅샷."""
         api_key, base_url = self._creds()
         return {
             "label": label,
             "base_url": base_url,
             "api_key": api_key,
-            "model": self._model_combo.currentText().strip(),
             "ocr_model": self._ocr_model_combo.currentText().strip(),
-            "compare_a": self._compare_value(self._compare_model_a_combo),
-            "compare_b": self._compare_value(self._compare_model_b_combo),
             "model_cache": self._cached_models(),
         }
 
@@ -1647,10 +1322,7 @@ class SettingsDialog(QDialog):
             "label": self.GOOGLE_PRESET_LABEL,
             "base_url": self.GOOGLE_PRESET_BASE_URL,
             "api_key": "",
-            "model": self.GOOGLE_PRESET_MODEL,
             "ocr_model": self.GOOGLE_PRESET_MODEL,
-            "compare_a": "",
-            "compare_b": "",
             "model_cache": [],
         }
 
@@ -1708,7 +1380,7 @@ class SettingsDialog(QDialog):
         self._profile_delete_btn.setEnabled(bool(self._profiles))
 
     def _apply_profile(self, prof: dict):
-        """프로필 값을 UI 6칸 + 모델 캐시에 채운다(선택·저장 안 함)."""
+        """프로필 값을 UI 칸 + 모델 캐시에 채운다(선택·저장 안 함)."""
         import json
         self._gateway_key_edit.setText(prof.get("api_key", ""))
         self._base_url_edit.setText(prof.get("base_url", ""))
@@ -1716,21 +1388,7 @@ class SettingsDialog(QDialog):
         self._settings[self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY] = json.dumps(cache)
         self._refill_model_slots(sorted(set(cache)))
         # 모델 선택 복원 — _refill_model_slots가 현재 텍스트를 보존하므로 명시 재설정.
-        self._model_combo.setCurrentText(prof.get("model", ""))
-        self._ocr_model_combo.setCurrentText(
-            prof.get("ocr_model", "") or prof.get("model", ""))
-        self._set_compare_text(self._compare_model_a_combo, prof.get("compare_a", ""))
-        self._set_compare_text(self._compare_model_b_combo, prof.get("compare_b", ""))
-
-    def _set_compare_text(self, combo: QComboBox, val: str):
-        """비교 콤보에 값 설정 — 빈 값이면 '(사용 안 함)'으로."""
-        val = (val or "").strip()
-        if not val:
-            idx = combo.findText(self._COMPARE_UNUSED)
-            combo.setCurrentIndex(idx if idx >= 0 else 0)
-            return
-        idx = combo.findText(val)
-        combo.setCurrentIndex(idx) if idx >= 0 else combo.setCurrentText(val)
+        self._ocr_model_combo.setCurrentText(prof.get("ocr_model", ""))
 
     def _on_profile_selected(self, idx: int):
         """드롭다운에서 프로필을 고름 → 값만 채운다(연결 테스트는 [연결 테스트] 버튼으로).
@@ -1847,54 +1505,12 @@ class SettingsDialog(QDialog):
             return []
 
     def _init_model_slots(self):
-        """OCR·AI 모델 1 콤보를 캐시로 채우고 저장된 모델명을 복원한다."""
+        """OCR 모델 콤보를 캐시로 채우고 저장된 모델명을 복원한다."""
         cached = self._cached_models()
-        self._fill_model_combo(self._model_combo, cached)
-        saved_ai = self._settings.get(self.KEY_OCR_GEMINI_MODEL_GATEWAY, "")
-        if saved_ai:
-            self._model_combo.setCurrentText(saved_ai)
-
         self._fill_model_combo(self._ocr_model_combo, cached)
-        # OCR 슬롯이 비었으면(분리 이전 사용자) AI 모델을 그대로 보여준다 —
-        # main._resolve_gemini_cfg("ocr")의 폴백과 같은 규칙이라 화면과 실동작이 일치한다.
-        saved_ocr = self._settings.get(self.KEY_OCR_MODEL_GATEWAY, "") or saved_ai
+        saved_ocr = self._settings.get(self.KEY_OCR_MODEL_GATEWAY, "")
         if saved_ocr:
             self._ocr_model_combo.setCurrentText(saved_ocr)
-
-    # ── 비교 슬롯(모델 2·3) ────────────────────────────────────────────────────
-    def _compare_slot_widgets(self, slot: str):
-        """slot='a'|'b' → (model_combo, probe_label)."""
-        if slot == "a":
-            return (self._compare_model_a_combo, self._compare_a_probe_status)
-        return (self._compare_model_b_combo, self._compare_b_probe_status)
-
-    def _fill_compare_slot(self, slot: str, *, preserve: bool = True):
-        """비교 슬롯 모델 콤보를 캐시로 채운다(선택값 보존 옵션)."""
-        model_combo, _ = self._compare_slot_widgets(slot)
-        current = model_combo.currentText() if preserve else ""
-        self._fill_compare_combo(model_combo, self._cached_models())
-        if current and current != self._COMPARE_UNUSED:
-            idx = model_combo.findText(current)
-            if idx >= 0:
-                model_combo.setCurrentIndex(idx)
-            else:
-                model_combo.setCurrentText(current)  # 캐시에 없어도 사용자 입력 보존
-
-    def _init_compare_slots(self):
-        """저장값으로 비교 슬롯 모델을 채운다(_load_values에서 1회 호출)."""
-        for slot, mkey in (
-            ("a", self.KEY_AI_COMPARE_MODEL_A),
-            ("b", self.KEY_AI_COMPARE_MODEL_B),
-        ):
-            model_combo, _ = self._compare_slot_widgets(slot)
-            self._fill_compare_slot(slot, preserve=False)  # 캐시로 채우고 '미사용'으로
-            saved = (self._settings.get(mkey, "") or "").strip()
-            if saved:
-                idx = model_combo.findText(saved)
-                if idx >= 0:
-                    model_combo.setCurrentIndex(idx)
-                else:
-                    model_combo.setCurrentText(saved)
 
     def _add_group_header(self, combo: QComboBox, text: str):
         """선택 불가능한 계열 헤더 행을 추가한다 (예: "Gemini (6)").
@@ -1936,28 +1552,6 @@ class SettingsDialog(QDialog):
 
         self._select_first_enabled(combo)
         self._adjust_model_popup_width(combo)
-
-    def _fill_compare_combo(self, combo: QComboBox, candidates: list[str]):
-        """비교 모델 콤보를 '(사용 안 함)' + 계열 헤더 + 모델명으로 채운다(기본=미사용).
-
-        기본 콤보(_fill_model_combo)와 달리 첫 항목이 '(사용 안 함)'이고 기본 선택도 그것 —
-        비교는 옵트인이라 아무것도 안 고른 상태가 정상이다. 나머지는 동일(헤더는 선택 불가).
-        """
-        from pasteflow.ocr_engine import group_models
-
-        combo.clear()
-        combo.addItem(self._COMPARE_UNUSED)
-        for family, names in group_models(candidates):
-            self._add_group_header(combo, f"{family} ({len(names)})")
-            for name in names:
-                combo.addItem(name)
-        combo.setCurrentIndex(0)  # 기본 = 사용 안 함
-        self._adjust_model_popup_width(combo)
-
-    def _compare_value(self, combo: QComboBox) -> str:
-        """비교 콤보의 저장값 — '(사용 안 함)'/빈 값은 빈 문자열로 환원."""
-        text = combo.currentText().strip()
-        return "" if text == self._COMPARE_UNUSED else text
 
     def _select_first_enabled(self, combo: QComboBox):
         """현재 선택이 비활성 헤더에 걸려 있으면 실제 모델로 옮긴다.
@@ -2006,36 +1600,24 @@ class SettingsDialog(QDialog):
             combo.view().setMinimumWidth(widest + 40)
 
     def _refill_model_slots(self, candidates: list[str]):
-        """새로고침으로 받은 모델 목록을 네 모델 행(OCR·모델 1·2·3)에 모두 반영한다.
+        """새로고침으로 받은 모델 목록을 OCR 모델 콤보에 반영한다.
 
         현재 선택은 보존한다. 캐시가 비면 첫 실행처럼 빈 콤보(+placeholder)로 둔다.
         """
-        rows = (
-            (self._ocr_model_combo, False),
-            (self._model_combo, False),
-            (self._compare_model_a_combo, True),
-            (self._compare_model_b_combo, True),
-        )
-        for combo, is_compare in rows:
-            current = combo.currentText()
-            combo.setUpdatesEnabled(False)
-            try:
-                if is_compare:
-                    self._fill_compare_combo(combo, candidates)
-                    if current and current != self._COMPARE_UNUSED:
-                        idx = combo.findText(current)
-                        combo.setCurrentIndex(idx) if idx >= 0 else combo.setCurrentText(current)
-                else:
-                    self._fill_model_combo(combo, candidates)
-                    if current:
-                        idx = combo.findText(current)
-                        combo.setCurrentIndex(idx) if idx >= 0 else combo.setCurrentText(current)
-                le = combo.lineEdit()
-                if le is not None:
-                    le.deselect()
-                    le.setCursorPosition(0)
-            finally:
-                combo.setUpdatesEnabled(True)
+        combo = self._ocr_model_combo
+        current = combo.currentText()
+        combo.setUpdatesEnabled(False)
+        try:
+            self._fill_model_combo(combo, candidates)
+            if current:
+                idx = combo.findText(current)
+                combo.setCurrentIndex(idx) if idx >= 0 else combo.setCurrentText(current)
+            le = combo.lineEdit()
+            if le is not None:
+                le.deselect()
+                le.setCursorPosition(0)
+        finally:
+            combo.setUpdatesEnabled(True)
 
     def _set_status(self, message: str, ok: bool | None = None):
         """모델 새로고침(↻)이 쓰는 상태 줄. ok=None이면 중립 색.
@@ -2143,28 +1725,11 @@ class SettingsDialog(QDialog):
             self.KEY_QUEUE_IDLE_RESET: str(self._queue_idle_spin.value()),
             self.KEY_AUTO_START: "1" if auto_start else "0",
             self.KEY_NOTIFY_ON_COPY: "1" if self._notify_copy_check.isChecked() else "0",
-            # AI 시스템 프롬프트 — 비우면 엔진이 기본값으로 폴백(빈 문자열 그대로 저장).
-            self.KEY_AI_SYSTEM_PROMPT: self._ai_prompt_edit.toPlainText().strip(),
         }
         # 크리덴셜 — 화면 편집칸에서 직접 읽어 저장.
         new_settings[self.KEY_OCR_GEMINI_API_KEY_GATEWAY] = self._gateway_key_edit.text()
         new_settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
-
-        # 모델 4행.
-        new_settings[self.KEY_OCR_GEMINI_MODEL_GATEWAY] = self._model_combo.currentText()
         new_settings[self.KEY_OCR_MODEL_GATEWAY] = self._ocr_model_combo.currentText()
-        # 비교 모델(2·3)은 '여러 모델 비교 사용'이 켜졌을 때만 저장한다 — 꺼져 있으면
-        # 빈 값으로 비워 질문창의 비교 옵션도 함께 사라진다("숨김=미사용"과 일치).
-        compare_on = self._compare_enable_check.isChecked()
-        new_settings[self.KEY_AI_COMPARE_MODEL_A] = (
-            self._compare_value(self._compare_model_a_combo) if compare_on else "")
-        new_settings[self.KEY_AI_COMPARE_MODEL_B] = (
-            self._compare_value(self._compare_model_b_combo) if compare_on else "")
-
-        # 구글 드라이브 — secret 2종은 main._SECRET_KEYS가 DPAPI로 암호화해 저장한다.
-        new_settings[self.KEY_GDRIVE_CLIENT_ID] = self._gdrive_client_id_edit.text().strip()
-        new_settings[self.KEY_GDRIVE_CLIENT_SECRET] = self._gdrive_client_secret_edit.text().strip()
-        new_settings[self.KEY_GDRIVE_REFRESH_TOKEN] = self._gdrive_refresh
 
         # 모델 캐시(↻로 갱신된 값)는 로드값을 그대로 실어 보낸다 — 안 보내면 사라진다.
         cache_key = self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY

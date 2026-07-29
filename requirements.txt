@@ -3,5 +3,4 @@ pywin32
 Pillow
 winocr          # Windows WinRT OCR (winrt-* 패키지 포함, Python 3.14+ 지원)
 comtypes        # Windows UI Automation (마그네틱 캡처 — ElementFromPoint)
-openai                  # Mindlogic 게이트웨이 OCR·AI 질의 (lazy import)
-ddgs                    # DuckDuckGo 웹 검색 — 게이트웨이 비-GPT 모델의 실시간 질문용 (lazy import, 키 불필요)
+openai                  # Mindlogic 게이트웨이 OCR (lazy import)

@@ -23,14 +23,3 @@ class TestGoogleAiUrl:
 
     def test_strips_surrounding_whitespace(self):
         assert parse_qs(urlparse(web_open.google_ai_url("  주가  ")).query)["q"] == ["주가"]
-
-
-class TestDriveSearchUrl:
-    def test_points_at_drive_search(self):
-        parts = urlparse(web_open.drive_search_url("보고서"))
-        assert parts.netloc == "drive.google.com"
-        assert parts.path == "/drive/search"
-
-    def test_query_encoded(self):
-        url = web_open.drive_search_url("2026 계획 문서")
-        assert parse_qs(urlparse(url).query)["q"] == ["2026 계획 문서"]
