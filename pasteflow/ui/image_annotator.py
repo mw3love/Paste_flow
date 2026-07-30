@@ -136,6 +136,12 @@ def _tool_icon(tool: str, color=None, neutral_override=None) -> QIcon:
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    # 툴바 pill 배경이 밝은색(#f4f4f4 계열)이라, 흰색 등 밝은 색을 고르면 획만으로는
+    # 아이콘이 배경에 묻힌다 — 그런 색일 때만 반투명 어두운 받침을 깔아 대비를 준다.
+    if color is not None and tool in _DRAW_TOOLS and QColor(color).lightnessF() > 0.75:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 70))
+        p.drawRoundedRect(1, 1, 20, 20, 4, 4)
     p.setPen(QPen(col, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
     p.setBrush(Qt.BrushStyle.NoBrush)
 
