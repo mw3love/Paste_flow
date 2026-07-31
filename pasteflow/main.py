@@ -567,6 +567,10 @@ _ORPHAN_KEYS = (
     "ai_compare_model_a_gateway",
     "ai_compare_model_b_official",
     "ai_compare_model_b_gateway",
+    # 2026-07-31 이전 주석 편집기 '전역' 마지막 값 3종 (annot_tool_defaults JSON 하나로 대체)
+    "annot_last_width",
+    "annot_last_font_size",
+    "annot_last_badge_size",
 )
 
 
@@ -763,14 +767,10 @@ class PasteFlowApp:
         # 코어 모듈
         db_path = _resolve_db_path()
         self.db = Database(db_path)
-        # 주석 편집기 마지막 값(두께·글자·번호 크기)을 DB에서 복원 + 변경 시 저장 콜백 등록
-        # (재시작 후에도 유지 — 클래스 변수라 세션 중 이미지 간 공유는 그대로).
-        _EditorMixin.load_last_values(
-            self.db.get_setting("annot_last_width", ""),
-            self.db.get_setting("annot_last_font_size", ""),
-            self.db.get_setting("annot_last_badge_size", ""),
-        )
-        _EditorMixin._persist_cb = self._save_annot_last_values
+        # 주석 편집기 도구별 마지막 값(색·두께·글자·번호·화살표 머리크기)을 DB에서 복원 +
+        # 변경 시 저장 콜백 등록(재시작 후에도 유지 — 클래스 변수라 세션 중 이미지 간 공유는 그대로).
+        _EditorMixin.load_last_values(self.db.get_setting("annot_tool_defaults", ""))
+        _EditorMixin._persist_cb = self._save_annot_tool_defaults
         self.queue = PasteQueue()
         self.monitor = ClipboardMonitor(
             on_new_item=self._on_new_clipboard_item,
@@ -2155,12 +2155,11 @@ class PasteFlowApp:
         from pasteflow.crypto import unprotect
         return unprotect(self.db.get_setting(key, default) or default)
 
-    def _save_annot_last_values(self, width, font, badge):
-        """주석 편집기 마지막 값(두께·글자·번호 크기)을 DB에 저장 — 재시작 후에도 유지.
-        _EditorMixin._persist_cb로 등록돼 값 변경(주석 위 휠) 시 호출된다."""
-        self.db.set_setting("annot_last_width", str(width))
-        self.db.set_setting("annot_last_font_size", str(font))
-        self.db.set_setting("annot_last_badge_size", str(badge))
+    def _save_annot_tool_defaults(self, json_str: str):
+        """주석 편집기 도구별 마지막 색·두께/글자/번호 크기·화살표 머리크기·방향을 DB에
+        저장 — 재시작 후에도 유지. _EditorMixin._persist_cb로 등록돼 값 변경(우클릭
+        미니패널·주석 위 휠) 시 호출된다."""
+        self.db.set_setting("annot_tool_defaults", json_str)
 
     def _apply_settings_from_db(self):
         """DB에서 설정 로드 → UI/동작에 적용."""

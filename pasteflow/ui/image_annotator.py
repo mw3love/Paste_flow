@@ -10,6 +10,7 @@ Shift: 정사각형/정원/45° 스냅(그리기 중) · 15° 스냅(회전 중)
 완료 동작은 main이 처리한다(시그널만 emit): 클립보드 복사 / 새 히스토리 항목 / 파일 저장.
 """
 import io
+import json
 import math
 import struct
 import time
@@ -20,13 +21,12 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QPixmap, QImage, QPainter, QPen, QBrush, QColor, QPainterPath,
     QPainterPathStroker, QPolygonF, QFont, QFontMetricsF, QIcon, QCursor,
-    QConicalGradient,
 )
 from PyQt6.QtWidgets import (
     QWidget, QGraphicsScene, QGraphicsView, QGraphicsRectItem,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsPathItem,
-    QGraphicsTextItem, QGraphicsItem, QHBoxLayout,
-    QPushButton, QToolButton, QButtonGroup, QLabel,
+    QGraphicsTextItem, QGraphicsItem, QHBoxLayout, QVBoxLayout,
+    QPushButton, QToolButton, QButtonGroup, QLabel, QSlider,
     QStyle, QStyleOptionGraphicsItem,
 )
 
@@ -40,6 +40,9 @@ _MIN_WIDTH, _MAX_WIDTH, _DEFAULT_WIDTH = 1, 40, 6
 _MIN_FONT, _MAX_FONT, _DEFAULT_FONT = 2, 200, 16  # 휠 축소 하한을 2pt로(그 이하는 크기조절 점)
 # 번호 마커 지름(px). 기본 30 = _BadgeItem._R(15) * 2, scale 1.0에 대응.
 _MIN_BADGE, _MAX_BADGE, _DEFAULT_BADGE = 12, 120, 30
+# 화살표 머리 크기(px, 독립 조절값 — 두께에서 자동계산되던 옛 방식 폐기).
+# 기본값은 옛 공식(두께6 기준 head≈15)보다 크게 잡음(2026-07-31 사용자 요청).
+_MIN_HEAD, _MAX_HEAD, _DEFAULT_HEAD = 8, 60, 22
 
 
 def _clamp_int(v, lo, hi, default):
@@ -58,7 +61,7 @@ _COLOR_PRESETS = [
 _DEFAULT_COLOR = _COLOR_PRESETS[0]
 
 # 밝은 툴바(Snipaste식 pill) 위 중립 아이콘 색 — 어두운 회색(선택·되돌리기·복사·저장).
-# 그리기 도구 아이콘은 current_color(색)로 칠해져 밝은 바에서도 보인다.
+# 그리기 도구 아이콘은 그 도구의 tool_defaults 색으로 칠해져 밝은 바에서도 보인다.
 _ICON_DARK = "#3a3a3a"
 
 # 그리기 도구가 만드는 도형(릴리스 시 너무 작으면 폐기 대상)
@@ -261,31 +264,6 @@ def _arrow_dir_icon(head_at_end: bool) -> QIcon:
         p.drawPolygon(QPolygonF([QPointF(21, 9), QPointF(15, 5), QPointF(15, 13)]))
     else:
         p.drawPolygon(QPolygonF([QPointF(3, 9), QPointF(9, 5), QPointF(9, 13)]))
-    p.end()
-    return QIcon(pm)
-
-
-def _rainbow_icon(current: QColor | None = None, size: int = 20) -> QIcon:
-    """무지개 색 버튼 아이콘 — 무지개 링 + 가운데 현재 색 점(팔레트 팝업 진입점)."""
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    g = QConicalGradient(size / 2, size / 2, 90)
-    for stop, hexs in (
-        (0.00, "#FF3B30"), (0.17, "#FF9500"), (0.34, "#FFCC00"),
-        (0.50, "#34C759"), (0.67, "#007AFF"), (0.84, "#AF52DE"),
-        (1.00, "#FF3B30"),
-    ):
-        g.setColorAt(stop, QColor(hexs))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(g)
-    p.drawEllipse(1, 1, size - 2, size - 2)
-    if current is not None:
-        r = size * 0.30
-        p.setBrush(QColor(current))
-        p.setPen(QPen(QColor("#FFFFFF"), 1.4))
-        p.drawEllipse(QPointF(size / 2, size / 2), r, r)
     p.end()
     return QIcon(pm)
 
@@ -1042,7 +1020,8 @@ def _cubic_bezier_bbox(p1: QPointF, c1: QPointF, c2: QPointF, p2: QPointF) -> QR
 class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
     """선 + 끝점 삼각형 화살촉. 머리 방향(head_at_end) 선택 가능."""
 
-    def __init__(self, color: QColor, width: int, head_at_end: bool = True):
+    def __init__(self, color: QColor, width: int, head_at_end: bool = True,
+                 head_size: float = _DEFAULT_HEAD):
         super().__init__()
         self._p1 = QPointF(0, 0)
         self._p2 = QPointF(0, 0)
@@ -1052,6 +1031,7 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         self._color = QColor(color)
         self._width = width
         self._head_at_end = head_at_end
+        self._head_size_val = head_size  # 두께와 독립된 화살촉 크기(px) — 미니패널에서 조절
         self._init_resize()
         self.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsMovable
@@ -1079,8 +1059,14 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         self._width = width
         self.update()
 
+    def apply_head_size(self, size: float):
+        self.prepareGeometryChange()  # boundingRect가 화살촉 크기에 의존
+        self._head_size_val = size
+        self.update()
+
     def clone(self):
-        c = _ArrowItem(QColor(self._color), self._width, self._head_at_end)
+        c = _ArrowItem(QColor(self._color), self._width, self._head_at_end,
+                        self._head_size_val)
         c.set_points(QPointF(self._p1), QPointF(self._p2))
         if self._ctrl1 is not None:
             c._ctrl1 = QPointF(self._ctrl1)
@@ -1219,10 +1205,10 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         return tip, angle
 
     def _head_size(self) -> float:
-        """화살촉 크기 — 선 두께에 비례(얇으면 작게, 굵으면 크게). 최소 7로 아주 얇은
-        선에서도 머리가 보이되, 옛 max(14,…) 바닥값이 얇은 선에서 머리를 불비례로
-        키우던 문제를 없앤다(두께 휠 조절 시 머리도 같이 줄고 커짐)."""
-        return max(self._width * 2.5, 7.0)
+        """화살촉 크기 — 두께 미니패널의 '머리 크기' 슬라이더로 독립 조절(2026-07-31).
+        옛 방식은 두께에서 자동 계산(width*2.5)했으나, 두께를 조절할 때마다 머리도
+        함께 바뀌어 원하는 크기로 못 고정하는 문제가 있어 별도 값으로 분리했다."""
+        return self._head_size_val
 
     def _head_points(self):
         """화살촉 삼각형 세 꼭짓점(tip + 뒤쪽 두 점)."""
@@ -1483,9 +1469,9 @@ class _TextItem(_HandleResizeMixin, QGraphicsTextItem):
         self.setFont(f)
 
     def _on_resize_end(self):
-        """코너 드래그 크기조절은 scale()만 바꿔 폰트 크기 자체(및 '마지막 글자 크기'
-        기억)엔 반영되지 않는다 — 휠 조절(EditorMixin.adjust_item_property)만
-        _last_font_size를 갱신해 왔다. 드래그가 끝나면 scale을 폰트 크기에 구워 넣고
+        """코너 드래그 크기조절은 scale()만 바꿔 폰트 크기 자체(및 tool_defaults의 '마지막
+        글자 크기' 기억)엔 반영되지 않는다 — 휠 조절(EditorMixin.adjust_item_property)만
+        그 값을 갱신해 왔다. 드래그가 끝나면 scale을 폰트 크기에 구워 넣고
         스케일을 1로 되돌려, 도형 두께가 '휠로 조절 → 다음 도형도 같은 두께'로 이어지는
         것과 대칭되게 다음 텍스트도 방금 크기로 시작하게 한다(2026-07-31 사용자 피드백
         — 두께는 이어지는데 텍스트만 매번 기본 크기로 초기화됨)."""
@@ -1500,9 +1486,8 @@ class _TextItem(_HandleResizeMixin, QGraphicsTextItem):
         if sc is not None and sc.views():
             owner = getattr(sc.views()[0], "_owner", None)
             if owner is not None:
-                owner.current_font_size = new_size
-                _EditorMixin._last_font_size = new_size
-                owner._persist_last_values()
+                owner.tool_defaults["text"]["font"] = new_size
+                owner._persist_tool_defaults()
         self.update()
 
     def set_bg(self, color):
@@ -2034,6 +2019,9 @@ class _AnnotatorView(QGraphicsView):
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
+        # 캔버스를 클릭했다 = 미니패널 볼일이 끝난 것으로 보고 정리(그랩 없는 패널이라
+        # Qt.Popup처럼 저절로 안 닫히므로 여기서 명시적으로 닫는다).
+        self._owner._hide_tool_popups()
         vpos0 = event.position().toPoint()
         # 편집 중인 텍스트의 테두리 band 위 press = 이동 시작. QGraphicsTextItem은 편집
         # 모드(TextEditorInteraction)면 press를 그대로 super()에 넘길 경우 캐럿 배치/선택으로
@@ -2071,7 +2059,8 @@ class _AnnotatorView(QGraphicsView):
             snap = self._border_snap_at(event.position().toPoint())
             if snap is not None:
                 owner = self._owner
-                it = _ArrowItem(owner.current_color, owner.current_width, owner.arrow_head_at_end)
+                ad = owner.tool_defaults["arrow"]
+                it = _ArrowItem(QColor(ad["color"]), ad["width"], ad["head_at_end"], ad["head"])
                 self._start = snap[0]
                 self._arrow_snap_exit = snap[1]
                 self._arrow_tip_snap = None
@@ -2102,24 +2091,24 @@ class _AnnotatorView(QGraphicsView):
         sp = self.mapToScene(event.position().toPoint())
         self._start = sp
         owner = self._owner
-        pen = owner.make_pen()
 
         if tool == "rect":
             it = _RectItem(QRectF(sp, sp))
-            it.setPen(pen)
+            it.setPen(owner.make_pen("rect"))
             it.setBrush(QBrush(Qt.BrushStyle.NoBrush))
             self._begin_draw(it)
         elif tool == "ellipse":
             it = _EllipseItem(QRectF(sp, sp))
-            it.setPen(pen)
+            it.setPen(owner.make_pen("ellipse"))
             it.setBrush(QBrush(Qt.BrushStyle.NoBrush))
             self._begin_draw(it)
         elif tool == "line":
             it = _LineItem(QLineF(sp, sp))
-            it.setPen(pen)
+            it.setPen(owner.make_pen("line"))
             self._begin_draw(it)
         elif tool == "arrow":
-            it = _ArrowItem(owner.current_color, owner.current_width, owner.arrow_head_at_end)
+            ad = owner.tool_defaults["arrow"]
+            it = _ArrowItem(QColor(ad["color"]), ad["width"], ad["head_at_end"], ad["head"])
             it.set_points(sp, sp)
             self._arrow_snap_exit = None   # 자유 시작(테두리 스냅 아님) → 직선/자유 곡선
             self._arrow_tip_snap = None
@@ -2127,11 +2116,12 @@ class _AnnotatorView(QGraphicsView):
         elif tool == "pen":
             self._path = QPainterPath(sp)
             it = _PathItem(self._path)
-            it.setPen(pen)
+            it.setPen(owner.make_pen("pen"))
             self._begin_draw(it)
         elif tool == "text":
-            it = _TextItem(owner.current_color)
-            it.apply_font_size(owner.current_font_size)
+            td = owner.tool_defaults["text"]
+            it = _TextItem(QColor(td["color"]))
+            it.apply_font_size(td["font"])
             it.set_bg(owner.current_text_bg)
             # I-beam(세로 막대 중심)이 클릭점 → 캐럿이 그 자리에 오도록 배치 보정.
             # documentMargin만큼 왼쪽, 첫 줄 높이 절반만큼 위로 당긴다(안 하면 글자가 처져 보임).
@@ -2147,8 +2137,9 @@ class _AnnotatorView(QGraphicsView):
             self.scene().clearSelection()
             # 다른 도구처럼 텍스트 도구를 유지해 연속 배치 가능(빈 텍스트는 focusOut 시 정리).
         elif tool == "badge":
-            it = _BadgeItem(owner.next_badge_number(), owner.current_color)
-            it.setScale(owner.current_badge_size / float(_DEFAULT_BADGE))
+            bd = owner.tool_defaults["badge"]
+            it = _BadgeItem(owner.next_badge_number(), QColor(bd["color"]))
+            it.setScale(bd["size"] / float(_DEFAULT_BADGE))
             it.setPos(sp)
             self.scene().addItem(it)
             owner.push_undo_add(it)
@@ -2417,13 +2408,24 @@ class _DragBar(QWidget):
         self._press = None
 
 
-class _ColorPalettePopup(QWidget):
-    """무지개 버튼 색 팔레트 팝업. 바깥 클릭 시 자동으로 닫히는 Qt.Popup이며,
-    닫힌 시각(hidden_at)을 기록해 '버튼 재클릭=토글 off'를 안정적으로 구현하게 한다
-    (팝업이 열린 상태로 버튼을 누르면 Popup이 먼저 닫히므로, 그 직후 재오픈을 막아야 함)."""
+class _ToolSettingsPopup(QWidget):
+    """도구 우클릭 미니패널(색·두께/글자·번호 크기, 화살표는 머리크기·방향도).
+
+    ⚠ 처음엔 Qt.WindowType.Popup으로 만들었으나(색 팔레트 팝업과 같은 패턴), Popup은
+    떠 있는 동안 마우스 입력을 통째로 그랩한다 — 그래서 패널이 열린 채로 캔버스에서
+    Shift+휠로 두께를 조절하려 하면 휠 이벤트가 캔버스에 전혀 도달하지 않았다
+    (2026-07-31 사용자 보고). Qt.WindowType.Tool(그랩 없음) + WA_ShowWithoutActivating
+    (paste_hud.py의 비활성 창과 동일 패턴 — 클릭은 받되 편집기 창의 활성 상태·포커스는
+    뺏지 않음)로 바꿔 해결했다. 대신 '바깥 클릭 시 자동으로 닫힘'을 Popup 그랩에 기대던
+    것도 잃으므로, 도구 전환·캔버스 클릭 시 _EditorMixin._hide_tool_popups()가 명시적으로
+    닫는다(같은 버튼 재우클릭=토글은 그대로 유효). hidden_at은 그 토글 디바운스에 쓰인다.
+    `_refresh_from_defaults`(콜러블)는 _build_tool_settings_popup이 붙이는 속성 — 휠 조절
+    등으로 바뀐 값을 다시 열 때 반영한다."""
 
     def __init__(self, parent):
-        super().__init__(parent, Qt.WindowType.Popup)
+        super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                          | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.hidden_at = 0.0
 
     def hideEvent(self, event):
@@ -2478,37 +2480,71 @@ class _EditorMixin:
         _win_drag_end/_on_wheel_zoom/close — _AnnotatorView가 호출
     """
 
-    # 마지막으로 쓴 획 두께·글자 크기·번호 크기를 기억 — 새 편집기(다음에 연 이미지)도
-    # 기본값이 아니라 이 값으로 시작한다(매번 기본으로 리셋되던 불편 해소, 크기 스테퍼 제거의 근거).
-    # DB에도 저장돼 앱 재시작 후에도 유지: 시작 시 main이 load_last_values로 주입,
-    # 변경 시 _persist_cb(main 등록)로 DB에 기록. (미등록이면 세션 내 기억만.)
-    _last_width = _DEFAULT_WIDTH
-    _last_font_size = _DEFAULT_FONT
-    _last_badge_size = _DEFAULT_BADGE
-    _persist_cb = None   # callable(width, font, badge) → DB 저장 (main이 시작 시 1회 등록)
+    # 도구별(rect/ellipse/line/pen/arrow/text/badge) 색·크기 기본값 — 우클릭 미니패널로 조절.
+    # 하나의 전역 색/두께를 모든 도구가 공유하던 옛 방식(2026-07-31 이전)을 대체: 도구마다
+    # 독립된 값이라 화살표 색을 바꿔도 네모·펜 등 다른 도구엔 새지 않는다.
+    # 새 편집기(다음에 연 이미지)도 기본값이 아니라 이 값으로 시작 — DB에도 저장돼
+    # 앱 재시작 후에도 유지: 시작 시 main이 load_last_values로 주입, 변경 시
+    # _persist_cb(main 등록)로 DB에 기록. (미등록이면 세션 내 기억만.)
+    _tool_defaults = None   # dict[str, dict] — 클래스 변수, 최초 사용 시 _hardcoded_tool_defaults()로 채움
+    _persist_cb = None      # callable(json_str) → DB 저장 (main이 시작 시 1회 등록)
+
+    @staticmethod
+    def _hardcoded_tool_defaults() -> dict:
+        return {
+            "rect":    {"color": _DEFAULT_COLOR, "width": _DEFAULT_WIDTH},
+            "ellipse": {"color": _DEFAULT_COLOR, "width": _DEFAULT_WIDTH},
+            "line":    {"color": _DEFAULT_COLOR, "width": _DEFAULT_WIDTH},
+            "pen":     {"color": _DEFAULT_COLOR, "width": _DEFAULT_WIDTH},
+            "arrow":   {"color": _DEFAULT_COLOR, "width": _DEFAULT_WIDTH,
+                        "head": _DEFAULT_HEAD, "head_at_end": True},
+            "text":    {"color": _DEFAULT_COLOR, "font": _DEFAULT_FONT},
+            "badge":   {"color": _DEFAULT_COLOR, "size": _DEFAULT_BADGE},
+        }
 
     @classmethod
-    def load_last_values(cls, width, font, badge):
-        """앱 시작 시 DB에 저장된 마지막 두께·글자·번호 크기를 주입(파싱실패·범위 밖은 기본값)."""
-        cls._last_width = _clamp_int(width, _MIN_WIDTH, _MAX_WIDTH, _DEFAULT_WIDTH)
-        cls._last_font_size = _clamp_int(font, _MIN_FONT, _MAX_FONT, _DEFAULT_FONT)
-        cls._last_badge_size = _clamp_int(badge, _MIN_BADGE, _MAX_BADGE, _DEFAULT_BADGE)
+    def load_last_values(cls, json_str):
+        """앱 시작 시 DB에 저장된 도구별 마지막 색·크기를 주입. 파싱 실패·손상은 도구
+        단위로만 기본값 보강(일부 필드가 깨져도 나머지 도구 설정은 보존)."""
+        defaults = cls._hardcoded_tool_defaults()
+        try:
+            saved = json.loads(json_str) if json_str else {}
+        except (TypeError, ValueError):
+            saved = {}
+        if isinstance(saved, dict):
+            for key, base in defaults.items():
+                entry = saved.get(key)
+                if not isinstance(entry, dict):
+                    continue
+                if isinstance(entry.get("color"), str) and QColor(entry["color"]).isValid():
+                    base["color"] = entry["color"]
+                if "width" in base:
+                    base["width"] = _clamp_int(entry.get("width"), _MIN_WIDTH, _MAX_WIDTH, base["width"])
+                if "font" in base:
+                    base["font"] = _clamp_int(entry.get("font"), _MIN_FONT, _MAX_FONT, base["font"])
+                if "size" in base:
+                    base["size"] = _clamp_int(entry.get("size"), _MIN_BADGE, _MAX_BADGE, base["size"])
+                if "head" in base:
+                    base["head"] = _clamp_int(entry.get("head"), _MIN_HEAD, _MAX_HEAD, base["head"])
+                if "head_at_end" in base:
+                    base["head_at_end"] = bool(entry.get("head_at_end", base["head_at_end"]))
+        cls._tool_defaults = defaults
 
-    def _persist_last_values(self):
-        """마지막 값 변경 시 DB에 기록(콜백 미등록이면 세션 내 기억만)."""
+    def _persist_tool_defaults(self):
+        """도구별 값 변경 시 DB에 기록(콜백 미등록이면 세션 내 기억만)."""
         cb = _EditorMixin._persist_cb
         if cb is not None:
-            cb(_EditorMixin._last_width, _EditorMixin._last_font_size,
-               _EditorMixin._last_badge_size)
+            cb(json.dumps(_EditorMixin._tool_defaults))
+
+    @property
+    def tool_defaults(self) -> dict:
+        return _EditorMixin._tool_defaults
 
     def _init_editor_state(self):
         self.current_tool = "select"
-        self.current_color = QColor(_DEFAULT_COLOR)
-        self.current_width = _EditorMixin._last_width
-        self.current_font_size = _EditorMixin._last_font_size  # 새 텍스트의 기본 글자 크기(pt)
-        self.current_badge_size = _EditorMixin._last_badge_size  # 새 번호 마커의 기본 지름(px)
-        self.arrow_head_at_end = True
-        self.current_text_bg = None  # 새 텍스트의 기본 배경(None=투명)
+        if _EditorMixin._tool_defaults is None:
+            _EditorMixin._tool_defaults = _EditorMixin._hardcoded_tool_defaults()
+        self.current_text_bg = None  # 새 텍스트의 기본 배경(None=투명) — 도구별 값과 별개로 유지
         self._undo: list[tuple[str, list]] = []
         self._last_move_key = None   # 직전 move undo의 합침 키(연속 화살표키 nudge 병합용)
         self._clip: list = []        # Ctrl+C로 담아둔 주석 복제 템플릿
@@ -2519,8 +2555,11 @@ class _EditorMixin:
         self._loupe = None
         self._eyedrop_prev_lbtn = False
         self._eyedrop_last = None
+        self._eyedrop_target_tool = None  # 스포이드로 고른 색을 적용할 도구(미니패널에서 진입 시 설정)
         self._tool_buttons: dict[str, QToolButton] = {}
-        self._preset_buttons: list[tuple[QColor, QToolButton]] = []
+        self._tool_popups: dict[str, QWidget] = {}          # 도구별 우클릭 미니패널(지연 생성·캐시)
+        self._tool_preset_buttons: dict[str, list] = {}     # 도구별 색 스와치 버튼 목록(하이라이트 갱신용)
+        self._arrow_dir_panel_btn = None  # 화살표 미니패널 안의 방향 토글 버튼
 
     # ---- 툴바 / 액션바 (호스트가 배치) -------------------------------------
     def _build_toolbar(self) -> QHBoxLayout:
@@ -2537,9 +2576,17 @@ class _EditorMixin:
             btn = QToolButton()
             btn.setIconSize(QSize(18, 18))
             btn.setCheckable(True)
-            btn.setToolTip(f"{name} ({sc})")
+            tip = f"{name} ({sc})"
+            if key in _DRAW_TOOLS:
+                tip += "\n우클릭: 색·크기 설정"
+            btn.setToolTip(tip)
             # 활성 도구를 다시 누르면 손 모드(None)로 복귀 — 토글.
             btn.clicked.connect(lambda _c, k=key: self.set_tool(None if self.current_tool == k else k))
+            if key in _DRAW_TOOLS:
+                # 우클릭 미니패널 — 도구별 색·두께(화살표는 머리크기·방향도)를 독립 조절.
+                btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                btn.customContextMenuRequested.connect(
+                    lambda _pos, k=key, b=btn: self._show_tool_settings(k, b))
             group.addButton(btn)
             tools.addWidget(btn)
             self._tool_buttons[key] = btn
@@ -2554,19 +2601,9 @@ class _EditorMixin:
 
         tools.addWidget(self._vsep())
 
-        # 색상: 무지개 버튼 1개 — 클릭하면 프리셋 7색 + 스포이드 팔레트 팝업(공간 절약).
-        # 현재 색은 무지개 버튼 가운데 점으로 표시한다.
-        self._color_palette = self._build_color_palette()
-        self._color_btn = QToolButton()
-        self._color_btn.setIcon(_rainbow_icon(self.current_color))
-        self._color_btn.setIconSize(QSize(20, 20))
-        self._color_btn.setToolTip("색 — 클릭하면 팔레트(프리셋·스포이드)")
-        self._color_btn.clicked.connect(self._show_color_palette)
-        tools.addWidget(self._color_btn)
-
-        tools.addWidget(self._vsep())
-
-        # 두께 조절은 주석 위 Shift+휠로 대체(adjust_item_property) — 별도 두께 위젯 제거.
+        # 색·두께는 이제 전역 버튼이 아니라 각 도구 아이콘 우클릭 미니패널로 도구별 독립 조절
+        # (2026-07-31 개편 — 옛 무지개 버튼 1개가 모든 도구에 같은 색을 적용하던 방식 폐기).
+        # 두께 조절도 주석 위 Shift+휠로 병행 가능(adjust_item_property).
         # (그냥 휠은 항상 줌 — 2026-07-31, 조절과 줌이 같은 휠을 다투던 것을 Shift로 분리)
 
         # 완료 액션 — 아이콘 버튼, 색 옆 고정 (이미지 줌으로 창이 넓어져도 위치 불변).
@@ -2585,13 +2622,7 @@ class _EditorMixin:
         export_btn.clicked.connect(self._do_export)
         tools.addWidget(export_btn)
 
-        # 화살표 방향 토글 — 평소 숨김, 화살표 도구 활성 시 화살표 버튼 아래 floating
-        self._arrow_dir_btn = QToolButton(self)
-        self._arrow_dir_btn.setIcon(_arrow_dir_icon(self.arrow_head_at_end))
-        self._arrow_dir_btn.setIconSize(QSize(24, 18))
-        self._arrow_dir_btn.setToolTip("화살표 방향 바꾸기 (선택된 화살표도 뒤집음)")
-        self._arrow_dir_btn.clicked.connect(self._toggle_arrow_dir)
-        self._arrow_dir_btn.setVisible(False)
+        # 화살표 방향 토글은 이제 화살표 도구 우클릭 미니패널 안에 있다(옛 floating 버튼 폐기).
 
         # 텍스트 하위 옵션 바 — 텍스트 도구 활성 시 T 버튼 위에 수평 floating(배경 스와치만).
         # 글자·번호 크기 스테퍼는 제거 — 크기는 주석 위 휠로 조절하고 마지막 값을 기억한다.
@@ -2599,72 +2630,227 @@ class _EditorMixin:
         self._text_opts_bar.setVisible(False)
         return tools
 
-    # ---- 색 팔레트 팝업 (무지개 버튼 클릭 시) -------------------------------
-    def _build_color_palette(self) -> QWidget:
-        """프리셋 7색 + 스포이드를 담은 팝업. 무지개 버튼 클릭 시 아래에 뜨고,
-        Popup 플래그라 바깥을 클릭하면 자동으로 닫힌다."""
-        pal = _ColorPalettePopup(self)
-        pal.setObjectName("colorpalette")
-        pal.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        pal.setStyleSheet(
-            f"QWidget#colorpalette {{ background-color: {_SURFACE0};"
+    # ---- 도구별 우클릭 미니패널 (색·두께/글자·번호 크기, 화살표는 머리크기·방향도) ------
+    def _show_tool_settings(self, tool_key: str, btn: QToolButton):
+        """도구 아이콘 우클릭 → 그 도구 전용 미니패널 토글. 그랩하지 않는 패널이라(위
+        _ToolSettingsPopup 참고) 다른 패널이 열려 있으면 여기서 먼저 명시적으로 닫는다."""
+        pop = self._tool_popups.get(tool_key)
+        if pop is None:
+            pop = self._build_tool_settings_popup(tool_key)
+            self._tool_popups[tool_key] = pop
+        if pop.isVisible():
+            pop.hide()
+            return
+        if time.monotonic() - pop.hidden_at < 0.25:
+            return
+        self._hide_tool_popups()
+        pop._refresh_from_defaults()  # 휠 조절 등으로 바뀐 값이 있으면 반영 후 표시
+        pop.adjustSize()
+        pos = btn.mapToGlobal(QPoint(0, -pop.height() - 4))
+        pop.move(pos)
+        pop.show()
+        pop.raise_()
+
+    def _hide_tool_popups(self):
+        """열려 있는 도구 미니패널을 전부 닫는다 — 도구 전환·캔버스 클릭 시 호출해
+        그랩 없는 패널(Qt.WindowType.Tool)이 화면에 방치되지 않게 한다."""
+        for pop in self._tool_popups.values():
+            if pop.isVisible():
+                pop.hide()
+
+    def _build_tool_settings_popup(self, tool_key: str) -> QWidget:
+        """도구 하나의 미니패널: 색 프리셋+스포이드 한 줄 + 크기 슬라이더(들). 화살표는
+        두께 슬라이더 아래에 머리 크기 슬라이더 + 방향 토글 버튼을 추가로 담는다."""
+        pop = _ToolSettingsPopup(self)
+        pop.setObjectName("toolsettings")
+        pop.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        pop.setStyleSheet(
+            f"QWidget#toolsettings {{ background-color: {_SURFACE0};"
             f" border: 1px solid {_BORDER}; border-radius: 6px; }}"
             f"QToolButton {{ background-color: {_SURFACE0}; border: 1px solid {_BORDER};"
             f" border-radius: 4px; padding: 2px; }}"
             f"QToolButton:hover {{ background-color: {_SURFACE2}; }}"
+            f"QLabel {{ color: {_TEXT}; background: transparent; }}"
         )
-        row = QHBoxLayout(pal)
-        row.setContentsMargins(6, 6, 6, 6)
-        row.setSpacing(4)
+        col = QVBoxLayout(pop)
+        col.setContentsMargins(8, 8, 8, 8)
+        col.setSpacing(6)
+
+        preset_buttons: list[tuple[QColor, QToolButton]] = []
+        color_row = QHBoxLayout()
+        color_row.setSpacing(4)
         for hexs in _COLOR_PRESETS:
-            color = QColor(hexs)
-            btn = QToolButton()
-            btn.setObjectName("swatch")
-            btn.setFixedSize(20, 20)
-            btn.setCheckable(True)
-            btn.setToolTip(hexs)
-            btn.setStyleSheet(self._swatch_style(color, False))
-            btn.clicked.connect(lambda _c, cc=color: self._pick_palette_color(cc))
-            row.addWidget(btn)
-            self._preset_buttons.append((color, btn))
-        self._eyedrop_btn = QToolButton()
-        self._eyedrop_btn.setIcon(_tool_icon("eyedrop"))
-        self._eyedrop_btn.setIconSize(QSize(18, 18))
-        self._eyedrop_btn.setToolTip("스포이드 — 화면에서 색 따오기 (클릭으로 선택, ESC 취소)")
-        self._eyedrop_btn.clicked.connect(self._pick_palette_eyedrop)
-        row.addWidget(self._eyedrop_btn)
-        pal.adjustSize()
-        return pal
+            c = QColor(hexs)
+            b = QToolButton()
+            b.setObjectName("swatch")
+            b.setFixedSize(20, 20)
+            b.setCheckable(True)
+            b.setToolTip(hexs)
+            b.clicked.connect(lambda _c, cc=c, k=tool_key: self._set_tool_color(k, cc))
+            color_row.addWidget(b)
+            preset_buttons.append((c, b))
+        eyedrop_btn = QToolButton()
+        eyedrop_btn.setIcon(_tool_icon("eyedrop"))
+        eyedrop_btn.setIconSize(QSize(18, 18))
+        eyedrop_btn.setToolTip("스포이드 — 화면에서 색 따오기 (클릭으로 선택, ESC 취소)")
+        eyedrop_btn.clicked.connect(lambda _c=None, k=tool_key: self._pick_tool_eyedrop(k))
+        color_row.addWidget(eyedrop_btn)
+        col.addLayout(color_row)
+        self._tool_preset_buttons[tool_key] = preset_buttons
 
-    def _show_color_palette(self):
-        # 토글: 열려 있으면 닫는다. 또한 팝업이 열린 상태에서 버튼을 누르면 Qt.Popup이
-        # 먼저 자동으로 닫히므로(hideEvent), 그 직후(<0.25s) 클릭은 재오픈하지 않아
-        # '한 번 더 누르면 사라진다'가 성립한다.
-        pal = self._color_palette
-        if pal.isVisible():
-            pal.hide()
-            return
-        if time.monotonic() - pal.hidden_at < 0.25:
-            return
-        pal.adjustSize()
-        pos = self._color_btn.mapToGlobal(QPoint(0, self._color_btn.height() + 4))
-        pal.move(pos)
-        pal.show()
-        pal.raise_()
-        pal.activateWindow()
+        sliders: dict[str, tuple[QSlider, QLabel]] = {}
+        dir_btn = None
+        if tool_key == "text":
+            row, slider, val_lab = self._build_slider_row(
+                "크기", _MIN_FONT, _MAX_FONT, lambda v, k=tool_key: self._set_tool_size(k, "font", v))
+            col.addLayout(row)
+            sliders["font"] = (slider, val_lab)
+        elif tool_key == "badge":
+            row, slider, val_lab = self._build_slider_row(
+                "크기", _MIN_BADGE, _MAX_BADGE, lambda v, k=tool_key: self._set_tool_size(k, "size", v))
+            col.addLayout(row)
+            sliders["size"] = (slider, val_lab)
+        else:
+            row, slider, val_lab = self._build_slider_row(
+                "두께", _MIN_WIDTH, _MAX_WIDTH, lambda v, k=tool_key: self._set_tool_size(k, "width", v))
+            col.addLayout(row)
+            sliders["width"] = (slider, val_lab)
+            if tool_key == "arrow":
+                row2, slider2, val_lab2 = self._build_slider_row(
+                    "머리 크기", _MIN_HEAD, _MAX_HEAD, self._set_arrow_head_size)
+                col.addLayout(row2)
+                sliders["head"] = (slider2, val_lab2)
 
-    def _pick_palette_color(self, color):
-        self._set_color(color)
-        self._color_palette.hide()
+                dir_row = QHBoxLayout()
+                dir_row.setSpacing(6)
+                dir_lab = QLabel("방향")
+                dir_lab.setFixedWidth(52)
+                dir_btn = QToolButton()
+                dir_btn.setIconSize(QSize(28, 20))
+                dir_btn.setToolTip("화살표 방향 바꾸기 (선택된 화살표도 뒤집음)")
+                dir_btn.clicked.connect(self._toggle_arrow_dir_panel)
+                dir_row.addWidget(dir_lab)
+                dir_row.addWidget(dir_btn)
+                dir_row.addStretch()
+                col.addLayout(dir_row)
+                self._arrow_dir_panel_btn = dir_btn
 
-    def _pick_palette_eyedrop(self):
-        self._color_palette.hide()
-        self._start_eyedropper()
+        def _refresh():
+            d = self.tool_defaults[tool_key]
+            cur_name = QColor(d["color"]).name().lower()
+            for c, b in preset_buttons:
+                sel = c.name().lower() == cur_name
+                b.blockSignals(True)
+                b.setChecked(sel)
+                b.blockSignals(False)
+                b.setStyleSheet(self._swatch_style(c, sel))
+            for field, (slider, val_lab) in sliders.items():
+                v = d[field]
+                slider.blockSignals(True)
+                slider.setValue(v)
+                slider.blockSignals(False)
+                val_lab.setText(str(v))
+            if tool_key == "arrow" and dir_btn is not None:
+                dir_btn.setIcon(_arrow_dir_icon(d["head_at_end"]))
 
-    def _update_color_btn(self):
-        btn = getattr(self, "_color_btn", None)
+        pop._refresh_from_defaults = _refresh
+        _refresh()
+        pop.adjustSize()
+        return pop
+
+    def _build_slider_row(self, label: str, lo: int, hi: int, on_change):
+        """라벨 + 가로 슬라이더 + 값 표시로 이뤄진 한 줄. (layout, slider, value_label) 반환
+        — 값 라벨·슬라이더는 미니패널이 다시 열릴 때 최신값으로 갱신(_refresh_from_defaults)하는 데 쓰인다."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        lab = QLabel(label)
+        lab.setFixedWidth(52)
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setMinimum(lo)
+        slider.setMaximum(hi)
+        slider.setFixedWidth(120)
+        val_lab = QLabel("")
+        val_lab.setFixedWidth(28)
+
+        def _changed(v):
+            val_lab.setText(str(v))
+            on_change(v)
+
+        slider.valueChanged.connect(_changed)
+        row.addWidget(lab)
+        row.addWidget(slider)
+        row.addWidget(val_lab)
+        return row, slider, val_lab
+
+    def _set_tool_color(self, tool_key: str, color):
+        self.tool_defaults[tool_key]["color"] = QColor(color).name()
+        self._persist_tool_defaults()
+        for c, b in self._tool_preset_buttons.get(tool_key, []):
+            sel = c.name().lower() == QColor(color).name().lower()
+            b.setChecked(sel)
+            b.setStyleSheet(self._swatch_style(c, sel))
+        self._refresh_tool_icons()
+        for it in self._scene.selectedItems():
+            if self._tool_key_for_item(it) == tool_key and hasattr(it, "apply_color"):
+                it.apply_color(QColor(color))
+
+    def _set_tool_size(self, tool_key: str, field: str, value: int):
+        self.tool_defaults[tool_key][field] = value
+        self._persist_tool_defaults()
+        for it in self._scene.selectedItems():
+            if self._tool_key_for_item(it) != tool_key:
+                continue
+            if field == "width" and hasattr(it, "apply_width"):
+                it.apply_width(value)
+            elif field == "font" and isinstance(it, _TextItem):
+                it.apply_font_size(value)
+            elif field == "size" and isinstance(it, _BadgeItem):
+                it.setScale(value / float(_DEFAULT_BADGE))
+
+    def _set_arrow_head_size(self, value: int):
+        self.tool_defaults["arrow"]["head"] = value
+        self._persist_tool_defaults()
+        for it in self._scene.selectedItems():
+            if isinstance(it, _ArrowItem):
+                it.apply_head_size(value)
+
+    def _toggle_arrow_dir_panel(self):
+        sel = [it for it in self._scene.selectedItems() if isinstance(it, _ArrowItem)]
+        if sel:
+            new_val = not sel[0]._head_at_end
+            for it in sel:
+                it.set_head_at_end(new_val)
+        else:
+            new_val = not self.tool_defaults["arrow"]["head_at_end"]
+        self.tool_defaults["arrow"]["head_at_end"] = new_val
+        self._persist_tool_defaults()
+        btn = self._arrow_dir_panel_btn
         if btn is not None:
-            btn.setIcon(_rainbow_icon(self.current_color))
+            btn.setIcon(_arrow_dir_icon(new_val))
+
+    def _tool_key_for_item(self, item) -> str | None:
+        if isinstance(item, _ArrowItem):
+            return "arrow"
+        if isinstance(item, _RectItem):
+            return "rect"
+        if isinstance(item, _EllipseItem):
+            return "ellipse"
+        if isinstance(item, _LineItem):
+            return "line"
+        if isinstance(item, _PathItem):
+            return "pen"
+        if isinstance(item, _TextItem):
+            return "text"
+        if isinstance(item, _BadgeItem):
+            return "badge"
+        return None
+
+    def _pick_tool_eyedrop(self, tool_key: str):
+        pop = self._tool_popups.get(tool_key)
+        if pop is not None:
+            pop.hide()
+        self._eyedrop_target_tool = tool_key
+        self._start_eyedropper()
 
     def _build_text_opts_bar(self) -> QWidget:
         bar = QWidget(self)
@@ -2768,6 +2954,7 @@ class _EditorMixin:
     # ---- 도구/색/두께 상태 -------------------------------------------------
     def set_tool(self, tool):
         self.current_tool = tool
+        self._hide_tool_popups()  # 도구를 바꾸면 열려 있던 미니패널은 정리
         if tool == "select":
             self._view.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
         else:
@@ -2786,7 +2973,6 @@ class _EditorMixin:
         # 선택 항목 repaint — 핸들이 선택(V) 도구에서만 보이므로 도구 전환 시 즉시 반영
         for it in self._scene.selectedItems():
             it.update()
-        self._update_arrow_dir_btn()
         self._update_text_opts_bar()
 
     def _update_text_opts_bar(self):
@@ -2821,45 +3007,9 @@ class _EditorMixin:
                 bg is not None and cur is not None and QColor(bg) == QColor(cur))
             btn.setChecked(same)
 
-    def _update_arrow_dir_btn(self):
-        """방향 토글 버튼 배치: 선택된 화살표가 있으면 그 화살표 근처에(대상에서 멀지 않게),
-        없고 화살표 도구가 활성이면 툴바 화살표 버튼 아래(새 화살표 기본 방향 토글)."""
-        btn = getattr(self, "_arrow_dir_btn", None)
-        if btn is None:
-            return
-        edit = self.is_edit_mode() if hasattr(self, "is_edit_mode") else True
-        if not edit:
-            btn.setVisible(False)
-            return
-        sel_arrows = [it for it in self._scene.selectedItems() if isinstance(it, _ArrowItem)]
-        if sel_arrows:
-            arrow = sel_arrows[0]
-            # 화살표 중간점을 호스트(창) 좌표로 변환해 그 위쪽에 버튼 배치(대상 근처).
-            scene_mid = arrow.mapToScene(arrow._point_at(0.5))
-            vp_pt = self._view.mapFromScene(scene_mid)
-            host = self.mapFromGlobal(self._view.viewport().mapToGlobal(vp_pt))
-            btn.setIcon(_arrow_dir_icon(arrow._head_at_end))  # 그 화살표의 실제 방향 표시
-            btn.resize(32, 24)
-            x = max(2, min(host.x() + 12, self.width() - btn.width() - 2))
-            y = max(2, min(host.y() - btn.height() - 12, self.height() - btn.height() - 2))
-            btn.move(x, y)
-            btn.setVisible(True)
-            btn.raise_()
-            return
-        if self.current_tool == "arrow":
-            arrow_btn = self._tool_buttons.get("arrow")
-            if arrow_btn is not None:
-                btn.resize(arrow_btn.width(), 22)
-                # 툴바가 창 하단이라 버튼 '위'로 띄운다(아래면 창 밖으로 잘림).
-                btn.move(arrow_btn.mapTo(self, QPoint(0, -btn.height() - 2)))
-            btn.setIcon(_arrow_dir_icon(self.arrow_head_at_end))
-            btn.setVisible(True)
-            btn.raise_()
-            return
-        btn.setVisible(False)
-
-    def make_pen(self) -> QPen:
-        return QPen(self.current_color, self.current_width, Qt.PenStyle.SolidLine,
+    def make_pen(self, tool_key: str) -> QPen:
+        d = self.tool_defaults[tool_key]
+        return QPen(QColor(d["color"]), d["width"], Qt.PenStyle.SolidLine,
                     Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
 
     def next_badge_number(self) -> int:
@@ -2868,23 +3018,11 @@ class _EditorMixin:
         return max(nums, default=0) + 1
 
     def _refresh_tool_icons(self):
+        # 각 도구 아이콘을 그 도구 자신의 색으로 칠한다 — 색이 도구별로 독립이라
+        # 아이콘 색 자체가 "이 도구는 지금 이 색으로 그려진다"는 표시가 된다.
         for key, btn in self._tool_buttons.items():
-            btn.setIcon(_tool_icon(key, self.current_color, neutral_override=_ICON_DARK))
-
-    def _set_color(self, color: QColor):
-        self.current_color = QColor(color)
-        # 현재 색은 무지개 버튼 가운데 점으로 표시(팔레트 팝업 진입점)
-        self._update_color_btn()
-        name = self.current_color.name().lower()
-        for c, btn in self._preset_buttons:
-            sel = c.name().lower() == name
-            btn.setChecked(sel)
-            btn.setStyleSheet(self._swatch_style(c, sel))
-        self._refresh_tool_icons()
-        # 선택된 도형이 있으면 그 색도 즉시 변경
-        for it in self._scene.selectedItems():
-            if hasattr(it, "apply_color"):
-                it.apply_color(self.current_color)
+            color = self.tool_defaults[key]["color"] if key in _DRAW_TOOLS else None
+            btn.setIcon(_tool_icon(key, color, neutral_override=_ICON_DARK))
 
     def _font_size_targets(self) -> list:
         fi = self._scene.focusItem()
@@ -2895,19 +3033,21 @@ class _EditorMixin:
 
     def adjust_item_property(self, item, step: int):
         """주석 위 휠 — 도형은 두께(±1), 텍스트·번호는 크기(±2)를 step 방향으로 조절.
-        조절값을 도구 기본값·툴바에도 반영해 다음에 그리는 주석도 같은 두께·크기가 되게 한다
-        (undo는 색·두께 변경과 동일하게 미추적)."""
+        조절값을 그 항목이 속한 도구의 기본값(tool_defaults)에도 반영해 다음에 그리는
+        같은 도구의 주석도 같은 두께·크기가 되게 한다(undo는 색·두께 변경과 동일하게 미추적).
+        화살표 머리 크기는 두께와 독립이라 여기서는 건드리지 않는다 — 미니패널 슬라이더 전용."""
+        tool_key = self._tool_key_for_item(item)
         if isinstance(item, _TextItem):
             new = max(_MIN_FONT, min(item.font().pointSize() + step * 2, _MAX_FONT))
             item.apply_font_size(new)
-            self.current_font_size = new
-            _EditorMixin._last_font_size = new   # 마지막 글자 크기 기억 → 다음 편집기도 이 값으로
+            if tool_key:
+                self.tool_defaults[tool_key]["font"] = new
         elif isinstance(item, _BadgeItem):
             cur = round(item.scale() * _DEFAULT_BADGE)
             new = max(_MIN_BADGE, min(cur + step * 2, _MAX_BADGE))
             item.setScale(new / float(_DEFAULT_BADGE))
-            self.current_badge_size = new
-            _EditorMixin._last_badge_size = new  # 마지막 번호 크기 기억 → 다음 편집기도 이 값으로
+            if tool_key:
+                self.tool_defaults[tool_key]["size"] = new
         else:
             if isinstance(item, _ArrowItem):
                 new = max(_MIN_WIDTH, min(item._width + step, _MAX_WIDTH))
@@ -2916,21 +3056,9 @@ class _EditorMixin:
             else:
                 return
             item.apply_width(new)
-            self.current_width = new
-            _EditorMixin._last_width = new   # 마지막 두께 기억 → 다음 편집기도 이 값으로 시작
-        self._persist_last_values()   # 변경된 마지막 값을 DB에 기록(재시작 후 유지)
-
-    def _toggle_arrow_dir(self):
-        # 선택된 화살표가 있으면 각자 자기 방향을 뒤집고 기본값·아이콘을 첫 화살표에 맞춘다.
-        # 없으면 새 화살표 기본 방향만 토글.
-        sel = [it for it in self._scene.selectedItems() if isinstance(it, _ArrowItem)]
-        if sel:
-            for it in sel:
-                it.flip_head()
-            self.arrow_head_at_end = sel[0]._head_at_end
-        else:
-            self.arrow_head_at_end = not self.arrow_head_at_end
-        self._arrow_dir_btn.setIcon(_arrow_dir_icon(self.arrow_head_at_end))
+            if tool_key:
+                self.tool_defaults[tool_key]["width"] = new
+        self._persist_tool_defaults()   # 변경된 마지막 값을 DB에 기록(재시작 후 유지)
 
     # ---- 스포이드 (화면 픽셀 색 따오기) ------------------------------------
     def _start_eyedropper(self):
@@ -2997,8 +3125,8 @@ class _EditorMixin:
         if self._loupe is not None:
             self._loupe.close()
             self._loupe = None
-        if picked and self._eyedrop_last is not None:
-            self._set_color(self._eyedrop_last)
+        if picked and self._eyedrop_last is not None and self._eyedrop_target_tool is not None:
+            self._set_tool_color(self._eyedrop_target_tool, self._eyedrop_last)
         self.activateWindow()
         self.raise_()
 

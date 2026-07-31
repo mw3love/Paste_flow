@@ -174,13 +174,9 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         self._view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
 
         self._build_layout()
-        # 화살표 방향 토글 버튼을 '선택된 화살표 근처'에 두므로, 선택·이동 시 재배치한다.
-        # (selectionChanged=선택 변화, changed=아이템 이동/편집. 줌은 _apply_zoom에서 호출.)
-        self._scene.selectionChanged.connect(self._update_arrow_dir_btn)
-        self._scene.changed.connect(lambda *a: self._update_arrow_dir_btn())
         self.set_tool(None)  # 손 모드(도구 없음)로 시작 — 편집 진입 기본
         self._view.setDragMode(QGraphicsView.DragMode.NoDrag)  # 뷰어 시작
-        self._set_color(self.current_color)
+        self._refresh_tool_icons()  # 도구 아이콘을 각 도구의 tool_defaults 색으로 초기 채색
         self._apply_active_style(False)
         self.hide()
 
@@ -319,7 +315,6 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         if getattr(self, "_chrome", None) is not None and self._chrome.isVisible():
             self._layout_chrome()
             self._layout_edit_close()
-            self._update_arrow_dir_btn()  # 줌으로 화살표 위치가 바뀌면 방향 버튼도 따라가게
 
     def _visible_global_rect(self, width: int) -> QRect:
         """창(=이미지) 전역 사각형(폭 width)과 이 창이 놓인 화면 가용영역(작업표시줄 제외)의
@@ -388,7 +383,6 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         else:
             self._scene.clearSelection()
             self._view.setDragMode(QGraphicsView.DragMode.NoDrag)
-        self._update_arrow_dir_btn()      # 뷰어 전환 시 floating 방향 토글 숨김
         self._update_text_opts_bar()      # 뷰어 전환 시 텍스트 옵션 바 숨김
         if self._edit_mode:
             self._layout_chrome()         # 이미지 하단 strip에 배치(+필요 시 폭만 확장)
