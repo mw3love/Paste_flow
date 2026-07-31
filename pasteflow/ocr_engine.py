@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import threading
 from typing import Literal, NamedTuple, Optional
 
 from PIL import Image
@@ -159,6 +160,47 @@ def _check_winocr() -> bool:
     return _winocr_error is None
 
 
+# ── OpenAI 호환 클라이언트 캐시 ──────────────────────────────────────────────
+# 옛 코드는 OCR 호출마다 openai.OpenAI()를 새로 만들었다 — 그러면 매 호출이 TCP+TLS
+# 핸드셰이크를 새로 치른다(연결 재사용 0). (api_key, base_url)별로 클라이언트를 캐싱해
+# 같은 크리덴셜의 호출들이 커넥션 풀(keep-alive)을 공유하게 한다 — 앱을 오래 켜둔
+# 채로 여러 번 OCR을 써도 매번 새 핸드셰이크를 안 치른다.
+_client_cache: dict[tuple[str, str], object] = {}
+_client_cache_lock = threading.Lock()
+
+
+def _get_client(api_key: str, base_url: str):
+    """(api_key, base_url)별로 openai.OpenAI 클라이언트를 캐싱해 커넥션 풀을 재사용한다."""
+    import openai
+
+    norm_url = _normalize_base_url(base_url)
+    cache_key = (api_key, norm_url)
+    with _client_cache_lock:
+        client = _client_cache.get(cache_key)
+        if client is None:
+            client = openai.OpenAI(api_key=api_key, base_url=norm_url)
+            _client_cache[cache_key] = client
+        return client
+
+
+def warm_connection(api_key: str, base_url: str) -> None:
+    """앱 시작 시 백그라운드 스레드에서 호출 — `openai` 패키지 임포트 + 클라이언트 생성 +
+    가벼운 `/models` 조회로 DNS 조회·TCP/TLS 핸드셰이크를 앱 시작 시점에 미리 끝내 둔다.
+
+    실제 첫 OCR 호출이 `_get_client`로 같은 캐시된 클라이언트를 재사용하므로, 이 워밍업이
+    끝난 뒤라면 첫 OCR도 커넥션 설정 비용 없이 모델 응답 시간만 기다리면 된다.
+    크리덴셜이 비어 있거나 워밍업 자체가 실패해도 조용히 무시한다 — 최선 노력형이며,
+    실패해도 실제 OCR 호출은 평소 경로(에러 시 사용자에게 표시)로 그대로 진행된다.
+    """
+    if not api_key or not base_url:
+        return
+    try:
+        client = _get_client(api_key, base_url)
+        client.models.list()
+    except Exception:
+        pass
+
+
 # ── AI OCR 프롬프트 ──────────────────────────────────────────────────────────
 
 def _ocr_prompt(language: str) -> str:
@@ -252,11 +294,10 @@ class OcrEngine:
             raise RuntimeError("Base URL이 비어 있습니다. 설정에서 게이트웨이 주소를 입력하세요.")
 
         try:
-            import openai
+            client = _get_client(api_key, base_url)
         except ImportError as e:
             raise RuntimeError("openai 패키지 미설치: pip install openai") from e
         try:
-            client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
             resp = client.models.list()
             # 필터 없음 — 게이트웨이가 광고하는 모든 모델을 그대로 넘긴다.
             # (옛날엔 여기서 조용히 지워 "왜 없지?"가 됐다.)
@@ -388,7 +429,7 @@ class OcrEngine:
         """OpenAI 호환 게이트웨이 단일 호출 (폴백 없음)."""
         import io, base64
         try:
-            import openai
+            client = _get_client(api_key, base_url)
         except ImportError:
             raise RuntimeError("openai 패키지 미설치: pip install openai")
 
@@ -396,7 +437,6 @@ class OcrEngine:
         pil_image.save(buf, format="PNG")
         b64 = base64.standard_b64encode(buf.getvalue()).decode()
 
-        client = openai.OpenAI(api_key=api_key, base_url=_normalize_base_url(base_url))
         # max_tokens=16384: 게이트웨이가 reasoning(thinking) 토큰을 같은 max_tokens 예산에서
         # 차감하므로 작게 잡으면 thinking 모델(pro·preview 계열)에서 본문이 0~200자로 잘림.
         # 2048에서는 gemini-2.5-pro가 본문 0자, 3-flash-preview/3.5-flash/3.1-pro-preview가

@@ -767,6 +767,17 @@ class PasteFlowApp:
         # 코어 모듈
         db_path = _resolve_db_path()
         self.db = Database(db_path)
+
+        # OCR 첫 호출 지연 완화: 실측 결과 `openai` 패키지 임포트(1.4~3.4초, httpx/pydantic
+        # 등 무거운 의존성) + 매 호출 새로 만드는 TCP/TLS 커넥션이 합쳐져 첫 OCR이 유독
+        # 느렸다(사용자 실측: 첫 8~9초 vs 이후 2~3초). ocr_engine의 클라이언트 캐시
+        # (`_get_client`)가 커넥션 재사용을 맡고, 여기서는 앱 시작 직후 백그라운드
+        # 스레드로 그 캐시를 미리 데워둔다(임포트 + 클라이언트 생성 + 가벼운 `/models`
+        # GET 1회로 DNS/TCP/TLS까지 끝냄) — 실제 첫 OCR이 이 캐시된 커넥션을 그대로
+        # 재사용하므로 커넥션 설정 비용 없이 모델 응답 시간만 남는다. 크리덴셜이 비어
+        # 있거나 워밍업이 실패해도 조용히 무시(최선 노력형, 실제 OCR 호출엔 영향 없음).
+        threading.Thread(target=self._prewarm_ocr_connection, daemon=True, name="ocr-prewarm").start()
+
         # 주석 편집기 도구별 마지막 값(색·두께·글자·번호·화살표 머리크기)을 DB에서 복원 +
         # 변경 시 저장 콜백 등록(재시작 후에도 유지 — 클래스 변수라 세션 중 이미지 간 공유는 그대로).
         _EditorMixin.load_last_values(self.db.get_setting("annot_tool_defaults", ""))
@@ -1184,6 +1195,19 @@ class PasteFlowApp:
         self._progress_toast = None  # 더는 진행 칩으로 추적 안 함 (fade 예약됨)
         QTimer.singleShot(hold_ms, toast.dismiss)
         return True
+
+    def _prewarm_ocr_connection(self):
+        """`openai` 패키지 임포트 + 클라이언트 캐시 워밍업(백그라운드 스레드에서 호출).
+
+        실패해도 조용히 무시 — 실제 OCR 호출은 항상 정상 경로(`_start_ocr_worker`)로
+        진행되고, 이건 그 경로가 커넥션 설정 비용 없이 시작하게 미리 데워둘 뿐이다.
+        """
+        try:
+            from pasteflow.ocr_engine import warm_connection
+            api_key, base_url, _model = self._resolve_gemini_cfg()
+            warm_connection(api_key, base_url)
+        except Exception:
+            pass
 
     def _start_ocr_worker(self, png_bytes: bytes):
         """공용 OCR 워커 — PNG bytes를 받아 백그라운드에서 OCR 수행.
