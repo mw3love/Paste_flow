@@ -170,33 +170,36 @@ class ClipboardMonitor:
                 print("[Monitor] 자체 트리거 무시")
                 return
 
-        item = self._read_clipboard()
-        if item is None:
-            print("[Monitor] 클립보드 읽기 실패 (None)")
+        items = self._read_clipboard()
+        if not items:
+            print("[Monitor] 클립보드 읽기 실패 (빈 목록)")
             return
 
-        # 중복 체크
-        content_hash = self._compute_hash(item)
-        if content_hash == self._last_hash:
-            print(f"[Monitor] 중복 해시 — 스킵")
-            if self.on_duplicate:
-                self.on_duplicate()
-            return
-        self._last_hash = content_hash
+        # 여러 파일을 한 번에 복사했으면 파일마다 순서대로 중복 체크 + 콜백
+        # (일반적인 단일 항목 경로도 리스트 길이 1로 동일하게 흐른다).
+        for item in items:
+            content_hash = self._compute_hash(item)
+            if content_hash == self._last_hash:
+                print(f"[Monitor] 중복 해시 — 스킵")
+                if self.on_duplicate:
+                    self.on_duplicate()
+                continue
+            self._last_hash = content_hash
 
-        preview = (item.preview_text or "")[:30]
-        print(f"[Monitor] 새 항목: '{preview}'")
-        if self.on_new_item:
-            self.on_new_item(item)
+            preview = (item.preview_text or "")[:30]
+            print(f"[Monitor] 새 항목: '{preview}'")
+            if self.on_new_item:
+                self.on_new_item(item)
 
-    def _read_clipboard(self) -> Optional[ClipboardItem]:
-        """클립보드에서 데이터 읽기"""
+    def _read_clipboard(self) -> list[ClipboardItem]:
+        """클립보드에서 데이터 읽기. 탐색기에서 이미지 파일을 여러 개 복사하면 파일마다
+        별도 항목을 반환한다(그 외 경로는 항상 0개 또는 1개)."""
         _opened = False
         try:
             win32clipboard.OpenClipboard()
             _opened = True
         except Exception:
-            return None
+            return []
 
         try:
             text_content = None
@@ -252,12 +255,28 @@ class ClipboardMonitor:
                 except Exception:
                     pass
 
-            # CF_HDROP: 탐색기에서 이미지 파일 1개 복사 — 파일을 읽어 이미지로 처리
+            # CF_HDROP: 탐색기에서 이미지 파일 복사 — 파일 1개면 이미지로, 여러 개면
+            # 파일마다 별도 항목을 만들어야 하므로 여기서 바로 리스트로 반환한다.
             _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp', '.tiff', '.tif'}
             if image_data is None and win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP):
                 try:
                     files = win32clipboard.GetClipboardData(win32con.CF_HDROP)
-                    if files and len(files) == 1:
+                    image_files = [f for f in files if os.path.splitext(f)[1].lower() in _IMAGE_EXTS]
+                    if len(files) > 1 and image_files:
+                        items = []
+                        for fpath in image_files:
+                            try:
+                                with open(fpath, 'rb') as f:
+                                    file_bytes = f.read()
+                            except Exception:
+                                continue
+                            items.append(ClipboardItem(
+                                content_type="image",
+                                image_data=file_bytes,
+                                thumbnail=self._create_thumbnail(file_bytes),
+                            ))
+                        return items
+                    if len(files) == 1:
                         fpath = files[0]
                         if os.path.splitext(fpath)[1].lower() in _IMAGE_EXTS:
                             with open(fpath, 'rb') as f:
@@ -313,9 +332,9 @@ class ClipboardMonitor:
             elif text_content:
                 content_type = "text"
             else:
-                return None  # 지원하지 않는 형식
+                return []  # 지원하지 않는 형식
 
-            return ClipboardItem(
+            return [ClipboardItem(
                 content_type=content_type,
                 text_content=text_content,
                 image_data=image_data,
@@ -323,7 +342,7 @@ class ClipboardMonitor:
                 rtf_content=rtf_content,
                 thumbnail=thumbnail,
                 extra_formats=extra_formats or None,
-            )
+            )]
         finally:
             if _opened:
                 try:

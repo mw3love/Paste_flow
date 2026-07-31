@@ -714,6 +714,7 @@ class _SignalBridge(QObject):
     record_gif         = pyqtSignal()        # 훅 스레드 → 메인: GIF 녹화(영역 선택 오버레이) 띄우기
     gif_saved          = pyqtSignal(str)     # 인코딩 워커 → 메인: 저장된 GIF 경로
     gif_error          = pyqtSignal(str)     # 인코딩 워커 → 메인: 에러 메시지
+    annotation_copied  = pyqtSignal(bytes)   # 주석 복사 워커 → 메인: 클립보드+DB 저장 완료(썸네일 토스트용)
 
 
 class PasteFlowApp:
@@ -753,6 +754,7 @@ class PasteFlowApp:
         self._bridge.record_gif.connect(self._on_record_gif_hotkey)
         self._bridge.gif_saved.connect(self._on_gif_saved)
         self._bridge.gif_error.connect(self._on_gif_error)
+        self._bridge.annotation_copied.connect(self._on_annotation_copied)
 
         self._saved_panel_geometry = None
         self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
@@ -1779,22 +1781,38 @@ class PasteFlowApp:
             popup.destroyed.connect(lambda _=None, iid=item_id: self._image_preview_windows.pop(iid, None))
 
     def _on_annotation_copy(self, png: bytes):
-        """주석본을 클립보드에 복사 + 히스토리에 새 항목으로 저장(썸네일 포함).
+        """주석본을 클립보드에 복사 + 히스토리에 새 항목으로 저장(썸네일 포함) — 백그라운드.
 
-        _set_clipboard는 monitor.set_self_triggered를 켜 클립보드 모니터의 재감지를
-        막으므로, 히스토리 추가는 _persist_clipboard_item(직접 DB+큐)이 담당한다.
+        썸네일 생성·DIB 변환·DB blob 커밋을 UI 스레드에서 동기 실행하면 큰 이미지에서
+        복사 완료 토스트가 몇 초씩 늦게 뜨고 그동안 편집기 전체가 멈췄다(2026-07-31
+        사용자 보고 — 5초 지연 실측). 클립보드 API는 스레드 무관하게 안전하고 db·queue는
+        자체 락으로 스레드 안전(_persist_clipboard_item 내부에서 emit하는 new_item_saved도
+        Qt가 스레드 간 큐잉을 자동 처리) — GIF 인코딩 워커(main._encode_gif_worker)와 동일 패턴.
         """
-        from pasteflow.ui.toast import ToastNotification
+        threading.Thread(
+            target=self._annotation_copy_worker, args=(png,),
+            daemon=True, name="annotation-copy-worker",
+        ).start()
+
+    def _annotation_copy_worker(self, png: bytes):
+        """워커 스레드: 클립보드 설정 + DB/큐 저장. 완료를 시그널로 메인에 되돌려 토스트를 띄운다."""
         thumb = None
         if self.interceptor.monitor is not None:
             thumb = self.interceptor.monitor._create_thumbnail(png)
         item = ClipboardItem(content_type="image", image_data=png, thumbnail=thumb)
         self.interceptor._set_clipboard(item)   # 클립보드
         self._persist_clipboard_item(item)       # 히스토리 + 큐
-        # png는 PNG라 QPixmap이 바로 로드 → 토스트에 썸네일을 실어 "무엇을 복사했나"를
-        # 시각 확인(핀·경로 붙여넣기 토스트와 일관). 원본을 넘겨 96px 축소 시 선명.
-        # 썸네일이 카테고리를 대신하므로 이모지 아이콘은 생략(icon="") — image_path 토스트
-        # 5곳과 동일 규칙.
+        self._bridge.annotation_copied.emit(png)
+
+    def _on_annotation_copied(self, png: bytes):
+        """메인 스레드: 주석 복사 완료 → 썸네일 토스트.
+
+        png는 PNG라 QPixmap이 바로 로드 → 토스트에 썸네일을 실어 "무엇을 복사했나"를
+        시각 확인(핀·경로 붙여넣기 토스트와 일관). 원본을 넘겨 96px 축소 시 선명.
+        썸네일이 카테고리를 대신하므로 이모지 아이콘은 생략(icon="") — image_path 토스트
+        5곳과 동일 규칙.
+        """
+        from pasteflow.ui.toast import ToastNotification
         ToastNotification("복사 + 히스토리 저장됨", icon="", image_bytes=png)
 
     def _on_annotation_export(self, png: bytes):

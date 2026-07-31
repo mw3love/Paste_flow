@@ -4,7 +4,9 @@
 줌하면 주석이 이미지와 함께 스케일되고, 그린 도형은 선택·이동·크기조절·삭제가 가능하다.
 
 도구 단축키: V 선택 · R 네모 · E 원 · L 선 · A 화살표 · P 펜 · T 텍스트 · C 번호 · Ctrl+Z 되돌리기 · Ctrl+C/V 주석 복사·붙여넣기.
-Shift: 정사각형/정원/45° 스냅. 선택 후 우하단 핸들 드래그로 크기조절(균일 스케일).
+Shift: 정사각형/정원/45° 스냅(그리기 중) · 15° 스냅(회전 중) · 원래 가로세로 비율 유지(리사이즈 중).
+선택 후 좌상단 고정으로 우하단 핸들 드래그하면 크기조절 — 네모·원은 가로/세로 독립(자유형),
+텍스트·번호는 균일 스케일. 주석 위 Shift+휠은 두께/글자·번호 크기 조절(그냥 휠은 항상 줌).
 완료 동작은 main이 처리한다(시그널만 emit): 클립보드 복사 / 새 히스토리 항목 / 파일 저장.
 """
 import io
@@ -380,8 +382,8 @@ class _HandleResizeMixin:
     # 만큼 크지도 않게). 획이 없는 도형(번호·텍스트)만 표시 크기 비례로 폴백한다.
     _HANDLE_FRAC = 0.22        # (폴백) 작은 변 대비 핸들 비율 — 번호·텍스트용
     _HANDLE_STROKE_FRAC = 1.4  # 획 두께 대비 핸들 비율 — 도형·선·화살표용
-    _HANDLE_MIN = 5.0    # 씬 단위 하한(항상 잡히게)
-    _HANDLE_MAX = 12.0   # 씬 단위 상한
+    _HANDLE_MIN = 8.0    # 씬 단위 하한(항상 잡히게) — 2026-07-31 사용자 피드백으로 확대(5→8)
+    _HANDLE_MAX = 18.0   # 씬 단위 상한(12→18)
     _EDGE_HIT_MIN = 8.0  # 속 빈 도형 테두리 클릭 최소 히트폭(씬 단위) — 얇은 선도 잡히게
 
     def _stroke_width(self) -> float:
@@ -435,6 +437,24 @@ class _HandleResizeMixin:
         self._press_dist = 1.0
         self._press_rot = 0.0
         self._press_angle = 0.0
+        self._freeform_anchor_pt = QPointF()   # 자유형 리사이즈 고정점(로컬) — press에서 세팅
+        self._freeform_press_size = (0.0, 0.0)  # 자유형 리사이즈 press 시점 (폭, 높이) — Shift 비율용
+
+    # ---- 자유형(가로/세로 독립) 리사이즈 — 네모·원 전용 ----------------------
+    # 우하단 핸들 하나로 가로/세로를 독립적으로 조절(2026-07-31 사용자 요청). 균일
+    # 스케일 대신 rect() 자체를 바꾸는 도형만 켠다 — 텍스트(폰트 크기)·번호(원 비율
+    # 유지가 의미 있음)·선·화살표(끝점 모드)는 그대로 균일 스케일/끝점 방식을 쓴다.
+    def _uses_freeform_resize(self) -> bool:
+        return False
+
+    def _freeform_anchor(self) -> QPointF:
+        """자유형 리사이즈의 고정점(로컬 좌표). _uses_freeform_resize()가 True인 도형만
+        호출되므로 기본 구현은 QGraphicsRectItem/QGraphicsEllipseItem의 rect()를 그대로 쓴다."""
+        return self.rect().topLeft()
+
+    def _apply_freeform_size(self, rect: QRectF):
+        """드래그로 계산된 새 rect를 도형에 반영. 위와 동일 이유로 기본은 setRect(rect)."""
+        self.setRect(rect)
 
     # ---- 끝점(양끝 이동) 모드 -------------------------------------------
     # 선·화살표처럼 '2점으로 완전히 결정되는' 도형은 회전+균일스케일 핸들 대신
@@ -547,20 +567,22 @@ class _HandleResizeMixin:
     def _base_shape(self):
         return super().shape()
 
-    # 실제 boundingRect = content ∪ 회전 핸들 영역(상시 예약 → 선택 해제 시 핸들 잔상 방지).
-    # 위쪽뿐 아니라 좌우도 덮어야 함 — 얇은 도형(세로선 등)은 핸들 원이 content보다 가로로
-    # 넓어 좌우로 삐져나오므로. 여유분은 scale 의존이라, 크기조절 중 mouseMove에서
-    # prepareGeometryChange로 갱신한다.
+    # 실제 boundingRect = content ∪ 회전·크기조절 핸들의 '잡기' 영역(상시 예약 → 선택
+    # 해제 시 핸들 잔상 방지). 시각 rect가 아니라 _inflate_to_hit() 결과까지 예약해야
+    # 화면 고정 24px 히트 영역이 boundingRect 밖으로 나가 Qt에 컬링당하지 않는다
+    # (끝점 핸들과 동일 원칙 — 옛 코드는 회전 핸들만, 그것도 비확대 rect로 예약해
+    # 크기조절 핸들의 넓은 히트 영역이 shape()에 반영 안 되던 버그가 있었다).
     def boundingRect(self) -> QRectF:
         pad = 3.0 / self._scale_or_1()
         if self._uses_endpoints():
             r = self._content_rect()
             for i in range(len(self._endpoints())):
-                # 시각 rect가 아니라 '잡기' rect까지 예약해야 넉넉한 hit-shape가
-                # boundingRect 밖으로 나가 Qt에 컬링당하지 않는다.
                 r = r.united(self._inflate_to_hit(self._endpoint_rect(i)))
             return r.adjusted(-pad, -pad, pad, pad)
-        return self._content_rect().united(self._rot_handle_rect().adjusted(-pad, -pad, pad, pad))
+        r = self._content_rect()
+        r = r.united(self._inflate_to_hit(self._rot_handle_rect()))
+        r = r.united(self._inflate_to_hit(self._handle_local_rect()))
+        return r.adjusted(-pad, -pad, pad, pad)
 
     def _handle_local_rect(self) -> QRectF:
         h = self._handle_px()
@@ -568,10 +590,12 @@ class _HandleResizeMixin:
         return QRectF(c.x() - h, c.y() - h, h, h)
 
     def _rot_handle_center(self) -> QPointF:
-        # 우상단 코너 안쪽 — 우하단 크기조절 점과 오른쪽 변에 위아래로 대칭인 점(줄기 없음).
+        # 좌상단 코너 안쪽 — 우하단 크기조절 점과 대각선 반대편(2026-07-31, 사용자 요청).
+        # 리사이즈 앵커(좌상단 고정)와 같은 코너지만 핸들은 시각 요소일 뿐 앵커 자체를
+        # 가리지 않는다 — 오히려 대각으로 떨어져 있어 두 핸들을 헷갈릴 일이 없다.
         cr = self._content_rect()
         r = self._handle_px() * 0.5  # 원 반지름(= 크기조절 사각 변의 절반 → 같은 지름)
-        return QPointF(cr.right() - r, cr.top() + r)
+        return QPointF(cr.left() + r, cr.top() + r)
 
     def _rot_handle_rect(self) -> QRectF:
         d = self._handle_px()  # 원 지름 = 크기조절 사각 변
@@ -604,7 +628,7 @@ class _HandleResizeMixin:
         if not self._handle_active():
             return
         s = self._scale_or_1()
-        # 회전 핸들 — 우상단 코너 안쪽 코랄 점(줄기 없음, 우하단 크기조절 점과 대칭)
+        # 회전 핸들 — 좌상단 코너 안쪽 코랄 점(줄기 없음, 우하단 크기조절 점과 대각선 반대편)
         rc = self._rot_handle_center()
         rh = self._handle_px() * 0.5  # 반지름 — 지름이 크기조절 사각 변과 같게
         painter.setPen(QPen(QColor("white"), 1.0 / s))
@@ -631,6 +655,8 @@ class _HandleResizeMixin:
 
     def shape(self):
         # 선택 시 핸들 영역을 클릭 영역에 포함 — 속 빈 도형도 핸들을 잡을 수 있게.
+        # 끝점·bend 핸들과 동일하게 시각 rect가 아니라 '잡기' rect(_inflate_to_hit)를
+        # 써야 화면 고정 24px 히트 영역에서 실제로 mousePressEvent가 온다.
         base = self._base_shape()
         if self._uses_endpoints():
             if self._endpoint_active():
@@ -641,8 +667,8 @@ class _HandleResizeMixin:
             return base
         if self._handle_active():
             hp = QPainterPath()
-            hp.addRect(self._handle_local_rect())
-            hp.addEllipse(self._rot_handle_rect())
+            hp.addRect(self._inflate_to_hit(self._handle_local_rect()))
+            hp.addEllipse(self._inflate_to_hit(self._rot_handle_rect()))
             return base.united(hp)
         return base
 
@@ -657,8 +683,9 @@ class _HandleResizeMixin:
             super().mousePressEvent(event)
             return
         if self._handle_active():
-            # 회전 핸들이 바깥쪽이라 먼저 검사한다.
-            if self._rot_handle_rect().contains(event.pos()):
+            # 회전 핸들이 바깥쪽이라 먼저 검사한다. 둘 다 '잡기' rect(화면 고정 24px)로
+            # 판정해야 시각 점보다 넉넉한 영역에서 mousePressEvent가 온다(shape()와 동일 rect).
+            if self._inflate_to_hit(self._rot_handle_rect()).contains(event.pos()):
                 self._rotating = True
                 self.setTransformOriginPoint(self._content_rect().center())
                 center = self.mapToScene(self._content_rect().center())
@@ -666,13 +693,24 @@ class _HandleResizeMixin:
                 self._press_rot = self.rotation()
                 event.accept()
                 return
-            if self._handle_local_rect().contains(event.pos()):
+            if self._inflate_to_hit(self._handle_local_rect()).contains(event.pos()):
                 self._resizing = True
-                self.setTransformOriginPoint(self._content_rect().center())
-                center = self.mapToScene(self._content_rect().center())
-                d = QLineF(center, event.scenePos()).length()
-                self._press_dist = d if d > 1 else 1.0
-                self._press_scale = self._scale_or_1()
+                # 우하단 핸들을 끄는 것이므로 반대쪽 코너(좌상단)를 고정점으로 잡는다 —
+                # 중심을 고정점으로 쓰면 드래그해도 도형이 화면 중앙으로 오그라드는
+                # 느낌이 되어 포토샵·파워포인트 등 통상 편집기 동작과 어긋났다(2026-07-31).
+                if self._uses_freeform_resize():
+                    # 네모·원: 스케일이 아니라 rect() 자체를 바꿔 가로/세로 독립 조절
+                    # (2026-07-31 사용자 요청 — 코너 핸들 하나로 자유형 리사이즈. Shift로
+                    # press 시점 비율 유지 가능, 텍스트·번호는 균일 스케일 그대로 유지).
+                    self._freeform_anchor_pt = self._freeform_anchor()
+                    self._freeform_press_size = (self.rect().width(), self.rect().height())
+                else:
+                    anchor = self._content_rect().topLeft()
+                    self.setTransformOriginPoint(anchor)
+                    origin_scene = self.mapToScene(anchor)
+                    d = QLineF(origin_scene, event.scenePos()).length()
+                    self._press_dist = d if d > 1 else 1.0
+                    self._press_scale = self._scale_or_1()
                 event.accept()
                 return
         super().mousePressEvent(event)
@@ -702,10 +740,27 @@ class _HandleResizeMixin:
             return
         if getattr(self, "_resizing", False):
             self.prepareGeometryChange()  # 회전 여유분이 scale 의존 → 경계 캐시 갱신
-            center = self.mapToScene(self._content_rect().center())
-            d = QLineF(center, event.scenePos()).length()
-            new = self._press_scale * (d / self._press_dist)
-            self.setScale(max(0.15, min(new, 25.0)))
+            if self._uses_freeform_resize():
+                anchor = self._freeform_anchor_pt
+                local = self.mapFromScene(event.scenePos())
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    # Shift = press 시점 가로세로 비율 유지(각 축 스냅과 동일한 손 습관)
+                    pw, ph = self._freeform_press_size
+                    if pw > 0 and ph > 0:
+                        dx, dy = local.x() - anchor.x(), local.y() - anchor.y()
+                        ratio = pw / ph
+                        if abs(dx) > abs(dy) * ratio:
+                            dy = math.copysign(abs(dx) / ratio, dy or dx or 1.0)
+                        else:
+                            dx = math.copysign(abs(dy) * ratio, dx or dy or 1.0)
+                        local = QPointF(anchor.x() + dx, anchor.y() + dy)
+                self._apply_freeform_size(QRectF(anchor, local).normalized())
+            else:
+                anchor = self._content_rect().topLeft()  # press와 동일 고정점(좌상단)
+                origin_scene = self.mapToScene(anchor)
+                d = QLineF(origin_scene, event.scenePos()).length()
+                new = self._press_scale * (d / self._press_dist)
+                self.setScale(max(0.15, min(new, 25.0)))
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -716,11 +771,19 @@ class _HandleResizeMixin:
             event.accept()
             return
         if getattr(self, "_rotating", False) or getattr(self, "_resizing", False):
+            was_resizing = getattr(self, "_resizing", False)
             self._rotating = False
             self._resizing = False
+            if was_resizing:
+                self._on_resize_end()
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def _on_resize_end(self):
+        """코너 드래그 크기조절이 끝났을 때 훅(기본은 아무것도 안 함) — 텍스트가 override해
+        scale()을 폰트 크기에 구워 넣는다(_TextItem._on_resize_end 참고)."""
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -745,6 +808,9 @@ class _RectItem(_HandleResizeMixin, QGraphicsRectItem):
     def __init__(self, *args):
         super().__init__(*args)
         self._init_resize()
+
+    def _uses_freeform_resize(self) -> bool:
+        return True
 
     def clone(self):
         c = _RectItem(QRectF(self.rect()))
@@ -772,6 +838,9 @@ class _EllipseItem(_HandleResizeMixin, QGraphicsEllipseItem):
     def __init__(self, *args):
         super().__init__(*args)
         self._init_resize()
+
+    def _uses_freeform_resize(self) -> bool:
+        return True
 
     def clone(self):
         c = _EllipseItem(QRectF(self.rect()))
@@ -1413,6 +1482,29 @@ class _TextItem(_HandleResizeMixin, QGraphicsTextItem):
         f.setPointSize(int(size))
         self.setFont(f)
 
+    def _on_resize_end(self):
+        """코너 드래그 크기조절은 scale()만 바꿔 폰트 크기 자체(및 '마지막 글자 크기'
+        기억)엔 반영되지 않는다 — 휠 조절(EditorMixin.adjust_item_property)만
+        _last_font_size를 갱신해 왔다. 드래그가 끝나면 scale을 폰트 크기에 구워 넣고
+        스케일을 1로 되돌려, 도형 두께가 '휠로 조절 → 다음 도형도 같은 두께'로 이어지는
+        것과 대칭되게 다음 텍스트도 방금 크기로 시작하게 한다(2026-07-31 사용자 피드백
+        — 두께는 이어지는데 텍스트만 매번 기본 크기로 초기화됨)."""
+        s = self.scale()
+        if s == 1.0:
+            return
+        new_size = max(_MIN_FONT, min(round(self.font().pointSize() * s), _MAX_FONT))
+        self.prepareGeometryChange()
+        self.apply_font_size(new_size)
+        self.setScale(1.0)
+        sc = self.scene()
+        if sc is not None and sc.views():
+            owner = getattr(sc.views()[0], "_owner", None)
+            if owner is not None:
+                owner.current_font_size = new_size
+                _EditorMixin._last_font_size = new_size
+                owner._persist_last_values()
+        self.update()
+
     def set_bg(self, color):
         # color: QColor 또는 None(투명). 둥근 사각 배경으로 자막/스티커 느낌.
         self._bg = QColor(color) if color is not None else None
@@ -1683,6 +1775,8 @@ class _AnnotatorView(QGraphicsView):
         self._arrow_snap_exit = None # 그리는 화살표 시작이 테두리에 스냅됐으면 그 바깥 법선(이탈 접선), or None
         self._arrow_tip_snap = None  # 그리는 화살표 tip이 테두리에 스냅된 지점(씬 좌표) or None
         self._none_win_dragging = False  # 손 모드(도구 없음) 빈영역 좌드래그 = 창 이동 중
+        self._text_drag_item = None  # 편집 중인 텍스트를 테두리 band 드래그로 이동 중이면 그 아이템
+        self._text_drag_last = None  # 위 드래그의 직전 씬 좌표(델타 계산용)
 
     def _is_empty_area(self, view_pos) -> bool:
         """클릭 위치에 선택 가능한 주석 아이템이 없으면(배경뿐) True."""
@@ -1705,7 +1799,9 @@ class _AnnotatorView(QGraphicsView):
         return None
 
     def _rot_handle_at(self, view_pos) -> bool:
-        """커서가 '선택된' 도형의 회전 점 안이면 True — hover 회전 커서 판정용."""
+        """커서가 '선택된' 도형의 회전 점 '잡기' 영역 안이면 True — hover 회전 커서 판정용.
+        시각 점이 아니라 _inflate_to_hit()로 넉넉히 판정(press와 동일 rect, 2026-07-31 —
+        옛 비확대 판정은 손가락 하나 굵기라 이동 커서에서 잘 안 바뀐다는 피드백)."""
         scene_pt = self.mapToScene(view_pos)
         for it in self.scene().selectedItems():
             rr = getattr(it, "_rot_handle_rect", None)
@@ -1714,13 +1810,13 @@ class _AnnotatorView(QGraphicsView):
                 continue
             if it._uses_endpoints():   # 선·화살표는 회전 핸들 없음(끝점 핸들 사용)
                 continue
-            if rr().contains(it.mapFromScene(scene_pt)):
+            if it._inflate_to_hit(rr()).contains(it.mapFromScene(scene_pt)):
                 return True
         return False
 
     def _scale_handle_at(self, view_pos) -> bool:
-        """커서가 '선택된' 도형의 크기조절(우하단 파란 사각) 핸들 안이면 True — hover 리사이즈
-        커서 판정용. press 처리는 리사이즈로 받는데 커서만 이동으로 뜨던 불일치를 없앤다."""
+        """커서가 '선택된' 도형의 크기조절(우하단 파란 사각) 핸들 '잡기' 영역 안이면 True —
+        hover 리사이즈 커서 판정용(_inflate_to_hit() 적용, 회전 핸들과 동일 이유)."""
         scene_pt = self.mapToScene(view_pos)
         for it in self.scene().selectedItems():
             hr = getattr(it, "_handle_local_rect", None)
@@ -1729,7 +1825,7 @@ class _AnnotatorView(QGraphicsView):
                 continue
             if it._uses_endpoints():   # 선·화살표는 크기조절 사각 없음(끝점 핸들 사용)
                 continue
-            if hr().contains(it.mapFromScene(scene_pt)):
+            if it._inflate_to_hit(hr()).contains(it.mapFromScene(scene_pt)):
                 return True
         return False
 
@@ -1885,9 +1981,10 @@ class _AnnotatorView(QGraphicsView):
         dy = event.angleDelta().y()
         if dy == 0:
             return
-        # 편집 모드에서 커서 아래에 주석이 있으면 줌 대신 그 주석 속성을 조절
-        # (도형=두께 / 텍스트·번호=크기). 없으면 기존대로 이미지 줌.
-        if self._owner.is_edit_mode():
+        # Shift+휠 = 커서 아래 주석 속성 조절(도형=두께 / 텍스트·번호=크기), 그냥 휠은
+        # 어디서든(주석 위여도) 이미지 줌 — 예전엔 주석 위 휠이 항상 조절이라 줌하려고
+        # 스크롤했다가 의도치 않게 두께·크기가 바뀌곤 했다(2026-07-31 사용자 요청).
+        if self._owner.is_edit_mode() and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
             bg = getattr(self._owner, "_bg_item", None)
             for it in self.items(event.position().toPoint()):
                 if it is bg:
@@ -1937,6 +2034,19 @@ class _AnnotatorView(QGraphicsView):
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
+        vpos0 = event.position().toPoint()
+        # 편집 중인 텍스트의 테두리 band 위 press = 이동 시작. QGraphicsTextItem은 편집
+        # 모드(TextEditorInteraction)면 press를 그대로 super()에 넘길 경우 캐럿 배치/선택으로
+        # 먼저 가로채 버려 이동이 아예 안 됐다 — 호버 커서만 이동으로 바뀌고 실제로는 못
+        # 옮기는 불일치였다(2026-07-31 사용자 보고). 여기서 직접 가로채 수동으로 옮긴다.
+        if self._editing_text_hover(vpos0) == "move":
+            it = self._editing_text_item(vpos0)
+            if it is not None:
+                self._snapshot_movable()  # 다른 드래그 이동과 동일하게 Ctrl+Z 대상으로 기록
+                self._text_drag_item = it
+                self._text_drag_last = self.mapToScene(vpos0)
+                event.accept()
+                return
         # 이미 선택된 화살표/선의 끝점·곡선(bend) 조절 핸들 위 press는 겹친 도형 테두리보다 우선한다
         # (선택된 아이템의 핸들이 먼저 작동해야 함). 끝점/핸들은 도형 테두리에 딱 붙는 일이 잦아
         # Z-order 배달로는 아래 도형이 press를 가로챈다 → 그 아이템을 잠깐 최상단으로 올려 Qt가
@@ -2053,20 +2163,27 @@ class _AnnotatorView(QGraphicsView):
         self._snap_preview = None   # 그리기 시작 → 유휴 스냅 예고 마커 정리
         self.viewport().update()
 
-    def _editing_text_hover(self, view_pos) -> str | None:
-        """편집 중인 텍스트 위 hover면 'text'(내부=캐럿) / 'move'(테두리 band=이동), 아니면 None.
-        테두리 band는 화면 8px 두께로 잡아 뷰·아이템 스케일과 무관하게 일정하게 보이게 한다."""
-        scene_pt = self.mapToScene(view_pos)
+    def _editing_text_item(self, view_pos):
+        """편집 중(캐럿 활성)인 텍스트 아이템이 커서 아래 있으면 반환, 아니면 None."""
         for it in self.items(view_pos):
             if isinstance(it, _TextItem) and \
                     it.textInteractionFlags() != Qt.TextInteractionFlag.NoTextInteraction:
-                cr = it._content_rect()
-                band = 8.0 / (self._view_scale() * it._scale_or_1())  # 화면 8px → 로컬 두께
-                inner = cr.adjusted(band, band, -band, -band)
-                if inner.width() <= 0 or inner.height() <= 0:
-                    return "text"  # 너무 작으면 전부 캐럿(편집 중이므로 I빔 우선)
-                return "text" if inner.contains(it.mapFromScene(scene_pt)) else "move"
+                return it
         return None
+
+    def _editing_text_hover(self, view_pos) -> str | None:
+        """편집 중인 텍스트 위 hover면 'text'(내부=캐럿) / 'move'(테두리 band=이동), 아니면 None.
+        테두리 band는 화면 8px 두께로 잡아 뷰·아이템 스케일과 무관하게 일정하게 보이게 한다."""
+        it = self._editing_text_item(view_pos)
+        if it is None:
+            return None
+        scene_pt = self.mapToScene(view_pos)
+        cr = it._content_rect()
+        band = 8.0 / (self._view_scale() * it._scale_or_1())  # 화면 8px → 로컬 두께
+        inner = cr.adjusted(band, band, -band, -band)
+        if inner.width() <= 0 or inner.height() <= 0:
+            return "text"  # 너무 작으면 전부 캐럿(편집 중이므로 I빔 우선)
+        return "text" if inner.contains(it.mapFromScene(scene_pt)) else "move"
 
     def _update_hover_cursor(self, view_pos):
         """편집 모드 hover 커서: 주석 위=이동, 도형 도구+빈영역=십자, select+빈영역=손바닥.
@@ -2114,6 +2231,15 @@ class _AnnotatorView(QGraphicsView):
             else:
                 self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
             return
+        if self._text_drag_item is not None:
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                self._text_drag_item = None  # 방어적 정리(release를 놓친 경우)
+            else:
+                cur = self.mapToScene(event.position().toPoint())
+                delta = cur - self._text_drag_last
+                self._text_drag_item.moveBy(delta.x(), delta.y())
+                self._text_drag_last = cur
+                return
         if not (event.buttons() & Qt.MouseButton.LeftButton):
             self._update_snap_preview(event.position().toPoint())
             self._update_hover_cursor(event.position().toPoint())
@@ -2145,6 +2271,11 @@ class _AnnotatorView(QGraphicsView):
             return
         if not self._owner.is_edit_mode():
             self._owner._win_drag_end()
+            return
+        if self._text_drag_item is not None:
+            self._text_drag_item = None
+            self._text_drag_last = None
+            self._commit_move()
             return
         if self._drawing and self._temp is not None:
             item = self._temp
@@ -2305,7 +2436,22 @@ class _ColorPalettePopup(QWidget):
 # ---------------------------------------------------------------------------
 
 def flatten_scene_to_png(scene: QGraphicsScene) -> bytes:
-    """씬을 이미지 해상도 PNG bytes로 평탄화(주석 포함). 선택 핸들은 렌더 전 해제."""
+    """씬을 이미지 해상도 PNG bytes로 평탄화(주석 포함) — 화면에 보이는 그대로를
+    래스터화한 진짜 이미지 데이터다(화면 캡처가 아니라 QGraphicsScene을 QImage에
+    그려 넣는 것). 그래서 렌더 시점에 남아 있는 '편집 중' UI 상태도 그대로 픽셀로
+    구워진다 — 선택 핸들은 scene.clearSelection()으로 지우지만, 텍스트를 드래그로
+    선택한 채(파란 네이티브 텍스트 선택 하이라이트)로 복사 버튼을 누르면 그 하이라이트도
+    함께 찍혔다(2026-07-31 사용자 보고). 텍스트 캐럿/선택은 QGraphicsScene의 아이템
+    선택과 별개(QTextCursor 상태)라 clearSelection()이 못 건드리므로 여기서 편집 중인
+    텍스트를 명시적으로 커밋(포커스 해제)해 없앤다.
+    """
+    for it in scene.items():
+        if isinstance(it, QGraphicsTextItem) and \
+                it.textInteractionFlags() != Qt.TextInteractionFlag.NoTextInteraction:
+            cursor = it.textCursor()
+            cursor.clearSelection()
+            it.setTextCursor(cursor)
+            it.clearFocus()  # focusOutEvent가 편집 종료 처리(인터랙션 해제 등)
     scene.clearSelection()
     rect = scene.sceneRect()
     img = QImage(int(round(rect.width())), int(round(rect.height())),
@@ -2420,7 +2566,8 @@ class _EditorMixin:
 
         tools.addWidget(self._vsep())
 
-        # 두께 조절은 주석 위에서 휠로 대체(adjust_item_property) — 별도 두께 위젯 제거.
+        # 두께 조절은 주석 위 Shift+휠로 대체(adjust_item_property) — 별도 두께 위젯 제거.
+        # (그냥 휠은 항상 줌 — 2026-07-31, 조절과 줌이 같은 휠을 다투던 것을 Shift로 분리)
 
         # 완료 액션 — 아이콘 버튼, 색 옆 고정 (이미지 줌으로 창이 넓어져도 위치 불변).
         # 복사/저장은 같은 중립색으로 통일. 닫기는 이미지 우상단 floating(호스트가 배치).
