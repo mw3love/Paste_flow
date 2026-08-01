@@ -9,6 +9,10 @@ def make_item(text: str) -> ClipboardItem:
     return ClipboardItem(content_type="text", text_content=text)
 
 
+def make_item_id(text: str, item_id: int) -> ClipboardItem:
+    return ClipboardItem(content_type="text", text_content=text, id=item_id)
+
+
 class TestQueueBasic:
     """큐 기본 동작"""
 
@@ -271,6 +275,52 @@ class TestPlainPasteClear:
         q.add_item(make_item("B"))     # 시간 무관, 누적도 없음 → [B]
         q.add_item(make_item("C"))     # 짧은 간격 → 누적 → [B, C]
         assert q.get_status() == (0, 2)
+
+
+class TestRemoveItem:
+    """remove_item() — 히스토리 삭제와 큐 동기화 (2026-08-01 사용자 리포트 회귀 방지)"""
+
+    def test_remove_unconsumed_item(self):
+        """아직 안 꺼낸 항목 제거 → 남은 항목만 순서대로, pointer 불변"""
+        q = PasteQueue()
+        q.add_item(make_item_id("A", 1))
+        q.add_item(make_item_id("B", 2))
+        q.add_item(make_item_id("C", 3))
+        assert q.remove_item(2) is True
+        assert q.get_status() == (0, 2)
+        assert q.get_next().text_content == "A"
+        assert q.get_next().text_content == "C"
+
+    def test_remove_already_consumed_item_decrements_pointer(self):
+        """이미 소진된(pointer 이전) 항목 제거 → pointer도 함께 1 감소"""
+        q = PasteQueue()
+        q.add_item(make_item_id("A", 1))
+        q.add_item(make_item_id("B", 2))
+        q.add_item(make_item_id("C", 3))
+        q.get_next()  # A, pointer=1
+        assert q.remove_item(1) is True  # 이미 소진된 A 제거
+        assert q.get_status() == (0, 2)  # pointer 1→0, total 3→2
+        assert q.get_next().text_content == "B"
+        assert q.get_next().text_content == "C"
+
+    def test_remove_unknown_id_returns_false(self):
+        """큐에 없는 id 제거 시도 → False, 큐 불변"""
+        q = PasteQueue()
+        q.add_item(make_item_id("A", 1))
+        assert q.remove_item(999) is False
+        assert q.get_status() == (0, 1)
+
+    def test_remove_all_items_empties_queue(self):
+        """캡처 3개 중 남은 1개까지 지우면 큐도 완전히 비워짐"""
+        q = PasteQueue()
+        q.add_item(make_item_id("A", 1))
+        q.add_item(make_item_id("B", 2))
+        q.add_item(make_item_id("C", 3))
+        assert q.remove_item(1) is True
+        assert q.remove_item(2) is True
+        assert q.remove_item(3) is True
+        assert q.get_status() == (0, 0)
+        assert q.is_exhausted() is True
 
 
 class TestIdleReset:

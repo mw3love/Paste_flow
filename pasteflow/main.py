@@ -1324,6 +1324,12 @@ class PasteFlowApp:
         재사용해 디스크 재저장을 피한다. 최신 항목이 이미지가 아니면 토스트만 표시(경로 붙여넣기는
         이미지에만 의미) — 큐 기반 순차 경로 붙여넣기는 Ctrl+Shift+[가 담당.
 
+        **클립보드는 붙여넣기 직후 원본 이미지로 복원된다**(주입 250ms 후) — 그렇지 않으면
+        실제 Windows 클립보드에 경로 텍스트만 남아, 이 단축키 다음에 일반 Ctrl+V를 누르면
+        이미지가 아니라 경로가 또 붙는 문제가 있었다(2026-08-01). 복원 덕에 "이 키=경로,
+        일반 Ctrl+V=이미지"가 독립된 동작으로 쓰인다. 단 복원 전 250ms 창 안에 수동으로
+        Ctrl+V를 누르면 여전히 경로가 붙는다(사실상 무시할 수 있는 짧은 창).
+
         주의: 발화 시점에 사용자가 Ctrl+Shift를 여전히 누르고 있으므로 `_send_ctrl_v_plain`
         (수정키 처리 없는 단순 Ctrl+V)을 그대로 쓰면 OS가 Ctrl+Shift+V로 인식해 실패한다.
         Ctrl+Shift+V 순차 붙여넣기와 동일하게 `_send_clean_key(VK_V)`로 수정키 해제·복원·
@@ -1365,6 +1371,12 @@ class PasteFlowApp:
 
         # 50ms 후 Ctrl+V 주입 — _send_clean_key가 사용자 Ctrl/Shift 해제 → Ctrl+V → 복원
         QTimer.singleShot(50, lambda: self.interceptor._send_clean_key(VK_V))
+        # 붙여넣기 대상 앱이 클립보드를 다 읽고 난 뒤(주입 후 200ms 여유) 클립보드를
+        # 원본 이미지로 되돌린다 — 안 그러면 실제 Windows 클립보드에 경로 텍스트만
+        # 남아, 이 단축키 이후 사용자가 일반 Ctrl+V를 누르면 이미지가 아니라 경로가
+        # 또 붙는다(2026-08-01 사용자 리포트). 복원도 self_triggered라 히스토리에
+        # 중복 추가되지 않는다(0.5초 무시창 안이라 안전).
+        QTimer.singleShot(250, lambda: self.interceptor._set_clipboard(item))
         # 단발 경로 붙여넣기는 큐가 아닌 현재 클립보드를 붙이는 '이탈' — 일반 Ctrl+V처럼
         # 큐를 클리어해 일관성 유지(큐 기반 경로 붙여넣기는 Ctrl+Shift+[가 담당)
         self._clear_queue_ui()
@@ -1416,6 +1428,9 @@ class PasteFlowApp:
             )
             self.interceptor._set_clipboard(path_item)
             QTimer.singleShot(50, lambda: self.interceptor._send_clean_key(VK_V))
+            # 단발 경로 붙여넣기와 동일하게, 대상 앱이 경로를 다 읽은 뒤 클립보드를
+            # 원본 이미지로 복원 — 이후 일반 Ctrl+V가 경로 재붙임이 아닌 이미지 붙여넣기가 되게 함.
+            QTimer.singleShot(250, lambda: self.interceptor._set_clipboard(next_item))
             ToastNotification(
                 f"경로 붙여넣음: {os.path.basename(saved_path)}",
                 icon="", image_path=saved_path)
@@ -1770,7 +1785,18 @@ class PasteFlowApp:
 
     def _on_delete_item(self, item_id: int):
         self.db.delete_item(item_id)
+        # 큐가 이 항목을 들고 있으면(캡처 스냅샷은 DB와 별개로 큐에 살아있다) 함께
+        # 제거 — 안 그러면 히스토리에서 지운 항목이 진행 HUD·순차 붙여넣기에는
+        # 그대로 남아 "몇 개가 남았는지"가 어긋난다(2026-08-01 사용자 리포트).
+        removed_from_queue = self.queue.remove_item(item_id)
         self._refresh_panel()
+        if removed_from_queue:
+            pointer, total = self.queue.get_status()
+            self.tray.update_queue_status(pointer, total)
+            if total > 0:
+                self.paste_hud.show_progress(self.queue.get_items(), pointer)
+            else:
+                self.paste_hud.dismiss()
 
     def _on_pin_reorder(self, id_order_list: list):
         self.db.update_pin_orders(id_order_list)

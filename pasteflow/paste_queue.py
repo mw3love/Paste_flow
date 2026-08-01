@@ -113,3 +113,22 @@ class PasteQueue:
         """큐 및 포인터 초기화 (사용자 명시적 호출 — 패널 우클릭 큐 해제 등)"""
         with self._lock:
             self._reset_unlocked()
+
+    def remove_item(self, item_id: int) -> bool:
+        """id로 큐에서 항목 제거 (히스토리 삭제와 큐 상태 동기화용).
+
+        큐는 캡처 시점의 ClipboardItem 스냅샷을 독립적으로 들고 있어 DB 삭제와
+        자동으로 연동되지 않는다 — 이게 없으면 히스토리에서 지운 항목이 큐/진행
+        HUD에는 계속 남아 "몇 개가 남았는지"가 어긋난다(2026-08-01 사용자 리포트:
+        캡처 3개 중 1개를 히스토리에서 지웠는데 HUD는 여전히 3개로 표시).
+        제거된 항목이 pointer 이전(이미 소진)이면 pointer도 함께 1 감소시켜
+        정렬을 유지한다. 항목을 못 찾으면 False.
+        """
+        with self._lock:
+            for i, it in enumerate(self._items):
+                if it.id == item_id:
+                    del self._items[i]
+                    if i < self.pointer:
+                        self.pointer -= 1
+                    return True
+            return False
