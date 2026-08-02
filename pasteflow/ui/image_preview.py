@@ -99,6 +99,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
     copy_requested = pyqtSignal(object)        # ClipboardItem
     ocr_requested = pyqtSignal(object)         # ClipboardItem
     copy_as_path_requested = pyqtSignal(object)  # ClipboardItem — 파일로 저장 후 경로 복사
+    ask_ai_requested = pyqtSignal(object)      # ClipboardItem — Gemini에게 질문(이미지 첨부, 2026-08-02)
     # 편집 완료 → main 핸들러 (PNG bytes)
     annotated_copy_requested = pyqtSignal(bytes)   # 클립보드 복사 + 히스토리 저장
     export_file_requested = pyqtSignal(bytes)      # 파일 저장
@@ -448,18 +449,22 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         target = self._effective_item()  # 주석 있으면 평탄화본, 없으면 원본
         menu = QMenu(self)
         menu.setStyleSheet(_dark_menu_style())
+        # 단축키 힌트("\t..." 뒤는 Qt가 메뉴에서 오른쪽 정렬로 보여줌, 패널 우클릭 메뉴와
+        # 동일한 표기 방식) — 2026-08-02 사용자 요청, 실제 단축키를 새로 바인딩하는 게
+        # 아니라 이미 있는 것(Ctrl+C·Space)을 메뉴에 드러내는 것뿐이다.
         if target is self._item:
-            menu.addAction("복사").triggered.connect(lambda: self.copy_requested.emit(target))
+            menu.addAction("복사\tCtrl+C").triggered.connect(lambda: self.copy_requested.emit(target))
         else:
             # 평탄화본(임시, id 없음)의 복사는 주석 편집 완료 복사와 동일 경로로 —
             # 클립보드 + 히스토리 저장 + 토스트. copy_requested는 DB 항목을 전제해
             # id 없는 항목이면 히스토리에 안 남고 피드백도 없다.
-            menu.addAction("복사").triggered.connect(
+            menu.addAction("복사\tCtrl+C").triggered.connect(
                 lambda: self.annotated_copy_requested.emit(target.image_data))
         menu.addAction("텍스트 추출(OCR)").triggered.connect(lambda: self.ocr_requested.emit(target))
         menu.addAction("파일로 저장 후 경로 복사").triggered.connect(
             lambda: self.copy_as_path_requested.emit(target))
-        menu.addAction("주석 편집").triggered.connect(self.toggle_edit_mode)
+        menu.addAction("Gemini에게 질문").triggered.connect(lambda: self.ask_ai_requested.emit(target))
+        menu.addAction("주석 편집\tSpace").triggered.connect(self.toggle_edit_mode)
         menu.addSeparator()
         menu.addAction("닫기").triggered.connect(self.close)
         menu.exec(event.globalPos())
@@ -474,7 +479,21 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         if event.key() == Qt.Key.Key_Escape:
             self._on_escape()
             return
+        # 뷰어 모드 한정 — 편집 모드의 Ctrl+C는 주석 내부 복제(_AnnotatorView.keyPressEvent)로
+        # 이미 쓰이므로 겹치지 않게 여기서 막는다. 우클릭 메뉴 "복사"와 완전히 동일한 대상 선정
+        # (주석 있으면 평탄화본, 없으면 원본) — 2026-08-02 사용자 요청.
+        if (not self._edit_mode and event.key() == Qt.Key.Key_C
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self._copy_via_shortcut()
+            return
         super().keyPressEvent(event)
+
+    def _copy_via_shortcut(self):
+        target = self._effective_item()
+        if target is self._item:
+            self.copy_requested.emit(target)
+        else:
+            self.annotated_copy_requested.emit(target.image_data)
 
     # ------------------------------------------------------------------
     # 활성/비활성 테두리 (이미지 뷰 테두리 색)

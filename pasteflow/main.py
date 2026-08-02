@@ -1290,6 +1290,27 @@ class PasteFlowApp:
 
         self._start_ocr_worker(png_bytes)
 
+    def _on_ask_ai_for_image(self, item: ClipboardItem):
+        """핀 이미지 우클릭 "Gemini에게 질문" — 이미지를 미리 첨부한 채 AI 질문창을 연다
+        (2026-08-02 사용자 요청). image_data(DIB/PNG) → PNG 변환은 _on_ocr_image_item과
+        동일 패턴."""
+        import io
+        from PIL import Image
+        from pasteflow.ui.toast import ToastNotification
+
+        if not item.image_data:
+            ToastNotification("이미지 데이터를 찾을 수 없습니다", icon="✨")
+            return
+        try:
+            img = Image.open(io.BytesIO(item.image_data))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            png_bytes = buf.getvalue()
+        except Exception as e:
+            ToastNotification(f"이미지 변환 실패 — {e}", icon="✨")
+            return
+        self._open_ai_dialog(initial_image_png=png_bytes)
+
     def _on_ocr_image_by_id(self, item_id: int):
         """패널 우클릭(item_id 기반) → DB에서 풀 로드 후 OCR 위임."""
         from pasteflow.ui.toast import ToastNotification
@@ -1522,6 +1543,7 @@ class PasteFlowApp:
         popup.copy_requested.connect(self._on_copy_item)
         popup.ocr_requested.connect(self._on_ocr_image_item)
         popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
+        popup.ask_ai_requested.connect(self._on_ask_ai_for_image)
         popup.annotated_copy_requested.connect(self._on_annotation_copy)
         popup.export_file_requested.connect(self._on_annotation_export)
 
@@ -1571,6 +1593,7 @@ class PasteFlowApp:
             popup.copy_requested.connect(self._on_copy_item)
             popup.ocr_requested.connect(self._on_ocr_image_item)
             popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
+            popup.ask_ai_requested.connect(self._on_ask_ai_for_image)
             popup.annotated_copy_requested.connect(self._on_annotation_copy)
             popup.export_file_requested.connect(self._on_annotation_export)
 
@@ -2014,6 +2037,7 @@ class PasteFlowApp:
             popup.copy_requested.connect(self._on_copy_item)
             popup.ocr_requested.connect(self._on_ocr_image_item)
             popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
+            popup.ask_ai_requested.connect(self._on_ask_ai_for_image)
             # 인라인 주석 편집(Space) 완료 액션 — 같은 창에서 emit
             popup.annotated_copy_requested.connect(self._on_annotation_copy)
             popup.export_file_requested.connect(self._on_annotation_export)
@@ -2099,9 +2123,14 @@ class PasteFlowApp:
             if new_text != (item.text_content or ""):
                 self._on_edit_item(item_id, new_text)
 
-    def _open_ai_dialog(self):
+    def _open_ai_dialog(self, initial_image_png: bytes | None = None):
         """AI 자유질문 단축키(Alt+`) — 질문 입력창을 **비모달로** 띄우고, 고른 타겟에 따라
         질문을 라우팅한다.
+
+        initial_image_png: 주어지면 창을 열 때 이미지를 미리 첨부한다(핀 이미지 우클릭
+        "Gemini에게 질문" — 2026-08-02, `AiQueryDialog.attach_image_bytes`가 이미
+        패널 드래그앤드롭용으로 있던 공개 메서드라 재사용). Ctrl+V로 나중에 다른 이미지를
+        첨부하면 그걸로 교체된다(1장 제한은 기존 동작 그대로).
 
         **타겟 팔레트** — 질문을 API 워커로 보내지 않고, DB에 저장된 `ai_palette_sites`
         (설정창 "AI 팔레트 타겟" — `pasteflow/ai_palette.py`가 데이터 모양·기본값을 소유)
@@ -2135,6 +2164,8 @@ class PasteFlowApp:
         # 패널 위에 항상 떠 있게 고정한다(모달과 무관한 별개의 Z-order 규칙) — 미리보기 팝업과
         # 같은 독립 최상위 창 패턴으로 통일한다.
         dialog = AiQueryDialog(parent=None, sites=sites)
+        if initial_image_png:
+            dialog.attach_image_bytes(initial_image_png)
         self._ai_dialog = dialog
 
         def _finished(_code: int):
