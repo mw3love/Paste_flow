@@ -4,3 +4,5 @@ Pillow
 winocr          # Windows WinRT OCR (winrt-* 패키지 포함, Python 3.14+ 지원)
 comtypes        # Windows UI Automation (마그네틱 캡처 — ElementFromPoint)
 openai                  # Mindlogic 게이트웨이 OCR (lazy import)
+numpy                   # 음성 입력(STT) — 마이크 PCM 프레임 버퍼링
+sounddevice             # 음성 입력(STT) — 마이크 녹음 (PortAudio 번들 wheel, 추가 설치 불필요)

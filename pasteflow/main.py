@@ -719,6 +719,10 @@ class _SignalBridge(QObject):
     gif_saved          = pyqtSignal(str)     # 인코딩 워커 → 메인: 저장된 GIF 경로
     gif_error          = pyqtSignal(str)     # 인코딩 워커 → 메인: 에러 메시지
     annotation_copied  = pyqtSignal(bytes)   # 주석 복사 워커 → 메인: 클립보드+DB 저장 완료(썸네일 토스트용)
+    stt_start          = pyqtSignal()        # 훅 스레드 → 메인: 음성 입력 단축키 keydown(녹음 시작)
+    stt_stop           = pyqtSignal()        # 훅 스레드 → 메인: 음성 입력 단축키 keyup(녹음 종료+전송)
+    stt_done           = pyqtSignal(str)     # 워커 스레드 → 메인: STT 결과 텍스트
+    stt_error          = pyqtSignal(str)     # 워커 스레드 → 메인: 에러 메시지
 
 
 class PasteFlowApp:
@@ -759,6 +763,10 @@ class PasteFlowApp:
         self._bridge.gif_saved.connect(self._on_gif_saved)
         self._bridge.gif_error.connect(self._on_gif_error)
         self._bridge.annotation_copied.connect(self._on_annotation_copied)
+        self._bridge.stt_start.connect(self._on_stt_start)
+        self._bridge.stt_stop.connect(self._on_stt_stop)
+        self._bridge.stt_done.connect(self._on_stt_done)
+        self._bridge.stt_error.connect(self._on_stt_error)
 
         self._saved_panel_geometry = None
         self._image_preview_windows: dict[int, ImagePreviewPopup] = {}
@@ -802,6 +810,8 @@ class PasteFlowApp:
             on_capture=self._bridge.capture_requested.emit,
             on_ask_ai=self._bridge.ask_ai.emit,
             on_record_gif=self._bridge.record_gif.emit,
+            on_stt_start=self._bridge.stt_start.emit,
+            on_stt_stop=self._bridge.stt_stop.emit,
         )
         self.hotkey_manager = HotkeyManager()
 
@@ -853,6 +863,11 @@ class PasteFlowApp:
         # 직전 이미지→경로(Ctrl+Shift+P·Ctrl+Shift+[)로 클립보드에 올린 임시 PNG 경로.
         # Alt+F3 핀이 이 경로가 클립보드에 남아 있으면 경로 문자열이 아니라 원본 이미지를 핀한다.
         self._last_pasted_image_path: str | None = None
+
+        # 음성 입력(STT) — Recorder는 첫 사용 시 지연 생성(sounddevice를 안 쓰는 세션에서
+        # 임포트 비용을 피함), 단축키 keydown~keyup 사이 재사용.
+        self._stt_recorder = None
+        self._stt_auto_stop_timer = None  # 30초 상한 타이머 — keyup으로 정상 종료 시 취소
 
         # DB에서 설정 로드 및 적용
         self._apply_settings_from_db()
@@ -913,6 +928,9 @@ class PasteFlowApp:
 
         record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
         self.interceptor.set_record_gif_hotkey(record_hotkey)
+
+        stt_hotkey = self.db.get_setting("hotkey_stt", "alt+r")
+        self.interceptor.set_stt_hotkey(stt_hotkey)
 
 
     def _persist_clipboard_item(self, item: ClipboardItem) -> ClipboardItem:
@@ -1642,6 +1660,114 @@ class PasteFlowApp:
             dlg.addButton(QMessageBox.StandardButton.Close)
             dlg.exec()
 
+    # ── 음성 입력(STT) — 푸시투토크: keydown=녹음 시작, keyup=녹음 종료+게이트웨이 전송 ──
+    # 게이트웨이 오디오 입력은 Gemini 계열만 지원(2026-08-02 실측, stt_engine.py 참고).
+    # api_key/base_url은 OCR과 같은 AI 프로필을 공유하고 모델만 별도 슬롯을 쓴다.
+
+    def _resolve_stt_cfg(self) -> tuple[str, str, str]:
+        """STT용 게이트웨이 설정 — (api_key, base_url, model). 크리덴셜은 OCR과 공유,
+        모델은 `stt_model_gateway`(Gemini 계열 전용 슬롯) — OCR/AI 모델 분리와 동일 이유
+        (한 모델을 공유하면 설정창에서 GPT/Claude를 골랐을 때 STT가 항상 실패한다)."""
+        api_key, base_url, _ocr_model = self._resolve_gemini_cfg()
+        model = self.db.get_setting("stt_model_gateway", "") or "gemini-2.5-flash"
+        return (api_key, base_url, model)
+
+    def _on_stt_start(self):
+        """음성 입력 단축키 keydown — 마이크 녹음 시작."""
+        from PyQt6.QtGui import QCursor
+        from pasteflow.ui.toast import ToastNotification
+
+        if self._stt_recorder is None:
+            from pasteflow.stt_engine import Recorder
+            self._stt_recorder = Recorder()
+        try:
+            self._stt_recorder.start()
+        except Exception as e:
+            ToastNotification(f"마이크를 열 수 없습니다 — {e}", icon="🎤")
+            return
+
+        self._start_cursor_progress("녹음 중…", "🎤", QCursor.pos())
+
+        # 30초 상한 — 무한 녹음 방지(토큰 비용·응답 지연 억제). keyup으로 정상 종료되면
+        # _on_stt_stop이 이 타이머를 취소하므로, 여기까지 살아 있으면 자동 종료+전송.
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._on_stt_stop)
+        timer.start(30_000)
+        self._stt_auto_stop_timer = timer
+
+    def _on_stt_stop(self):
+        """음성 입력 단축키 keyup(또는 30초 상한 도달) — 녹음 종료 → 워커에서 게이트웨이 호출."""
+        from PyQt6.QtGui import QCursor
+
+        timer = self._stt_auto_stop_timer
+        if timer is not None:
+            timer.stop()
+            self._stt_auto_stop_timer = None
+
+        if self._stt_recorder is None:
+            return
+        wav_bytes = self._stt_recorder.stop()
+        if not wav_bytes:
+            self._stop_cursor_progress()
+            return
+
+        self._start_cursor_progress("인식 중…", "🎤", QCursor.pos())  # 칩을 "녹음 중" → "인식 중"으로 전환
+
+        def _run():
+            try:
+                from pasteflow.stt_engine import transcribe
+                api_key, base_url, model = self._resolve_stt_cfg()
+                text = transcribe(wav_bytes, api_key, base_url, model)
+                self._bridge.stt_done.emit(text)
+            except Exception as e:
+                self._bridge.stt_error.emit(str(e))
+
+        threading.Thread(target=_run, daemon=True, name="stt-worker").start()
+
+    def _on_stt_done(self, text: str):
+        """메인 스레드: STT 결과 → 클립보드+DB+큐 저장 후 포커스된 입력창에 자동 Ctrl+V."""
+        from pasteflow.paste_interceptor import VK_V
+
+        if not text.strip():
+            if not self._finish_cursor_progress("인식된 음성 없음"):
+                from pasteflow.ui.toast import ToastNotification
+                ToastNotification("음성을 인식하지 못했습니다", icon="🎤")
+            return
+
+        item = ClipboardItem(
+            content_type="text",
+            text_content=text,
+            preview_text=text[:200],
+        )
+        # 클립보드 먼저 입력 — _set_clipboard가 monitor._self_triggered를 설정해
+        # 클립보드 모니터의 재감지(큐 중복 추가)를 막는다.
+        self.interceptor._set_clipboard(item)
+        self._persist_clipboard_item(item)  # 히스토리 + 큐
+
+        # 포커스된 입력창에 자동 붙여넣기 — keyup 시점에 사용자가 단축키 수정키를 여전히
+        # 누르고 있을 수 있어 _send_clean_key로 해제→Ctrl+V→복원(이미지→경로 단축키와 동일 이유).
+        QTimer.singleShot(50, lambda: self.interceptor._send_clean_key(VK_V))
+
+        flat = " ".join(text.split())
+        preview = flat[:24]
+        suffix = "…" if len(flat) > 24 else ""
+        msg = f"✓ {preview}{suffix}"
+        if not self._finish_cursor_progress(msg):
+            from pasteflow.ui.toast import ToastNotification
+            ToastNotification(msg, icon="🎤")
+
+    def _on_stt_error(self, msg: str):
+        from pasteflow.ui.toast import ToastNotification
+
+        self._stop_cursor_progress()  # 진행 칩 정리(지속형이라 수동 종료 필요)
+
+        if "API 키" in msg or "Base URL" in msg:
+            ToastNotification("API 키/Base URL을 설정해 주세요", icon="🎤")
+            QTimer.singleShot(300, self._open_settings)
+            return
+        ToastNotification(f"음성 인식 실패 — {msg}", icon="🎤")
+
     def _update_paste_ui(self):
         """메인 스레드에서 붙여넣기 UI 업데이트"""
         pointer, total = self.queue.get_status()
@@ -2274,6 +2400,8 @@ class PasteFlowApp:
             "hotkey_ask_ai": self.db.get_setting("hotkey_ask_ai", "alt+`"),
             "ai_palette_sites": self.db.get_setting("ai_palette_sites", ""),
             "hotkey_record_gif": self.db.get_setting("hotkey_record_gif", "ctrl+shift+g"),
+            "hotkey_stt": self.db.get_setting("hotkey_stt", "alt+r"),
+            "stt_model_gateway": self.db.get_setting("stt_model_gateway", ""),
             "capture_save_folder": self.db.get_setting("capture_save_folder", "") or _default_capture_folder(),
             "ocr_language": self.db.get_setting("ocr_language", "ko"),
             "ocr_engine": self.db.get_setting("ocr_engine", "gemini"),  # OCR은 항상 AI API(엔진 선택 제거)
@@ -2314,6 +2442,7 @@ class PasteFlowApp:
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         old_ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+`")
         old_record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
+        old_stt_hotkey = self.db.get_setting("hotkey_stt", "alt+r")
 
         from pasteflow.crypto import protect
         for key, value in new_settings.items():
@@ -2365,6 +2494,11 @@ class PasteFlowApp:
         new_record_hotkey = new_settings.get("hotkey_record_gif", "ctrl+shift+g")
         if old_record_hotkey != new_record_hotkey:
             self.interceptor.set_record_gif_hotkey(new_record_hotkey)
+
+        # 음성 입력(STT) 단축키 재설정
+        new_stt_hotkey = new_settings.get("hotkey_stt", "alt+r")
+        if old_stt_hotkey != new_stt_hotkey:
+            self.interceptor.set_stt_hotkey(new_stt_hotkey)
 
         # 자동 시작
         auto_start = new_settings.get("auto_start", "0") == "1"

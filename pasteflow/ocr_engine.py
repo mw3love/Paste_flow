@@ -32,6 +32,44 @@ def _normalize_base_url(base_url: str) -> str:
             break
     return url
 
+
+# Cloudflare(게이트웨이 앞단 보안 게이트)가 기본 Python urllib UA를 봇으로 보고
+# 403(code 1010)으로 차단하므로 브라우저형 UA를 쓴다(jbnu-gateway 스킬의 _gw.py와 동일).
+_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+
+def get_credit_balance(api_key: str, base_url: str) -> tuple[float, float]:
+    """게이트웨이 크레딧 잔액 조회 — GET {base_url}/credits/ (Mindlogic 게이트웨이 전용).
+
+    OpenAI SDK가 감싸지 않는 raw REST 엔드포인트라 stdlib `urllib`으로 직접 GET한다
+    (새 외부 의존성 0). 응답 스키마는 `{"total": {"remaining": ..., "quota": ...}}`
+    (2026-08-02 jbnu-gateway 스킬 `credits.py`로 실측). base_url이 구글 AI Studio 등
+    다른 API를 가리키면 이 경로 자체가 없어 실패한다 — 호출자가 예외를 잡아 안내해야 한다.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    url = _normalize_base_url(base_url) + "/credits/"
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {api_key}", "User-Agent": _BROWSER_USER_AGENT},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code} {e.reason}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(str(e.reason)) from e
+    total = data.get("total", {})
+    return (float(total.get("remaining", 0)), float(total.get("quota", 0)))
+
+
 # ── 폴백 안전망 ──────────────────────────────────────────────────────────────
 # 호출이 `model_not_found`로 깨졌을 때 조용히 갈아탈 모델 사슬. 앞에서부터 실패
 # 모델이 아닌 첫 항목을 쓴다.

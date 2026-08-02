@@ -258,6 +258,8 @@ class PasteInterceptor:
         on_capture: Optional[Callable[[], None]] = None,
         on_ask_ai: Optional[Callable[[], None]] = None,
         on_record_gif: Optional[Callable[[], None]] = None,
+        on_stt_start: Optional[Callable[[], None]] = None,
+        on_stt_stop: Optional[Callable[[], None]] = None,
     ):
         self.queue = paste_queue
         self.monitor = clipboard_monitor
@@ -273,6 +275,8 @@ class PasteInterceptor:
         self.on_capture = on_capture
         self.on_ask_ai = on_ask_ai
         self.on_record_gif = on_record_gif
+        self.on_stt_start = on_stt_start
+        self.on_stt_stop = on_stt_stop
         self._hook = None
         self._thread: Optional[threading.Thread] = None
         self._hook_thread_id: int = 0
@@ -334,6 +338,13 @@ class PasteInterceptor:
         self._record_need_ctrl: bool = False
         self._record_need_shift: bool = False
         self._record_need_alt: bool = False
+        # 음성 입력(STT) 단축키 — 다른 단축키와 달리 keydown(녹음 시작)·keyup(녹음 종료+전송)
+        # 둘 다 동작하는 푸시투토크 패턴이라 진행 상태(_stt_active)를 별도로 추적한다.
+        self._stt_vk: int = 0
+        self._stt_need_ctrl: bool = False
+        self._stt_need_shift: bool = False
+        self._stt_need_alt: bool = False
+        self._stt_active: bool = False  # 키 반복(auto-repeat) keydown 무시 + 정확한 keyup 매칭용
         # 콜백 참조 유지 (GC 방지)
         self._hook_proc = HOOKPROC(self._low_level_keyboard_proc)
 
@@ -455,6 +466,19 @@ class PasteInterceptor:
         else:
             self._ask_ai_vk = 0
 
+    def set_stt_hotkey(self, hotkey_str: str):
+        """음성 입력(STT) 단축키 설정 — 누르고 있는 동안 녹음(푸시투토크), 떼면 인식+전송."""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._stt_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._stt_need_shift = "shift" in parts
+        self._stt_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._stt_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._stt_vk = 0
+
     def start(self):
         """저수준 키보드 훅 시작 (별도 스레드)"""
         if self._running:
@@ -534,6 +558,16 @@ class PasteInterceptor:
                 kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
                 if kbd.vkCode in (VK_MENU, VK_LMENU, VK_RMENU):
                     self._mod_alt = False
+                # 음성 입력 푸시투토크 종료 — 시작시켰던 그 키의 물리 keyup에서만 정지
+                # (주입 keyup·다른 키의 keyup 무관, auto-repeat keydown과도 무관)
+                if (self._stt_active and kbd.vkCode == self._stt_vk
+                        and not (kbd.flags & LLKHF_INJECTED)):
+                    self._stt_active = False
+                    if self.on_stt_stop:
+                        try:
+                            self.on_stt_stop()
+                        except Exception:
+                            pass
                 if (kbd.vkCode in self._suppressed_vks
                         and not (kbd.flags & LLKHF_INJECTED)):
                     self._suppressed_vks.discard(kbd.vkCode)
@@ -706,6 +740,20 @@ class PasteInterceptor:
                             self.on_record_gif()
                         except Exception:
                             pass
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
+
+                # 음성 입력(STT) 단축키 감지 — 푸시투토크: keydown=시작, keyup=종료(위에서 처리)
+                if (self._stt_vk and vk_code == self._stt_vk
+                        and ctrl_pressed  == self._stt_need_ctrl
+                        and shift_pressed == self._stt_need_shift
+                        and alt_pressed   == self._stt_need_alt):
+                    if not self._stt_active:  # auto-repeat keydown은 무시 — 최초 눌림에만 시작
+                        self._stt_active = True
+                        if self.on_stt_start:
+                            try:
+                                self.on_stt_start()
+                            except Exception:
+                                pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)
         except Exception as e:
             print(f"[Hook] 훅 프로시저 예외 (무시): {e}")

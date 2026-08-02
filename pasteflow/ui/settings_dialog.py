@@ -571,6 +571,7 @@ class SettingsDialog(QDialog):
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
     KEY_RECORD_GIF_HOTKEY = "hotkey_record_gif"
     KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
+    KEY_STT_HOTKEY = "hotkey_stt"
     # AI 팔레트 타겟 — 자유질문창(Alt+`)의 질문을 보낼 목적지 목록(JSON list).
     # 데이터 모양·기본값·URL 빌더는 pasteflow/ai_palette.py가 소유(main도 이걸 공유).
     KEY_AI_PALETTE_SITES = "ai_palette_sites"
@@ -583,6 +584,10 @@ class SettingsDialog(QDialog):
     KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY = "ocr_gemini_model_cache_gateway"
     # OCR 전용 모델 슬롯 — API 키를 쓰는 유일한 경로(v1.6x에서 AI 질의 기능 제거).
     KEY_OCR_MODEL_GATEWAY = "ocr_model_gateway"
+    # STT(음성 입력) 전용 모델 슬롯 — Gemini 계열만 지원(2026-08-02 실측, ocr_model_gateway와
+    # 분리하는 이유는 OCR/AI 모델 분리와 동일: 한 모델을 공유하면 GPT/Claude를 고른 경우
+    # STT가 항상 400으로 실패한다).
+    KEY_STT_MODEL_GATEWAY = "stt_model_gateway"
     # API 프로필 — 이름 붙인 크리덴셜 세트(라벨+base_url+키+OCR모델+캐시)의 목록.
     # 여러 API(구글 직결·게이트웨이 계정 여러 개)를 드롭다운으로 전환하기 위한 것.
     # 엔진이 읽는 "라이브" 키(KEY_OCR_GEMINI_*)는 그대로 두고, 프로필 선택 = 그 값을
@@ -606,6 +611,8 @@ class SettingsDialog(QDialog):
     # status: ProbeResult.status + "run"(진행 중) / "skip"(앞 단계 실패로 건너뜀)
     # run_id: 이 결과를 만든 테스트 회차. 최신 회차가 아니면 UI가 버린다(아래 _on_probe_done).
     _probe_done = pyqtSignal(int, str, str, str)
+    # 크레딧 확인 워커 → UI (remaining, quota, error_msg)
+    _credits_fetched = pyqtSignal(float, float, str)
 
     def __init__(self, current_settings: dict, parent=None):
         super().__init__(parent)
@@ -622,6 +629,7 @@ class SettingsDialog(QDialog):
         self._finalize_size()
         self._models_fetched.connect(self._on_models_fetched)
         self._probe_done.connect(self._on_probe_done)
+        self._credits_fetched.connect(self._on_credits_fetched)
 
     def _setup_window(self):
         self.setWindowTitle("PasteFlow 설정")
@@ -832,6 +840,16 @@ class SettingsDialog(QDialog):
             "결과 텍스트가 클립보드·히스토리에 들어갑니다."
         )
         hotkey_form.addRow("•  AI OCR:", self._ocr_hotkey)
+        hotkey_form.addRow(_hk_sep())
+
+        # ⑤ 음성 입력(STT) — 누르고 있는 동안 녹음(푸시투토크), 떼면 인식 후 자동 붙여넣기.
+        self._stt_hotkey = HotkeyEdit()
+        self._stt_hotkey.setToolTip(
+            "누르고 있는 동안 마이크로 녹음하고, 떼는 순간 음성을 인식해 텍스트로\n"
+            "변환한 뒤 포커스된 입력창에 자동으로 붙여넣습니다(최대 30초).\n"
+            "게이트웨이 오디오 입력은 Gemini 계열 모델만 지원합니다 — 아래 STT 모델에서 선택하세요."
+        )
+        hotkey_form.addRow("•  음성 입력(STT):", self._stt_hotkey)
 
         # ── 기본 단축키 그룹 (고정) — 복사/붙여넣기 등 변경 불가한 핵심 기능. 맨 위 배치 ──
         info_group = QGroupBox("기본 단축키 (고정)")
@@ -876,7 +894,7 @@ class SettingsDialog(QDialog):
         # ── AI 연동 그룹 (OCR 전용 API 프로필) ──
         # v1.6x에서 AI 질의(우클릭 "AI에게 질문"·비교·드라이브 연동)를 통째로 제거해,
         # 이제 이 API 키를 쓰는 경로는 OCR(이미지에서 텍스트 추출) 하나뿐이다.
-        ai_group = QGroupBox("OCR 연동 (API 프로필)")
+        ai_group = QGroupBox("OCR·STT 연동 (API 프로필)")
         self._ai_form = QFormLayout(ai_group)
         ai_form = self._ai_form
         ai_form.setVerticalSpacing(4)
@@ -1019,6 +1037,46 @@ class SettingsDialog(QDialog):
         self._test_status.setWordWrap(True)
         self._test_status.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
         ai_form.addRow("", self._stack(self._test_status, self._ocr_model_probe_status))
+
+        ai_form.addRow(_ai_sep())  # 모델 ↔ STT 모델 구분
+
+        # STT 모델 — 음성 입력(Alt+R 기본) 전용. 게이트웨이 오디오 입력은 Gemini 계열만
+        # 지원해(2026-08-02 실측: 18개 모델 실호출, Gemini 8/8·GPT/Claude/Grok/Perplexity
+        # 0/10) 목록 자체를 Gemini로 필터링한다 — GPT/Claude를 골라 400을 겪을 일이 없다.
+        self._stt_model_label = QLabel("•  STT 모델:")
+        self._stt_model_combo = QComboBox()
+        self._stt_model_combo.setEditable(True)
+        self._stt_model_combo.setStyleSheet(_combo_style)
+        self._stt_model_combo.setToolTip(
+            "음성 입력(Alt+R 기본)에 쓰는 모델 — Gemini 계열만 표시됩니다.\n"
+            "게이트웨이 오디오 입력이 Gemini 계열에서만 확인됐기 때문입니다(2026-08-02)."
+        )
+        le = self._stt_model_combo.lineEdit()
+        if le is not None:
+            le.setPlaceholderText("↻(모델조회)를 눌러 목록을 불러오세요")
+        self._stt_model_combo.view().setItemDelegate(_ModelIndentDelegate(self._stt_model_combo))
+        ai_form.addRow(self._stt_model_label, self._stt_model_combo)
+
+        ai_form.addRow(_ai_sep())  # STT 모델 ↔ 크레딧 구분
+
+        # 크레딧 확인 — Mindlogic 게이트웨이 전용 엔드포인트(GET /credits/). 구글 직결 등
+        # 다른 base_url 프로필에서는 이 엔드포인트가 없어 실패할 수 있다(조용히 안내만).
+        self._credit_btn = QPushButton("크레딧 확인")
+        self._credit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._credit_btn.setToolTip(
+            "게이트웨이 크레딧 잔액을 그 자리에서 조회합니다.\n"
+            "Mindlogic 게이트웨이 전용 — 구글 AI Studio 등 다른 API에서는 지원하지 않을 수 있습니다."
+        )
+        self._credit_btn.clicked.connect(self._on_check_credits)
+        credit_row = QHBoxLayout()
+        credit_row.setContentsMargins(0, 0, 0, 0)
+        credit_row.addWidget(self._credit_btn)
+        credit_row.addStretch(1)
+        ai_form.addRow("•  크레딧:", credit_row)
+        self._credit_status = QLabel("")
+        self._credit_status.setWordWrap(True)
+        self._credit_status.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
+        ai_form.addRow("", self._credit_status)
 
         tab_ai.addWidget(ai_group)
 
@@ -1225,6 +1283,40 @@ class SettingsDialog(QDialog):
         }[slot]
         self._set_probe_status(label, status, detail)
 
+    def _on_check_credits(self):
+        """크레딧 확인 버튼 — 게이트웨이 잔액을 실호출로 조회한다(워커 스레드)."""
+        api_key, base_url = self._creds()
+        if not api_key or not base_url:
+            self._credit_status.setStyleSheet(f"color: {COLORS['red']}; font-size: 11px;")
+            self._credit_status.setText("✗ API 키/Base URL을 먼저 입력하세요.")
+            return
+
+        self._credit_btn.setEnabled(False)
+        self._credit_status.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
+        self._credit_status.setText("조회 중…")
+
+        import threading
+
+        def _worker():
+            try:
+                from pasteflow.ocr_engine import get_credit_balance
+                remaining, quota = get_credit_balance(api_key, base_url)
+                self._credits_fetched.emit(remaining, quota, "")
+            except Exception as e:
+                self._credits_fetched.emit(0.0, 0.0, str(e))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_credits_fetched(self, remaining: float, quota: float, err: str):
+        self._credit_btn.setEnabled(True)
+        if err:
+            self._credit_status.setStyleSheet(f"color: {COLORS['red']}; font-size: 11px;")
+            self._credit_status.setText(
+                f"✗ 조회 실패(이 API는 크레딧 조회를 지원하지 않을 수 있습니다) — {err}")
+            return
+        self._credit_status.setStyleSheet(f"color: {COLORS['green']}; font-size: 11px;")
+        self._credit_status.setText(f"✓ 잔여 {remaining:,.1f} / {quota:,.0f} 크레딧")
+
     def _pick_capture_folder(self):
         """캡처 저장 폴더 선택 다이얼로그"""
         start = self._capture_folder_edit.text() or ""
@@ -1260,6 +1352,9 @@ class SettingsDialog(QDialog):
         )
         self._ask_ai_hotkey.set_value(
             self._settings.get(self.KEY_ASK_AI_HOTKEY, "alt+`")
+        )
+        self._stt_hotkey.set_value(
+            self._settings.get(self.KEY_STT_HOTKEY, "alt+r")
         )
         self._capture_folder_edit.setText(
             self._settings.get(self.KEY_CAPTURE_FOLDER, "")
@@ -1538,6 +1633,20 @@ class SettingsDialog(QDialog):
         saved_ocr = self._settings.get(self.KEY_OCR_MODEL_GATEWAY, "")
         if saved_ocr:
             self._ocr_model_combo.setCurrentText(saved_ocr)
+        self._init_stt_model_slot()
+
+    def _gemini_only(self, candidates: list[str]) -> list[str]:
+        """Gemini 계열만 남긴다 — STT 모델 콤보 전용 필터(2026-08-02 실측 근거는 위 참고)."""
+        from pasteflow.ocr_engine import family_of
+        return [m for m in candidates if family_of(m) == "Gemini"]
+
+    def _init_stt_model_slot(self):
+        """STT 모델 콤보를 캐시(Gemini만)로 채우고 저장된 모델명을 복원한다."""
+        cached = self._gemini_only(self._cached_models())
+        self._fill_model_combo(self._stt_model_combo, cached)
+        saved_stt = self._settings.get(self.KEY_STT_MODEL_GATEWAY, "")
+        if saved_stt:
+            self._stt_model_combo.setCurrentText(saved_stt)
 
     def _add_group_header(self, combo: QComboBox, text: str):
         """선택 불가능한 계열 헤더 행을 추가한다 (예: "Gemini (6)").
@@ -1646,6 +1755,24 @@ class SettingsDialog(QDialog):
         finally:
             combo.setUpdatesEnabled(True)
 
+    def _refill_stt_model_slots(self, candidates: list[str]):
+        """새로고침으로 받은 모델 목록을 Gemini로 필터링해 STT 모델 콤보에 반영한다."""
+        combo = self._stt_model_combo
+        current = combo.currentText()
+        gemini_candidates = self._gemini_only(candidates)
+        combo.setUpdatesEnabled(False)
+        try:
+            self._fill_model_combo(combo, gemini_candidates)
+            if current:
+                idx = combo.findText(current)
+                combo.setCurrentIndex(idx) if idx >= 0 else combo.setCurrentText(current)
+            le = combo.lineEdit()
+            if le is not None:
+                le.deselect()
+                le.setCursorPosition(0)
+        finally:
+            combo.setUpdatesEnabled(True)
+
     def _set_status(self, message: str, ok: bool | None = None):
         """모델 새로고침(↻)이 쓰는 상태 줄. ok=None이면 중립 색.
 
@@ -1724,6 +1851,7 @@ class SettingsDialog(QDialog):
         import json
         self._settings[self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY] = json.dumps(unique)
         self._refill_model_slots(unique)
+        self._refill_stt_model_slots(unique)
 
         # ↻는 '어떤 모델이 있는지'만 안다. '되는지'는 연결 테스트가 실호출로 답한다.
         self._set_status(
@@ -1745,6 +1873,7 @@ class SettingsDialog(QDialog):
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
             self.KEY_RECORD_GIF_HOTKEY: self._record_gif_hotkey.value() or "ctrl+shift+g",
             self.KEY_ASK_AI_HOTKEY: self._ask_ai_hotkey.value() or "alt+`",
+            self.KEY_STT_HOTKEY: self._stt_hotkey.value() or "alt+r",
             self.KEY_CAPTURE_FOLDER: self._capture_folder_edit.text(),
             # OCR은 별도 엔진 선택 없이 항상 AI(Gemini/Mindlogic) API로 처리 → kind 고정.
             self.KEY_OCR_ENGINE: "gemini",
@@ -1757,6 +1886,7 @@ class SettingsDialog(QDialog):
         new_settings[self.KEY_OCR_GEMINI_API_KEY_GATEWAY] = self._gateway_key_edit.text()
         new_settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
         new_settings[self.KEY_OCR_MODEL_GATEWAY] = self._ocr_model_combo.currentText()
+        new_settings[self.KEY_STT_MODEL_GATEWAY] = self._stt_model_combo.currentText()
 
         # 모델 캐시(↻로 갱신된 값)는 로드값을 그대로 실어 보낸다 — 안 보내면 사라진다.
         cache_key = self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY
