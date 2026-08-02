@@ -619,6 +619,7 @@ class SettingsDialog(QDialog):
     KEY_RECORD_GIF_HOTKEY = "hotkey_record_gif"
     KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
     KEY_STT_HOTKEY = "hotkey_stt"
+    KEY_STT_MIC_DEVICE = "stt_mic_device"  # 빈 문자열=시스템 기본, 아니면 특정 장치 이름
     # AI 팔레트 타겟 — 자유질문창(Alt+`)의 질문을 보낼 목적지 목록(JSON list).
     # 데이터 모양·기본값·URL 빌더는 pasteflow/ai_palette.py가 소유(main도 이걸 공유).
     KEY_AI_PALETTE_SITES = "ai_palette_sites"
@@ -1108,6 +1109,26 @@ class SettingsDialog(QDialog):
         self._stt_model_combo.view().setItemDelegate(_ModelIndentDelegate(self._stt_model_combo))
         ai_form.addRow(self._stt_model_label, self._stt_model_combo)
 
+        # 마이크 — 시스템 기본 입력 장치 또는 특정 장치를 지정(2026-08-02 사용자 요청).
+        # 목록은 MME 호스트 API로 한정(중복 표기 방지 — stt_engine.list_input_devices 참고).
+        self._mic_combo = QComboBox()
+        self._mic_combo.setStyleSheet(_combo_style)
+        self._mic_combo.setToolTip(
+            "음성 입력에 쓸 마이크. '시스템 기본'을 고르면 Windows 설정의 기본 녹음\n"
+            "장치를 그대로 따라가고, 특정 장치를 고르면 그 장치가 없어질 때까지 고정됩니다.\n"
+            "저장된 장치를 찾을 수 없으면(USB 마이크 분리 등) 자동으로 시스템 기본으로 대체됩니다."
+        )
+        self._refresh_mic_btn = QPushButton("새로고침")
+        self._refresh_mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._refresh_mic_btn.setToolTip("방금 연결한 마이크가 안 보이면 눌러서 목록을 다시 불러오세요")
+        self._refresh_mic_btn.clicked.connect(self._reload_mic_combo)
+        mic_row = QHBoxLayout()
+        mic_row.setContentsMargins(0, 0, 0, 0)
+        mic_row.setSpacing(4)
+        mic_row.addWidget(self._mic_combo, 1)
+        mic_row.addWidget(self._refresh_mic_btn)
+        ai_form.addRow(QLabel("•  마이크:"), mic_row)
+
         ai_form.addRow(_ai_sep())  # STT 모델 ↔ 크레딧 구분
 
         # 크레딧 확인 — Mindlogic 게이트웨이 전용 엔드포인트(GET /credits/). 구글 직결 등
@@ -1334,6 +1355,28 @@ class SettingsDialog(QDialog):
         }[slot]
         self._set_probe_status(label, status, detail)
 
+    def _fill_mic_combo(self, selected: str):
+        """마이크 콤보를 채운다 — 첫 항목은 항상 '시스템 기본'(값 ""), 나머지는 실제 장치명."""
+        from pasteflow.stt_engine import list_input_devices, default_input_device_name
+
+        self._mic_combo.clear()
+        default_name = default_input_device_name()
+        default_label = f"시스템 기본 (현재: {default_name})" if default_name else "시스템 기본"
+        self._mic_combo.addItem(default_label, "")
+        try:
+            devices = list_input_devices()
+        except Exception:
+            devices = []
+        for name in devices:
+            self._mic_combo.addItem(name, name)
+        idx = self._mic_combo.findData(selected)
+        self._mic_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+    def _reload_mic_combo(self):
+        """새로고침 버튼 — 방금 꽂은 마이크를 반영. 현재 선택은 보존한다."""
+        current = self._mic_combo.currentData() or ""
+        self._fill_mic_combo(current)
+
     def _on_check_credits(self):
         """크레딧 확인 버튼 — 게이트웨이 잔액을 실호출로 조회한다(워커 스레드)."""
         api_key, base_url = self._creds()
@@ -1407,6 +1450,7 @@ class SettingsDialog(QDialog):
         self._stt_hotkey.set_value(
             self._settings.get(self.KEY_STT_HOTKEY, "ctrl+win")
         )
+        self._fill_mic_combo(self._settings.get(self.KEY_STT_MIC_DEVICE, ""))
         self._capture_folder_edit.setText(
             self._settings.get(self.KEY_CAPTURE_FOLDER, "")
         )
@@ -1950,6 +1994,7 @@ class SettingsDialog(QDialog):
         new_settings[self.KEY_OCR_GEMINI_BASE_URL] = self._base_url_edit.text()
         new_settings[self.KEY_OCR_MODEL_GATEWAY] = self._ocr_model_combo.currentText()
         new_settings[self.KEY_STT_MODEL_GATEWAY] = self._stt_model_combo.currentText()
+        new_settings[self.KEY_STT_MIC_DEVICE] = self._mic_combo.currentData() or ""
 
         # 모델 캐시(↻로 갱신된 값)는 로드값을 그대로 실어 보낸다 — 안 보내면 사라진다.
         cache_key = self.KEY_OCR_GEMINI_MODEL_CACHE_GATEWAY

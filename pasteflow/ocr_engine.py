@@ -44,14 +44,25 @@ _BROWSER_USER_AGENT = (
 def get_credit_balance(api_key: str, base_url: str) -> tuple[float, float]:
     """게이트웨이 크레딧 잔액 조회 — GET {base_url}/credits/ (Mindlogic 게이트웨이 전용).
 
-    OpenAI SDK가 감싸지 않는 raw REST 엔드포인트라 stdlib `urllib`으로 직접 GET한다
-    (새 외부 의존성 0). 응답 스키마는 `{"total": {"remaining": ..., "quota": ...}}`
-    (2026-08-02 jbnu-gateway 스킬 `credits.py`로 실측). base_url이 구글 AI Studio 등
-    다른 API를 가리키면 이 경로 자체가 없어 실패한다 — 호출자가 예외를 잡아 안내해야 한다.
+    OpenAI SDK가 감싸지 않는 raw REST 엔드포인트라 stdlib `urllib`으로 직접 GET한다.
+    응답 스키마는 `{"total": {"remaining": ..., "quota": ...}}`(2026-08-02 jbnu-gateway
+    스킬 `credits.py`로 실측). base_url이 구글 AI Studio 등 다른 API를 가리키면 이
+    경로 자체가 없어 실패한다 — 호출자가 예외를 잡아 안내해야 한다.
+
+    ⚠ **`certifi`의 CA 번들을 명시해야 한다** — `urllib`의 기본 SSL 컨텍스트(OpenSSL
+    기본 신뢰 저장소)는 사용자의 실제 게이트웨이(`factchat.mindlogic-kr-api.com`)
+    인증서 체인을 신뢰하지 못해 `CERTIFICATE_VERIFY_FAILED`로 실패했다(2026-08-02
+    사용자 리포트로 발견 — DB에 저장된 실제 크리덴셜로 재현). 반면 실제 OCR/STT가 쓰는
+    `openai` SDK(`httpx` 기반)는 기본으로 `certifi` 번들을 써서 같은 서버에 문제없이
+    접속됐다 — "크레딧 확인만 안 되고 OCR/STT는 되는" 비대칭의 원인. `httpx`와 동일하게
+    `certifi.where()`로 신뢰 저장소를 맞춰야 한다.
     """
     import json
+    import ssl
     import urllib.error
     import urllib.request
+
+    import certifi
 
     url = _normalize_base_url(base_url) + "/credits/"
     req = urllib.request.Request(
@@ -59,8 +70,9 @@ def get_credit_balance(api_key: str, base_url: str) -> tuple[float, float]:
         headers={"Authorization": f"Bearer {api_key}", "User-Agent": _BROWSER_USER_AGENT},
         method="GET",
     )
+    ctx = ssl.create_default_context(cafile=certifi.where())
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"HTTP {e.code} {e.reason}") from e

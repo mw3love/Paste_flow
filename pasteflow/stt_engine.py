@@ -25,6 +25,41 @@ SAMPLE_RATE = 16000
 MAX_SECONDS = 30  # 무한 녹음 방지 — 토큰 비용·응답 지연 억제. 도달 시 호출자가 stop()해야 함.
 
 
+def list_input_devices() -> list[str]:
+    """마이크 입력 장치 이름 목록 — MME 호스트 API로 한정한다.
+
+    PortAudio는 같은 물리 마이크를 MME/DirectSound/WASAPI/WDM-KS마다 따로 나열해,
+    필터링 없이 보여주면 같은 이름이 3~4번 중복된다(2026-08-02 실측: 이 PC에서 11개
+    입력 장치 중 실제 물리 장치는 4~5개뿐). 시스템 기본 입력 장치도 보통 MME 쪽이라
+    (`sd.default.device`가 가리키는 host API) 이 목록이 실제 녹음에 쓰이는 장치와 맞는다.
+    """
+    try:
+        mme_index = next(
+            i for i, api in enumerate(sd.query_hostapis()) if api["name"] == "MME"
+        )
+    except StopIteration:
+        mme_index = None
+    names = []
+    for d in sd.query_devices():
+        if d["max_input_channels"] <= 0:
+            continue
+        if mme_index is not None and d["hostapi"] != mme_index:
+            continue
+        names.append(d["name"])
+    return names
+
+
+def default_input_device_name() -> str:
+    """시스템 기본 입력 장치 이름 — 설정창에 "(시스템 기본 · 현재: X)"로 보여주기 위함."""
+    try:
+        idx = sd.default.device[0]
+        if idx is None or idx < 0:
+            return ""
+        return str(sd.query_devices(idx)["name"])
+    except Exception:
+        return ""
+
+
 class Recorder:
     """푸시투토크 녹음 — start()로 시작, stop()으로 종료하고 wav bytes를 받는다.
 
@@ -41,12 +76,20 @@ class Recorder:
         # float 읽기/쓰기라 GIL 하에서 원자적이므로 락 없이 공유해도 안전(UI 미터용, 정밀도
         # 불필요). 녹음 중 이퀄라이저 표시(ui/stt_indicator.py)가 이 값을 폴링한다.
         self._level: float = 0.0
+        self.used_device: str = ""  # 마지막 start()에서 실제로 연 장치(폴백 여부 확인용)
 
     def is_recording(self) -> bool:
         return self._stream is not None
 
-    def start(self) -> None:
-        """이미 녹음 중이면 무시(중복 keydown 방어 — 키 반복 입력 등)."""
+    def start(self, device: str = "") -> None:
+        """이미 녹음 중이면 무시(중복 keydown 방어 — 키 반복 입력 등).
+
+        device: 설정에서 고른 마이크 이름(`list_input_devices()`가 준 것 중 하나).
+        빈 문자열이면 시스템 기본 장치. 저장된 장치가 뽑혔거나(usb 마이크 분리 등)
+        이름이 안 맞으면 시스템 기본으로 자동 폴백한다(조용히 — 사용자가 매번
+        "장치를 찾을 수 없습니다"를 보게 하지 않기 위함, main.py가 폴백 여부를
+        알아야 하면 `used_device`로 확인).
+        """
         if self._stream is not None:
             return
         self._frames = []
@@ -55,13 +98,20 @@ class Recorder:
         # 마지막 발화가 stop() 시점에 아직 버퍼 안에 있어 잘리는 원인 중 하나였다
         # (2026-08-02 사용자 리포트: 말한 직후 떼면 끝이 잘림). main.py의 keyup 여유시간
         # (_STT_TAIL_PAD_MS)과 함께 적용한다.
-        stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="int16",
-            latency="low",
-            callback=self._callback,
-        )
+        kwargs = dict(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
+                      latency="low", callback=self._callback)
+        self.used_device = device
+        try:
+            if device:
+                stream = sd.InputStream(device=device, **kwargs)
+            else:
+                stream = sd.InputStream(**kwargs)
+        except Exception:
+            if not device:
+                raise
+            # 저장된 장치를 못 열면(분리됨 등) 시스템 기본으로 폴백
+            self.used_device = ""
+            stream = sd.InputStream(**kwargs)
         stream.start()
         self._stream = stream
 

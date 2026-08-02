@@ -1693,11 +1693,16 @@ class PasteFlowApp:
         if self._stt_recorder is None:
             from pasteflow.stt_engine import Recorder
             self._stt_recorder = Recorder()
+        mic_device = self.db.get_setting("stt_mic_device", "")
         try:
-            self._stt_recorder.start()
+            self._stt_recorder.start(device=mic_device)
         except Exception as e:
             ToastNotification(f"마이크를 열 수 없습니다 — {e}", icon="🎤")
             return
+        if mic_device and self._stt_recorder.used_device != mic_device:
+            # 설정에 저장된 장치를 못 찾아(분리 등) 시스템 기본으로 폴백됨 — 조용히
+            # 넘기지 않고 알린다(설정과 실제 동작이 어긋난 채 계속 쓰는 걸 막기 위함).
+            ToastNotification(f"'{mic_device}' 마이크를 찾을 수 없어 기본 마이크로 녹음합니다", icon="🎤")
 
         # 시작 알림음 — winsound(stdlib, Windows 전용)로 새 의존성 없이 비동기 재생.
         try:
@@ -2461,6 +2466,7 @@ class PasteFlowApp:
             "hotkey_record_gif": self.db.get_setting("hotkey_record_gif", "ctrl+shift+g"),
             "hotkey_stt": self.db.get_setting("hotkey_stt", "ctrl+win"),
             "stt_model_gateway": self.db.get_setting("stt_model_gateway", ""),
+            "stt_mic_device": self.db.get_setting("stt_mic_device", ""),
             "capture_save_folder": self.db.get_setting("capture_save_folder", "") or _default_capture_folder(),
             "ocr_language": self.db.get_setting("ocr_language", "ko"),
             "ocr_engine": self.db.get_setting("ocr_engine", "gemini"),  # OCR은 항상 AI API(엔진 선택 제거)

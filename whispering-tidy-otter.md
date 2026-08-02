@@ -190,6 +190,28 @@ pill+호버+클릭시작은 항상 켜진 오버레이라 설계 부담이 커 �
 - **기본값 변경**: `hotkey_stt` 기본값을 `"alt+r"` → `"ctrl+win"`으로 전환(신규 설정 기준 —
   이미 DB에 값이 저장된 경우 기존 값 유지, 설정창에서 재설정 가능).
 
+## 후속: 크레딧 확인 SSL 실패 + 마이크 선택 (2026-08-02)
+
+**버그: 크레딧 확인이 실패함.** 사용자의 실제 PasteFlow DB(`%LOCALAPPDATA%\PasteFlow\
+pasteflow.db`)를 직접 열어 저장된 크리덴셜(DPAPI 복호화)로 재현 — `get_credit_balance`가
+`CERTIFICATE_VERIFY_FAILED`로 실패했다. 원인: `urllib`의 기본 SSL 컨텍스트(OpenSSL 기본
+신뢰 저장소)가 사용자의 실제 게이트웨이(`factchat.mindlogic-kr-api.com` — jbnu-gateway
+스킬이 쓰는 `factchat-cloud.mindlogic.ai`와 다른 도메인) 인증서 체인을 신뢰하지 못함.
+같은 크리덴셜로 `openai` SDK(`httpx`, 기본으로 `certifi` 번들 사용)는 정상 접속 — 그래서
+"OCR/STT는 되는데 크레딧 확인만 안 되는" 비대칭이 생겼다. `get_credit_balance`에
+`ssl.create_default_context(cafile=certifi.where())`를 명시해 해결, 실제 DB 크리덴셜로
+재현 후 수정 확인(`✓ 잔여 4,913.2 / 5,000 크레딧`). `certifi`는 openai의 전이 의존성이라
+이미 설치돼 있었지만 직접 import하므로 `requirements.txt`에 명시 추가.
+
+**마이크 선택**: 기본 선택된 시스템 마이크를 쓴다는 걸 확인시켜준 뒤 "선택 UI가 있으면
+좋겠다"는 요청. `stt_engine.py`에 `list_input_devices()`(MME 호스트 API로 한정 —
+PortAudio가 같은 물리 장치를 호스트 API마다 중복 나열해 필터링 없인 이 PC에서 11개 중
+같은 이름이 3~4번 겹침)·`default_input_device_name()` 추가, `Recorder.start(device=...)`가
+지정 장치를 열되 못 찾으면(USB 마이크 분리 등) 조용히 시스템 기본으로 폴백(`used_device`로
+main.py가 폴백 여부 확인해 토스트 안내). 설정창 AI 탭에 "마이크" 콤보+새로고침 버튼 추가
+(신규 설정 키 `stt_mic_device`, 빈 값=시스템 기본). 실장치 지정·존재하지 않는 장치명 폴백
+둘 다 실제 sounddevice 호출로 확인.
+
 ## 후속 버그: Alt가 메뉴바 포커스를 훔쳐감 (2026-08-02, 사용자 실사용 중 발견)
 
 메모장에서 `Alt+R`을 쓰면 R을 통째로 suppress해 앱이 "Alt만 눌렸다 떼짐"을 본다 —
