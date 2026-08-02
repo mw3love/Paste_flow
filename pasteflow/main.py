@@ -868,6 +868,8 @@ class PasteFlowApp:
         # 임포트 비용을 피함), 단축키 keydown~keyup 사이 재사용.
         self._stt_recorder = None
         self._stt_auto_stop_timer = None  # 30초 상한 타이머 — keyup으로 정상 종료 시 취소
+        self._stt_indicator = None        # 녹음 중 이퀄라이저 pill (ui/stt_indicator.py)
+        self._stt_level_timer = None      # 위 pill에 음량을 흘려주는 폴링 타이머
 
         # DB에서 설정 로드 및 적용
         self._apply_settings_from_db()
@@ -1675,8 +1677,16 @@ class PasteFlowApp:
         model = self.db.get_setting("stt_model_gateway", "") or STT_FALLBACK_DEFAULT
         return (api_key, base_url, model)
 
+    # 녹음 중 이퀄라이저 pill의 음량 폴링 간격 — 부드러워 보이면서도 CPU 부담 없는 수준.
+    _STT_LEVEL_POLL_MS = 50
+
     def _on_stt_start(self):
-        """음성 입력 단축키 keydown — 마이크 녹음 시작."""
+        """음성 입력 단축키 keydown — 마이크 녹음 시작 + 시작 알림음 + 이퀄라이저 표시.
+
+        Wispr Flow와 나란히 써본 사용자 피드백(2026-08-02)으로 추가 — 텍스트만 있던
+        진행 칩 대신, 녹음 중에만 뜨는 음량 반응 pill(`ui/stt_indicator.py`)을 커서
+        옆에 띄운다. pill을 클릭하면 단축키를 뗀 것과 동일하게 녹음이 끝난다.
+        """
         from PyQt6.QtGui import QCursor
         from pasteflow.ui.toast import ToastNotification
 
@@ -1689,7 +1699,23 @@ class PasteFlowApp:
             ToastNotification(f"마이크를 열 수 없습니다 — {e}", icon="🎤")
             return
 
-        self._start_cursor_progress("녹음 중…", "🎤", QCursor.pos())
+        # 시작 알림음 — winsound(stdlib, Windows 전용)로 새 의존성 없이 비동기 재생.
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except Exception:
+            pass
+
+        from pasteflow.ui.stt_indicator import SttIndicator
+        indicator = SttIndicator(QCursor.pos())
+        indicator.stop_clicked.connect(self._on_stt_stop)  # 클릭 = 단축키 뗀 것과 동일
+        self._stt_indicator = indicator
+
+        level_timer = QTimer()
+        level_timer.setInterval(self._STT_LEVEL_POLL_MS)
+        level_timer.timeout.connect(self._tick_stt_level)
+        level_timer.start()
+        self._stt_level_timer = level_timer
 
         # 30초 상한 — 무한 녹음 방지(토큰 비용·응답 지연 억제). keyup으로 정상 종료되면
         # _on_stt_stop이 이 타이머를 취소하므로, 여기까지 살아 있으면 자동 종료+전송.
@@ -1699,6 +1725,23 @@ class PasteFlowApp:
         timer.start(30_000)
         self._stt_auto_stop_timer = timer
 
+    def _tick_stt_level(self):
+        """`_STT_LEVEL_POLL_MS`마다 Recorder의 최근 RMS를 읽어 이퀄라이저 pill에 반영."""
+        if self._stt_recorder is None or self._stt_indicator is None:
+            return
+        self._stt_indicator.set_level(self._stt_recorder.get_level())
+
+    def _stop_stt_indicator(self):
+        """이퀄라이저 pill·음량 폴링 타이머 정리(idempotent) — keyup·클릭·30초 상한 공통 경로."""
+        timer = self._stt_level_timer
+        if timer is not None:
+            timer.stop()
+            self._stt_level_timer = None
+        indicator = self._stt_indicator
+        if indicator is not None:
+            indicator.dismiss()
+            self._stt_indicator = None
+
     # keyup 즉시 녹음을 끊으면 발화 끝자락이 잘린다(오디오 장치 버퍼링 지연 + 마지막
     # 음절을 발음하는 동안 키를 떼는 사람의 반응 시간) — 2026-08-02 사용자 리포트:
     # "말한 뒤 바로 떼면 뒤가 짤림, 2초쯤 더 눌러야 함". keyup 시점에 곧장 멈추지 않고
@@ -1706,11 +1749,12 @@ class PasteFlowApp:
     _STT_TAIL_PAD_MS = 400
 
     def _on_stt_stop(self):
-        """음성 입력 단축키 keyup(또는 30초 상한 도달) — 여유시간 뒤 녹음을 마무리한다."""
+        """음성 입력 단축키 keyup(또는 pill 클릭·30초 상한 도달) — 여유시간 뒤 녹음을 마무리한다."""
         timer = self._stt_auto_stop_timer
         if timer is not None:
             timer.stop()
             self._stt_auto_stop_timer = None
+        self._stop_stt_indicator()  # 이퀄라이저는 keyup 즉시 사라짐(꼬리 여유는 백그라운드에서만 계속)
 
         if self._stt_recorder is None or not self._stt_recorder.is_recording():
             return

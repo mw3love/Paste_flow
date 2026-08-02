@@ -37,6 +37,10 @@ class Recorder:
         self._frames: list[np.ndarray] = []
         self._sample_count = 0
         self._lock = threading.Lock()
+        # 오디오 콜백 스레드가 쓰고 UI 스레드가 폴링해 읽는 최근 RMS 음량(0.0~1.0) — 단순
+        # float 읽기/쓰기라 GIL 하에서 원자적이므로 락 없이 공유해도 안전(UI 미터용, 정밀도
+        # 불필요). 녹음 중 이퀄라이저 표시(ui/stt_indicator.py)가 이 값을 폴링한다.
+        self._level: float = 0.0
 
     def is_recording(self) -> bool:
         return self._stream is not None
@@ -62,11 +66,18 @@ class Recorder:
         self._stream = stream
 
     def _callback(self, indata, frames, time_info, status) -> None:
+        # RMS는 락 밖에서 계산(순수 계산, 공유 상태 미접근) — int16 범위(32768)로 정규화.
+        rms = float(np.sqrt(np.mean(indata.astype(np.float64) ** 2))) / 32768.0
+        self._level = rms
         with self._lock:
             if self._sample_count >= MAX_SECONDS * SAMPLE_RATE:
                 return  # 상한 도달 — 더 안 쌓음(호출자가 stop 호출할 때까지 무음 버림)
             self._frames.append(indata.copy())
             self._sample_count += frames
+
+    def get_level(self) -> float:
+        """가장 최근 콜백의 RMS 음량(0.0~1.0) — UI 이퀄라이저 폴링용."""
+        return self._level
 
     def stop(self) -> bytes:
         """녹음 정지 후 wav bytes 반환. 녹음 중이 아니었거나 무음이면 빈 bytes."""
