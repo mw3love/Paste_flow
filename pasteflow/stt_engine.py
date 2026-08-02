@@ -152,12 +152,27 @@ class Recorder:
 
 
 def _stt_prompt(language: str) -> str:
+    """상황별(도메인 용어 힌트 등) 튜닝은 아직 없음 — 아래 두 지시만 범용적으로 유효하다고
+    판단해 넣었다(2026-08-02, 사용자 질문에 대한 답):
+    1) 간투사·말더듬·자기수정("음", "어", "그... 아니") 제거 — Wispr Flow 등 상용
+       받아쓰기 도구가 공통으로 하는 처리. "요약·의역 금지"와는 상충하지 않는다(의미
+       내용은 그대로 두고 잡음만 걷어내는 것).
+    2) 코드스위칭(한국어 발화 중 섞인 영어 단어) 번역·정규화 금지 — 들린 언어 그대로.
+    """
     if language.startswith("ko"):
         return (
             "이 음성을 정확히 한국어 텍스트로 받아써줘. 문장부호는 자연스럽게 넣되 "
-            "내용을 요약하거나 의역하지 말고, 다른 설명 없이 인식된 텍스트만 출력해."
+            "내용을 요약하거나 의역하지 말고, 다른 설명 없이 인식된 텍스트만 출력해. "
+            "단, '음', '어', '그...' 같은 간투사와 말더듬·자기수정(예: '내일... 아니 "
+            "모레')은 실제로 의도한 말만 남기고 자연스럽게 정리해. 발화 중 영어 단어가 "
+            "섞이면 번역하지 말고 들린 그대로(영어면 영어로) 받아써."
         )
-    return "Transcribe this audio exactly as spoken. Output only the transcribed text with no explanation."
+    return (
+        "Transcribe this audio exactly as spoken. Clean up filler words (um, uh) and "
+        "false starts/self-corrections, keeping only what the speaker actually intended "
+        "to say. Do not translate any words — transcribe in the language actually spoken. "
+        "Output only the transcribed text with no explanation."
+    )
 
 
 def transcribe(wav_bytes: bytes, api_key: str, base_url: str, model: str, language: str = "ko") -> str:
