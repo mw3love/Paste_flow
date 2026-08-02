@@ -931,7 +931,7 @@ class PasteFlowApp:
         record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
         self.interceptor.set_record_gif_hotkey(record_hotkey)
 
-        stt_hotkey = self.db.get_setting("hotkey_stt", "alt+r")
+        stt_hotkey = self.db.get_setting("hotkey_stt", "ctrl+win")
         self.interceptor.set_stt_hotkey(stt_hotkey)
 
 
@@ -2459,7 +2459,7 @@ class PasteFlowApp:
             "hotkey_ask_ai": self.db.get_setting("hotkey_ask_ai", "alt+`"),
             "ai_palette_sites": self.db.get_setting("ai_palette_sites", ""),
             "hotkey_record_gif": self.db.get_setting("hotkey_record_gif", "ctrl+shift+g"),
-            "hotkey_stt": self.db.get_setting("hotkey_stt", "alt+r"),
+            "hotkey_stt": self.db.get_setting("hotkey_stt", "ctrl+win"),
             "stt_model_gateway": self.db.get_setting("stt_model_gateway", ""),
             "capture_save_folder": self.db.get_setting("capture_save_folder", "") or _default_capture_folder(),
             "ocr_language": self.db.get_setting("ocr_language", "ko"),
@@ -2501,7 +2501,7 @@ class PasteFlowApp:
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         old_ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+`")
         old_record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
-        old_stt_hotkey = self.db.get_setting("hotkey_stt", "alt+r")
+        old_stt_hotkey = self.db.get_setting("hotkey_stt", "ctrl+win")
 
         from pasteflow.crypto import protect
         for key, value in new_settings.items():
@@ -2555,7 +2555,7 @@ class PasteFlowApp:
             self.interceptor.set_record_gif_hotkey(new_record_hotkey)
 
         # 음성 입력(STT) 단축키 재설정
-        new_stt_hotkey = new_settings.get("hotkey_stt", "alt+r")
+        new_stt_hotkey = new_settings.get("hotkey_stt", "ctrl+win")
         if old_stt_hotkey != new_stt_hotkey:
             self.interceptor.set_stt_hotkey(new_stt_hotkey)
 

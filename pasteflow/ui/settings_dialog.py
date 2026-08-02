@@ -429,10 +429,19 @@ def _bullet_checkbox_row(checkbox: QCheckBox) -> QWidget:
 class HotkeyEdit(QPushButton):
     """클릭 후 키 조합을 누르면 단축키를 캡처하는 위젯"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, allow_mod_only: bool = False):
+        """allow_mod_only=True면 Ctrl+Win처럼 일반키 없이 수식키만으로 된 조합도
+        캡처할 수 있다(음성 입력의 Wispr Flow 스타일 제스처, 2026-08-02). 다른
+        단축키(OCR·캡처 등)는 백엔드 파서가 수식키 전용 조합을 이해하지 못해
+        조합이 영구히 안 눌리는 상태로 저장될 수 있으므로 기본은 False로 막는다."""
         super().__init__(parent)
         self._value = ""
         self._listening = False
+        self._allow_mod_only = allow_mod_only
+        # 리스닝 중 눌린 순수 수식키 집합. keyPressEvent는 일반키가 눌리는 순간 확정하고,
+        # 일반키가 안 오고 수식키가 먼저 떼어지면(keyReleaseEvent) 지금까지 눌렸던
+        # 수식키 조합으로 확정한다(allow_mod_only일 때만).
+        self._held_mods: set = set()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clicked.connect(self._start_listening)
@@ -448,6 +457,7 @@ class HotkeyEdit(QPushButton):
 
     def _start_listening(self):
         self._listening = True
+        self._held_mods = set()
         self._update_display()
         self.grabKeyboard()
 
@@ -489,13 +499,17 @@ class HotkeyEdit(QPushButton):
 
         key = event.key()
 
-        # 순수 modifier 키는 무시하고 계속 대기
+        # 순수 modifier 키는 무시하고 계속 대기 — allow_mod_only면 나중에 keyReleaseEvent가
+        # 이 집합을 보고 "일반키 없이 수식키만" 조합을 확정한다.
         if key in (Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Shift, Qt.Key.Key_Meta):
+            if self._allow_mod_only:
+                self._held_mods.add(key)
             return
 
         # Escape → 취소
         if key == Qt.Key.Key_Escape:
             self._listening = False
+            self._held_mods = set()
             self.releaseKeyboard()
             self._update_display()
             return
@@ -508,6 +522,8 @@ class HotkeyEdit(QPushButton):
             parts.append("alt")
         if modifiers & Qt.KeyboardModifier.ShiftModifier:
             parts.append("shift")
+        if self._allow_mod_only and (modifiers & Qt.KeyboardModifier.MetaModifier):
+            parts.append("win")
 
         key_name = self._qt_key_to_name(key)
         if key_name:
@@ -515,12 +531,43 @@ class HotkeyEdit(QPushButton):
             self._value = "+".join(parts)
 
         self._listening = False
+        self._held_mods = set()
         self.releaseKeyboard()
         self._update_display()
+
+    def keyReleaseEvent(self, event):
+        """`allow_mod_only`일 때만 — 일반키 없이 수식키를 뗀 순간 그 조합으로 확정한다
+        (Ctrl+Win처럼 눌렀던 수식키 중 아무거나 먼저 떼면 완성, Wispr Flow와 동일 제스처).
+        수식키 하나만 눌렀다 떼면(조합이 안 됨) 계속 대기한다."""
+        if not self._listening or not self._allow_mod_only:
+            super().keyReleaseEvent(event)
+            return
+
+        key = event.key()
+        if key not in (Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Shift, Qt.Key.Key_Meta):
+            super().keyReleaseEvent(event)
+            return
+
+        if len(self._held_mods) >= 2:
+            parts = []
+            if Qt.Key.Key_Control in self._held_mods:
+                parts.append("ctrl")
+            if Qt.Key.Key_Alt in self._held_mods:
+                parts.append("alt")
+            if Qt.Key.Key_Shift in self._held_mods:
+                parts.append("shift")
+            if Qt.Key.Key_Meta in self._held_mods:
+                parts.append("win")
+            self._value = "+".join(parts)
+            self._listening = False
+            self._held_mods = set()
+            self.releaseKeyboard()
+            self._update_display()
 
     def focusOutEvent(self, event):
         if self._listening:
             self._listening = False
+            self._held_mods = set()
             self.releaseKeyboard()
             self._update_display()
         super().focusOutEvent(event)
@@ -843,10 +890,14 @@ class SettingsDialog(QDialog):
         hotkey_form.addRow(_hk_sep())
 
         # ⑤ 음성 입력(STT) — 누르고 있는 동안 녹음(푸시투토크), 떼면 인식 후 자동 붙여넣기.
-        self._stt_hotkey = HotkeyEdit()
+        # allow_mod_only=True — Ctrl+Win처럼 일반키 없이 수식키만으로 된 조합도 캡처
+        # 가능(Wispr Flow와 동일 제스처로 비교하려는 사용자 요청, 2026-08-02). 기본값
+        # 자체가 ctrl+win(main.py)이라 여기서도 그 조합을 재캡처할 수 있어야 한다.
+        self._stt_hotkey = HotkeyEdit(allow_mod_only=True)
         self._stt_hotkey.setToolTip(
             "누르고 있는 동안 마이크로 녹음하고, 떼는 순간 음성을 인식해 텍스트로\n"
             "변환한 뒤 포커스된 입력창에 자동으로 붙여넣습니다(최대 30초).\n"
+            "Ctrl+Win처럼 일반키 없이 수식키만으로 된 조합도 가능합니다(Wispr Flow와 동일 제스처).\n"
             "게이트웨이 오디오 입력은 Gemini 계열 모델만 지원합니다 — 아래 STT 모델에서 선택하세요."
         )
         hotkey_form.addRow("•  음성 입력(STT):", self._stt_hotkey)
@@ -1354,7 +1405,7 @@ class SettingsDialog(QDialog):
             self._settings.get(self.KEY_ASK_AI_HOTKEY, "alt+`")
         )
         self._stt_hotkey.set_value(
-            self._settings.get(self.KEY_STT_HOTKEY, "alt+r")
+            self._settings.get(self.KEY_STT_HOTKEY, "ctrl+win")
         )
         self._capture_folder_edit.setText(
             self._settings.get(self.KEY_CAPTURE_FOLDER, "")
@@ -1885,7 +1936,7 @@ class SettingsDialog(QDialog):
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
             self.KEY_RECORD_GIF_HOTKEY: self._record_gif_hotkey.value() or "ctrl+shift+g",
             self.KEY_ASK_AI_HOTKEY: self._ask_ai_hotkey.value() or "alt+`",
-            self.KEY_STT_HOTKEY: self._stt_hotkey.value() or "alt+r",
+            self.KEY_STT_HOTKEY: self._stt_hotkey.value() or "ctrl+win",
             self.KEY_CAPTURE_FOLDER: self._capture_folder_edit.text(),
             # OCR은 별도 엔진 선택 없이 항상 AI(Gemini/Mindlogic) API로 처리 → kind 고정.
             self.KEY_OCR_ENGINE: "gemini",

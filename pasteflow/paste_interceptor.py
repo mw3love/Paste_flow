@@ -52,6 +52,8 @@ VK_LSHIFT = 0xA0
 VK_RSHIFT = 0xA1
 VK_LMENU = 0xA4
 VK_RMENU = 0xA5
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
 VK_MASK = 0xE8  # 미할당 가상 키 — Ctrl+Shift 조합을 더럽혀 입력기 전환 팝업 방지
 VK_RETURN = 0x0D
 LLKHF_INJECTED = 0x10  # KBDLLHOOKSTRUCT.flags 비트 — SendInput 등으로 주입된 키
@@ -344,7 +346,13 @@ class PasteInterceptor:
         self._stt_need_ctrl: bool = False
         self._stt_need_shift: bool = False
         self._stt_need_alt: bool = False
+        self._stt_need_win: bool = False
+        # 일반키 없이 수식키만으로 이뤄진 조합(예: Ctrl+Win, Wispr Flow와 동일한 제스처).
+        # 이 경우 "일반키의 keydown/keyup"으로 시작/종료를 못 잡으므로 필요한 수식키가
+        # 전부 눌렸는지를 직접 추적해 트리거한다(아래 _low_level_keyboard_proc).
+        self._stt_mod_only: bool = False
         self._stt_active: bool = False  # 키 반복(auto-repeat) keydown 무시 + 정확한 keyup 매칭용
+        self._mod_win: bool = False  # Win키 눌림 상태 — Alt(_mod_alt)와 동일하게 자체 추적
         # 콜백 참조 유지 (GC 방지)
         self._hook_proc = HOOKPROC(self._low_level_keyboard_proc)
 
@@ -467,17 +475,30 @@ class PasteInterceptor:
             self._ask_ai_vk = 0
 
     def set_stt_hotkey(self, hotkey_str: str):
-        """음성 입력(STT) 단축키 설정 — 누르고 있는 동안 녹음(푸시투토크), 떼면 인식+전송."""
+        """음성 입력(STT) 단축키 설정 — 누르고 있는 동안 녹음(푸시투토크), 떼면 인식+전송.
+
+        `ctrl+win`처럼 일반키 없이 수식키만으로 된 조합도 지원한다(Wispr Flow의
+        Ctrl+Win과 동일 제스처로 비교하려는 사용자 요청, 2026-08-02) — 이때는
+        `_stt_mod_only=True`로 표시해 훅이 "일반키의 keydown/keyup" 대신 "필요한
+        수식키가 전부 눌렸는가"로 시작/종료를 판정한다.
+        """
         parts = hotkey_str.lower().replace(" ", "").split("+")
         self._stt_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
         self._stt_need_shift = "shift" in parts
         self._stt_need_alt   = "alt" in parts
-        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        self._stt_need_win   = any(p in ("win", "windows", "meta", "super") for p in parts)
+        mod_tokens = ("ctrl", "control", "shift", "alt", "win", "windows", "meta", "super")
+        key_parts = [p for p in parts if p not in mod_tokens]
         if key_parts:
             key = key_parts[-1]
             self._stt_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+            self._stt_mod_only = False
         else:
             self._stt_vk = 0
+            self._stt_mod_only = any((
+                self._stt_need_ctrl, self._stt_need_shift,
+                self._stt_need_alt, self._stt_need_win,
+            ))
 
     def start(self):
         """저수준 키보드 훅 시작 (별도 스레드)"""
@@ -558,9 +579,11 @@ class PasteInterceptor:
                 kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
                 if kbd.vkCode in (VK_MENU, VK_LMENU, VK_RMENU):
                     self._mod_alt = False
+                if kbd.vkCode in (VK_LWIN, VK_RWIN):
+                    self._mod_win = False
                 # 음성 입력 푸시투토크 종료 — 시작시켰던 그 키의 물리 keyup에서만 정지
                 # (주입 keyup·다른 키의 keyup 무관, auto-repeat keydown과도 무관)
-                if (self._stt_active and kbd.vkCode == self._stt_vk
+                if (self._stt_active and not self._stt_mod_only and kbd.vkCode == self._stt_vk
                         and not (kbd.flags & LLKHF_INJECTED)):
                     self._stt_active = False
                     if self.on_stt_stop:
@@ -568,6 +591,23 @@ class PasteInterceptor:
                             self.on_stt_stop()
                         except Exception:
                             pass
+                # 수식키 전용 STT 조합(예: Ctrl+Win) — 필요한 수식키 중 하나라도 물리적으로
+                # 떼면 정지한다(어느 쪽을 먼저 떼든 동일하게 종료 — Wispr Flow와 같은 제스처).
+                if (self._stt_active and self._stt_mod_only
+                        and not (kbd.flags & LLKHF_INJECTED)):
+                    is_stt_mod = (
+                        (self._stt_need_ctrl and kbd.vkCode in (VK_CONTROL, VK_LCONTROL, VK_RCONTROL))
+                        or (self._stt_need_shift and kbd.vkCode in (VK_SHIFT, VK_LSHIFT, VK_RSHIFT))
+                        or (self._stt_need_alt and kbd.vkCode in (VK_MENU, VK_LMENU, VK_RMENU))
+                        or (self._stt_need_win and kbd.vkCode in (VK_LWIN, VK_RWIN))
+                    )
+                    if is_stt_mod:
+                        self._stt_active = False
+                        if self.on_stt_stop:
+                            try:
+                                self.on_stt_stop()
+                            except Exception:
+                                pass
                 if (kbd.vkCode in self._suppressed_vks
                         and not (kbd.flags & LLKHF_INJECTED)):
                     self._suppressed_vks.discard(kbd.vkCode)
@@ -586,10 +626,13 @@ class PasteInterceptor:
                 if vk_code in (VK_MENU, VK_LMENU, VK_RMENU):
                     self._mod_alt = True
                     self._mod_alt_ts = time.monotonic()
+                if vk_code in (VK_LWIN, VK_RWIN):
+                    self._mod_win = True
 
                 ctrl_pressed = bool(_user32.GetAsyncKeyState(VK_CONTROL) & 0x8000)
                 shift_pressed = bool(_user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
                 alt_pressed = self._mod_alt
+                win_pressed = self._mod_win
                 if alt_pressed and (time.monotonic() - self._mod_alt_ts) > self._MOD_ALT_STALE_S:
                     # 훅 자체 추적이 오래 True였는데 실제 물리 상태가 아니면(Alt+Tab 등으로
                     # keyup을 훅이 못 받은 예외) 물리 상태로 재보정한다 — 레이스는 수십ms 안에
@@ -597,6 +640,25 @@ class PasteInterceptor:
                     if not (_user32.GetAsyncKeyState(VK_MENU) & 0x8000):
                         self._mod_alt = False
                         alt_pressed = False
+
+                # 음성 입력(STT)이 수식키 전용 조합(예: Ctrl+Win)일 때 — 필요한 수식키가
+                # 전부 눌리면 시작한다. 이 키들은 suppress하지 않고 그대로 통과시킨다 —
+                # 둘 다 앱/셸에 그대로 보여야 "Win 단독 탭"으로 오인되지 않아 시작 메뉴가
+                # 안 뜬다(Alt+R처럼 일반키를 통째로 삼키는 게 아니라서 이 문제 자체가 없음).
+                if self._stt_mod_only and not self._stt_active:
+                    mods_ok = (
+                        (not self._stt_need_ctrl or ctrl_pressed)
+                        and (not self._stt_need_shift or shift_pressed)
+                        and (not self._stt_need_alt or alt_pressed)
+                        and (not self._stt_need_win or win_pressed)
+                    )
+                    if mods_ok:
+                        self._stt_active = True
+                        if self.on_stt_start:
+                            try:
+                                self.on_stt_start()
+                            except Exception:
+                                pass
 
                 if ctrl_pressed and shift_pressed and not alt_pressed:
                     now = time.monotonic()
