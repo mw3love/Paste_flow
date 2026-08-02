@@ -749,6 +749,15 @@ class PasteInterceptor:
                         and alt_pressed   == self._stt_need_alt):
                     if not self._stt_active:  # auto-repeat keydown은 무시 — 최초 눌림에만 시작
                         self._stt_active = True
+                        if self._stt_need_alt:
+                            # R(비수정키)을 통째로 suppress하면 앱은 'Alt만 눌렸다 떼짐'을
+                            # 본다 — Windows가 이를 메뉴바 포커스 진입으로 해석해(표준 동작),
+                            # 이후 우리가 주입하는 Ctrl+V가 메뉴에 먹혀 정작 입력창엔 아무것도
+                            # 안 들어간다(2026-08-02 사용자 리포트: "메모장에서 Alt키가 먹혀
+                            # 입력이 안 됨"). 미할당 키(VK_MASK)로 Alt 조합을 더럽혀 '벌거벗은
+                            # Alt' 해석을 막는다 — _send_clean_key의 Ctrl+Shift 마스킹과 동일 기법.
+                            _send_inputs([_make_key_input(VK_MASK),
+                                          _make_key_input(VK_MASK, KEYEVENTF_KEYUP)])
                         if self.on_stt_start:
                             try:
                                 self.on_stt_start()

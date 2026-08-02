@@ -47,10 +47,15 @@ class Recorder:
             return
         self._frames = []
         self._sample_count = 0
+        # latency="low" — 기본(high) 버퍼링은 PortAudio가 언더런 방지용으로 크게 잡아
+        # 마지막 발화가 stop() 시점에 아직 버퍼 안에 있어 잘리는 원인 중 하나였다
+        # (2026-08-02 사용자 리포트: 말한 직후 떼면 끝이 잘림). main.py의 keyup 여유시간
+        # (_STT_TAIL_PAD_MS)과 함께 적용한다.
         stream = sd.InputStream(
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype="int16",
+            latency="low",
             callback=self._callback,
         )
         stream.start()

@@ -1641,12 +1641,24 @@ class SettingsDialog(QDialog):
         return [m for m in candidates if family_of(m) == "Gemini"]
 
     def _init_stt_model_slot(self):
-        """STT 모델 콤보를 캐시(Gemini만)로 채우고 저장된 모델명을 복원한다."""
+        """STT 모델 콤보를 캐시(Gemini만)로 채우고 저장된 모델명을 복원한다.
+
+        저장값이 없는 첫 실행은 `STT_FALLBACK_DEFAULT`(gemini-3.1-flash-lite)를 우선
+        선택한다 — `_fill_model_combo`의 일반 폴백(`_FALLBACK_DEFAULT`=gemini-2.5-flash,
+        OCR 콤보와 공유)보다 STT는 지연시간이 더 중요해 별도로 오버라이드한다
+        (2026-08-02 실측: 동일 문장 인식에 flash-lite가 일관되게 더 빠름).
+        """
+        from pasteflow.ocr_engine import STT_FALLBACK_DEFAULT
+
         cached = self._gemini_only(self._cached_models())
         self._fill_model_combo(self._stt_model_combo, cached)
         saved_stt = self._settings.get(self.KEY_STT_MODEL_GATEWAY, "")
         if saved_stt:
             self._stt_model_combo.setCurrentText(saved_stt)
+        else:
+            idx = self._stt_model_combo.findText(STT_FALLBACK_DEFAULT)
+            if idx >= 0:
+                self._stt_model_combo.setCurrentIndex(idx)
 
     def _add_group_header(self, combo: QComboBox, text: str):
         """선택 불가능한 계열 헤더 행을 추가한다 (예: "Gemini (6)").

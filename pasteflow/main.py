@@ -1667,9 +1667,12 @@ class PasteFlowApp:
     def _resolve_stt_cfg(self) -> tuple[str, str, str]:
         """STT용 게이트웨이 설정 — (api_key, base_url, model). 크리덴셜은 OCR과 공유,
         모델은 `stt_model_gateway`(Gemini 계열 전용 슬롯) — OCR/AI 모델 분리와 동일 이유
-        (한 모델을 공유하면 설정창에서 GPT/Claude를 골랐을 때 STT가 항상 실패한다)."""
+        (한 모델을 공유하면 설정창에서 GPT/Claude를 골랐을 때 STT가 항상 실패한다).
+        기본값은 `ocr_engine.STT_FALLBACK_DEFAULT`(gemini-3.1-flash-lite) — 실측상
+        gemini-2.5-flash보다 일관되게 빠르다(2026-08-02, 근거는 그 상수 주석 참고)."""
+        from pasteflow.ocr_engine import STT_FALLBACK_DEFAULT
         api_key, base_url, _ocr_model = self._resolve_gemini_cfg()
-        model = self.db.get_setting("stt_model_gateway", "") or "gemini-2.5-flash"
+        model = self.db.get_setting("stt_model_gateway", "") or STT_FALLBACK_DEFAULT
         return (api_key, base_url, model)
 
     def _on_stt_start(self):
@@ -1696,14 +1699,26 @@ class PasteFlowApp:
         timer.start(30_000)
         self._stt_auto_stop_timer = timer
 
-    def _on_stt_stop(self):
-        """음성 입력 단축키 keyup(또는 30초 상한 도달) — 녹음 종료 → 워커에서 게이트웨이 호출."""
-        from PyQt6.QtGui import QCursor
+    # keyup 즉시 녹음을 끊으면 발화 끝자락이 잘린다(오디오 장치 버퍼링 지연 + 마지막
+    # 음절을 발음하는 동안 키를 떼는 사람의 반응 시간) — 2026-08-02 사용자 리포트:
+    # "말한 뒤 바로 떼면 뒤가 짤림, 2초쯤 더 눌러야 함". keyup 시점에 곧장 멈추지 않고
+    # 이 여유시간만큼 계속 녹음한 뒤에 실제로 멈춘다(수동 2초 홀드보다 훨씬 짧게).
+    _STT_TAIL_PAD_MS = 400
 
+    def _on_stt_stop(self):
+        """음성 입력 단축키 keyup(또는 30초 상한 도달) — 여유시간 뒤 녹음을 마무리한다."""
         timer = self._stt_auto_stop_timer
         if timer is not None:
             timer.stop()
             self._stt_auto_stop_timer = None
+
+        if self._stt_recorder is None or not self._stt_recorder.is_recording():
+            return
+        QTimer.singleShot(self._STT_TAIL_PAD_MS, self._finish_stt_recording)
+
+    def _finish_stt_recording(self):
+        """`_on_stt_stop`의 여유시간이 끝난 뒤 실제로 녹음을 멈추고 워커에서 게이트웨이 호출."""
+        from PyQt6.QtGui import QCursor
 
         if self._stt_recorder is None:
             return

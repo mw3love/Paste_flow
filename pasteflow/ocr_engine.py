@@ -84,6 +84,12 @@ def get_credit_balance(api_key: str, base_url: str) -> tuple[float, float]:
 _FALLBACK_DEFAULT = "gemini-2.5-flash"
 _FALLBACK_CHAIN = (_FALLBACK_DEFAULT, "gemini-2.0-flash")
 
+# STT(음성 입력) 기본 모델 — OCR과 별도 선택. 2026-08-02 실측(3초 한국어 음성, 동일 문장
+# 5회): gemini-2.5-flash 3.1~6.0s(평균 ~4.4s) vs gemini-3.1-flash-lite 2.2~3.0s(평균
+# ~2.6s) — 인식 결과는 완전히 동일한데 flash-lite가 일관되게 더 빠르다("lite" 등급이
+# 지연시간에 최적화됨). 사용자가 Wispr Flow 대비 체감 지연을 지적해(2026-08-02) 도입.
+STT_FALLBACK_DEFAULT = "gemini-3.1-flash-lite"
+
 # 계열 표시 순서. 각 항목은 (표시명, 모델 ID 접두사들).
 # 매칭은 `/`로 구분된 경로의 **마지막 조각**을 소문자화해 접두사 비교한다
 # (예: "accounts/fireworks/models/gpt-oss-120b" → "gpt-oss-120b" → GPT).
