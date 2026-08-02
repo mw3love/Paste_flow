@@ -97,7 +97,6 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
 
     # 뷰어 모드 우클릭 메뉴 → main 핸들러 (ClipboardItem)
     copy_requested = pyqtSignal(object)        # ClipboardItem
-    ocr_requested = pyqtSignal(object)         # ClipboardItem
     copy_as_path_requested = pyqtSignal(object)  # ClipboardItem — 파일로 저장 후 경로 복사
     ask_ai_requested = pyqtSignal(object)      # ClipboardItem — Gemini에게 질문(이미지 첨부, 2026-08-02)
     # 편집 완료 → main 핸들러 (PNG bytes)
@@ -441,7 +440,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         return self._item
 
     # ------------------------------------------------------------------
-    # 우클릭 메뉴 (뷰어 모드) — 복사 / OCR / 주석 편집 / 닫기
+    # 우클릭 메뉴 (뷰어 모드) — 복사 / 경로 복사 / Gemini에게 질문 / 주석 편집 / 닫기
     # ------------------------------------------------------------------
     def contextMenuEvent(self, event):
         if self._edit_mode:
@@ -460,7 +459,6 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
             # id 없는 항목이면 히스토리에 안 남고 피드백도 없다.
             menu.addAction("복사\tCtrl+C").triggered.connect(
                 lambda: self.annotated_copy_requested.emit(target.image_data))
-        menu.addAction("텍스트 추출(OCR)").triggered.connect(lambda: self.ocr_requested.emit(target))
         menu.addAction("파일로 저장 후 경로 복사").triggered.connect(
             lambda: self.copy_as_path_requested.emit(target))
         menu.addAction("Gemini에게 질문").triggered.connect(lambda: self.ask_ai_requested.emit(target))

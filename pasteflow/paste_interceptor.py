@@ -258,6 +258,7 @@ class PasteInterceptor:
         on_pin_image: Optional[Callable[[], None]] = None,
         on_seq_pin: Optional[Callable[[], None]] = None,
         on_capture: Optional[Callable[[], None]] = None,
+        on_capture_ask: Optional[Callable[[], None]] = None,
         on_ask_ai: Optional[Callable[[], None]] = None,
         on_record_gif: Optional[Callable[[], None]] = None,
         on_stt_start: Optional[Callable[[], None]] = None,
@@ -275,6 +276,7 @@ class PasteInterceptor:
         self.on_pin_image = on_pin_image
         self.on_seq_pin = on_seq_pin
         self.on_capture = on_capture
+        self.on_capture_ask = on_capture_ask
         self.on_ask_ai = on_ask_ai
         self.on_record_gif = on_record_gif
         self.on_stt_start = on_stt_start
@@ -330,6 +332,14 @@ class PasteInterceptor:
         self._capture_need_ctrl: bool = False
         self._capture_need_shift: bool = False
         self._capture_need_alt: bool = False
+        # 영역 캡처 + Gemini 질문창 첨부 단축키 (기본 Win+` — Win키도 수식키로 판정해야
+        # 하므로 다른 단축키와 달리 _need_win까지 갖는다. 패널 토글 등과 달리 Win은
+        # _mod_win으로 별도 추적되므로 dispatch에서 win_pressed와 비교한다.)
+        self._captureask_vk: int = 0
+        self._captureask_need_ctrl: bool = False
+        self._captureask_need_shift: bool = False
+        self._captureask_need_alt: bool = False
+        self._captureask_need_win: bool = False
         # AI 자유질문 단축키 (패널 토글과 동일 구조)
         self._ask_ai_vk: int = 0
         self._ask_ai_need_ctrl: bool = False
@@ -447,6 +457,25 @@ class PasteInterceptor:
             self._capture_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._capture_vk = 0
+
+    def set_capture_ask_hotkey(self, hotkey_str: str):
+        """영역 캡처 + Gemini 질문창 첨부 단축키 설정(기본 Win+`) — 영역 캡처(Alt+F2)와
+        동일하게 캡처하되, 그 이미지를 곧장 Gemini 질문창에 첨부해 질문만 타이핑하면
+        되게 한다. Win키도 수식키로 받을 수 있어야 하므로 mod_tokens에 win을 포함한다
+        (STT의 set_stt_hotkey와 동일한 토큰 집합 — 단 이쪽은 항상 일반키가 있는
+        트리거형이라 _stt_mod_only 같은 분기가 없다)."""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        mod_tokens = ("ctrl", "control", "shift", "alt", "win", "windows", "meta", "super")
+        self._captureask_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._captureask_need_shift = "shift" in parts
+        self._captureask_need_alt   = "alt" in parts
+        self._captureask_need_win   = any(p in ("win", "windows", "meta", "super") for p in parts)
+        key_parts = [p for p in parts if p not in mod_tokens]
+        if key_parts:
+            key = key_parts[-1]
+            self._captureask_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._captureask_vk = 0
 
     def set_record_gif_hotkey(self, hotkey_str: str):
         """GIF 녹화 단축키 설정 — 영역을 드래그로 선택해 라이브로 녹화, GIF로 저장."""
@@ -772,6 +801,30 @@ class PasteInterceptor:
                     if self.on_capture:
                         try:
                             self.on_capture()
+                        except Exception:
+                            pass
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
+
+                # 영역 캡처 + Gemini 질문창 첨부 단축키 감지 (기본 Win+`) — 영역 캡처와
+                # 동일한 오버레이를 띄우되, 콜백이 main 쪽에서 "이번 캡처는 곧장 질문창에
+                # 첨부" 플래그를 세운다. Win은 수정키 취급이라 win_pressed까지 비교한다.
+                if (self._captureask_vk and vk_code == self._captureask_vk
+                        and ctrl_pressed  == self._captureask_need_ctrl
+                        and shift_pressed == self._captureask_need_shift
+                        and alt_pressed   == self._captureask_need_alt
+                        and win_pressed   == self._captureask_need_win):
+                    if self._captureask_need_win:
+                        # 일반키(백틱)를 통째로 suppress하면 Windows는 'Win만 눌렸다 떼짐'으로
+                        # 보고 시작 메뉴를 연다(Alt 단독 탭이 메뉴바 포커스로 해석되는 것과
+                        # 동일한 부류 — 위 STT의 Alt+R 처리와 같은 원인). 미할당 키(VK_MASK)로
+                        # Win 조합을 더럽혀 '벌거벗은 Win' 해석을 막는다(2026-08-02 사용자 리포트:
+                        # "단축키 누를 때 윈도우 버튼만 누른 것처럼 좌하단 시작 메뉴 열림").
+                        _send_inputs([_make_key_input(VK_MASK),
+                                      _make_key_input(VK_MASK, KEYEVENTF_KEYUP)])
+                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
+                    if self.on_capture_ask:
+                        try:
+                            self.on_capture_ask()
                         except Exception:
                             pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)

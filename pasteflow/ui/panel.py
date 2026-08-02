@@ -462,8 +462,8 @@ class ClipboardPanel(QWidget):
     edit_item_requested = pyqtSignal(int, str)  # (item_id, new_text)
     preview_image_requested = pyqtSignal(int)  # item_id — 위치는 main이 panel.geometry()로 계산
     preview_text_requested = pyqtSignal(int)   # item_id — 동상
-    ocr_item_requested = pyqtSignal(int)       # item_id — 이미지 항목에 OCR 적용
     copy_image_as_path_requested = pyqtSignal(int)  # item_id — 이미지를 임시 PNG로 저장 후 경로를 클립보드에 텍스트로 복사
+    ask_ai_item_requested = pyqtSignal(int)  # item_id — 이미지를 미리 첨부한 채 Gemini 질문창 열기
     open_settings_requested = pyqtSignal()
     quit_requested = pyqtSignal()
     clear_history_requested = pyqtSignal()
@@ -1115,10 +1115,10 @@ class ClipboardPanel(QWidget):
         copy_action.triggered.connect(lambda: self._do_copy(item))
 
         if item.content_type == "image":
-            ocr_action = menu.addAction("텍스트 추출(OCR)")
-            ocr_action.triggered.connect(lambda: self.ocr_item_requested.emit(item_id))
-            path_action = menu.addAction("파일로 저장 후 경로 복사")
+            path_action = menu.addAction("파일로 저장 후 경로 복사\tS")
             path_action.triggered.connect(lambda: self.copy_image_as_path_requested.emit(item_id))
+            ask_ai_action = menu.addAction("Gemini에게 질문")
+            ask_ai_action.triggered.connect(lambda: self.ask_ai_item_requested.emit(item_id))
         else:
             edit_action = menu.addAction("수정")
             edit_action.triggered.connect(lambda: self._on_edit_item(item))
@@ -1543,6 +1543,12 @@ class ClipboardPanel(QWidget):
             event.accept()
             return
 
+        # ── S: 포커스 항목(이미지)을 파일로 저장 후 경로 복사 (2026-08-03 사용자 요청) ──
+        if key == Qt.Key.Key_S and not mods & Qt.KeyboardModifier.ControlModifier:
+            self._kbd_copy_path()
+            event.accept()
+            return
+
         super().keyPressEvent(event)
 
     def _kbd_get_ordered_items(self) -> list:
@@ -1630,6 +1636,14 @@ class ClipboardPanel(QWidget):
             self.unpin_item_requested.emit(self._kbd_focus_id)
         else:
             self.pin_item_requested.emit(self._kbd_focus_id)
+
+    def _kbd_copy_path(self):
+        """S: 포커스 항목이 이미지면 파일로 저장 후 경로 복사(우클릭 메뉴와 동일 동작)"""
+        if self._kbd_focus_id is None:
+            return
+        item = self._find_item(self._kbd_focus_id)
+        if item and item.content_type == "image":
+            self.copy_image_as_path_requested.emit(self._kbd_focus_id)
 
     def _kbd_delete(self):
         """Delete: 포커스 항목 삭제 후 포커스를 다음 항목으로 이동"""

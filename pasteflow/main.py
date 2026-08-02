@@ -714,6 +714,7 @@ class _SignalBridge(QObject):
     pin_image          = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 화면에 핀(떠 있는 창)으로 띄우기
     seq_pin            = pyqtSignal()        # 훅 스레드 → 메인: 큐에서 다음 항목을 꺼내 화면에 순차 핀
     capture_requested  = pyqtSignal()        # 훅 스레드 → 메인: 영역 캡처 오버레이 띄우기
+    capture_ask_requested = pyqtSignal()     # 훅 스레드 → 메인: 영역 캡처 + Gemini 질문창 첨부
     ask_ai             = pyqtSignal()        # 훅 스레드 → 메인: AI 자유질문 입력창 띄우기
     record_gif         = pyqtSignal()        # 훅 스레드 → 메인: GIF 녹화(영역 선택 오버레이) 띄우기
     gif_saved          = pyqtSignal(str)     # 인코딩 워커 → 메인: 저장된 GIF 경로
@@ -758,6 +759,7 @@ class PasteFlowApp:
         self._bridge.pin_image.connect(self._on_pin_hotkey)
         self._bridge.seq_pin.connect(self._on_seq_pin_hotkey)
         self._bridge.capture_requested.connect(self._on_capture_requested)
+        self._bridge.capture_ask_requested.connect(self._on_capture_ask_hotkey)
         self._bridge.ask_ai.connect(self._on_ask_ai_hotkey)
         self._bridge.record_gif.connect(self._on_record_gif_hotkey)
         self._bridge.gif_saved.connect(self._on_gif_saved)
@@ -808,6 +810,7 @@ class PasteFlowApp:
             on_pin_image=self._bridge.pin_image.emit,
             on_seq_pin=self._bridge.seq_pin.emit,
             on_capture=self._bridge.capture_requested.emit,
+            on_capture_ask=self._bridge.capture_ask_requested.emit,
             on_ask_ai=self._bridge.ask_ai.emit,
             on_record_gif=self._bridge.record_gif.emit,
             on_stt_start=self._bridge.stt_start.emit,
@@ -838,7 +841,9 @@ class PasteFlowApp:
         self._capture_overlay.region_captured.connect(self._on_capture_region)
         # GIF 녹화: 같은 오버레이의 select_only 모드로 사각형만 받아 라이브 녹화 시작
         self._capture_overlay.region_selected.connect(self._on_record_region_selected)
-        # cancelled는 오버레이 내부 정리로 충분 — 별도 콜백 불필요
+        # 취소(ESC·우클릭) 시에도 _capture_then_ask를 반드시 정리한다 — 안 그러면 Win+`로
+        # 캡처를 취소한 뒤 이어서 누른 일반 Alt+F2 캡처가 엉뚱하게 Gemini 질문창을 연다.
+        self._capture_overlay.cancelled.connect(self._on_capture_cancelled)
 
         # GIF 녹화기 — 녹화 중 참조 유지(GC 방지), 인코딩은 전용 워커에서 UI 블로킹 방지
         from concurrent.futures import ThreadPoolExecutor
@@ -847,6 +852,9 @@ class PasteFlowApp:
         # 마지막 캡처 위치(논리 전역) — 그 직후 핀(Alt+F3)이 캡처 자리에 그대로 덮게 함.
         # 외부 복사가 들어오면 무효화(_on_new_clipboard_item)해 "방금 캡처한 그 이미지"일 때만 적용.
         self._pin_place_rect: QRect | None = None
+        # Win+` 로 트리거된 캡처인지 — True면 _on_capture_region이 저장 뒤 그 이미지를
+        # 곧장 Gemini 질문창에 첨부한다(영역캡처 + AI 질문을 한 동작으로).
+        self._capture_then_ask = False
 
         # OCR은 호출마다 새 스레드 — asyncio.run()을 재사용 스레드에서 반복 호출 시
         # WinRT 콜백 상태가 누적돼 두 번째 호출부터 빈 결과를 반환하는 문제 방지
@@ -894,8 +902,8 @@ class PasteFlowApp:
         self.panel.edit_item_requested.connect(self._on_edit_item)
         self.panel.preview_image_requested.connect(self._on_preview_image)
         self.panel.preview_text_requested.connect(self._on_preview_text)
-        self.panel.ocr_item_requested.connect(self._on_ocr_image_by_id)
         self.panel.copy_image_as_path_requested.connect(self._on_copy_image_as_path)
+        self.panel.ask_ai_item_requested.connect(self._on_ask_ai_item_by_id)
         self.panel.open_settings_requested.connect(self._open_settings)
         self.panel.quit_requested.connect(self._quit)
         self.panel.clear_history_requested.connect(self._on_clear_history)
@@ -924,6 +932,9 @@ class PasteFlowApp:
 
         capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         self.interceptor.set_capture_hotkey(capture_hotkey)
+
+        capture_ask_hotkey = self.db.get_setting("hotkey_capture_ask", "win+`")
+        self.interceptor.set_capture_ask_hotkey(capture_ask_hotkey)
 
         ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+`")
         self.interceptor.set_ask_ai_hotkey(ask_ai_hotkey)
@@ -1029,6 +1040,21 @@ class PasteFlowApp:
         """메인 스레드: 영역 캡처 오버레이 시작 (마그네틱 CaptureOverlay)"""
         self._capture_overlay.start()
 
+    def _on_capture_ask_hotkey(self):
+        """메인 스레드: 영역 캡처 + Gemini 질문창 첨부 단축키(기본 Win+`).
+
+        영역 캡처(Alt+F2)와 완전히 같은 오버레이를 그대로 띄우되, 이번 캡처는
+        저장이 끝난 뒤 곧장 Gemini 질문창에 이미지를 첨부해 열도록 플래그만 세운다
+        — 실제 분기는 _on_capture_region이 담당(같은 캡처 흐름을 두 벌 만들지 않기 위함).
+        """
+        self._capture_then_ask = True
+        self._capture_overlay.start()
+
+    def _on_capture_cancelled(self):
+        """캡처 취소(ESC·우클릭) — Win+`로 세운 _capture_then_ask 플래그를 정리한다.
+        정리하지 않으면 다음번 일반 Alt+F2 캡처가 잘못 Gemini 질문창을 열게 된다."""
+        self._capture_then_ask = False
+
     def _on_capture_region(self, pixmap, rect):
         """메인 스레드: 선택 영역 픽맵 → 클립보드(DIB) + 히스토리·큐 + 파일 저장 + 토스트.
 
@@ -1046,7 +1072,7 @@ class PasteFlowApp:
             thumbnail=self.monitor._create_thumbnail(dib),
         )
         self.interceptor._set_clipboard(item)
-        self._persist_clipboard_item(item)
+        saved_item = self._persist_clipboard_item(item)
 
         # 지정 폴더에 PNG 저장 (없으면 생성, 미설정 시 <사진>\PasteFlow)
         folder = self.db.get_setting("capture_save_folder", "") or _default_capture_folder()
@@ -1058,11 +1084,26 @@ class PasteFlowApp:
             ToastNotification(f"캡처 파일 저장 실패 — {e}", icon="📷")
 
         if saved_path:
+            # 캡처 직후 Ctrl+Shift+P를 누르는 것이 흔한 흐름(캡처→경로 붙여넣기)이라,
+            # 이미지→경로 단축키의 재사용 캐시에 이 경로를 미리 등록해 둔다 — 그러면
+            # temp에 별도 사본을 또 만들지 않고 방금 저장한 이 파일 경로를 그대로 쓴다.
+            self._img_to_path_cache = (saved_item.id, saved_path)
             ToastNotification(
                 f"캡처됨: {os.path.basename(saved_path)}",
                 icon="", image_path=saved_path)
         else:
             ToastNotification("캡처를 클립보드에 복사했습니다", icon="📷")
+
+        # Win+`(캡처+질문)로 트리거된 캡처면, 저장까지 끝난 이 이미지를 곧장
+        # Gemini 질문창에 첨부해 연다 — 사용자는 질문만 타이핑하면 된다.
+        if self._capture_then_ask:
+            self._capture_then_ask = False
+            try:
+                png_bytes = _image_data_to_png_bytes(dib)
+            except Exception:
+                png_bytes = None
+            if png_bytes:
+                self._open_ai_dialog(initial_image_png=png_bytes)
 
     # ── GIF 녹화 (Ctrl+Shift+G) ──
 
@@ -1264,36 +1305,9 @@ class PasteFlowApp:
 
         threading.Thread(target=_run, daemon=True, name="ocr-worker").start()
 
-    def _on_ocr_image_item(self, item: ClipboardItem):
-        """이미지 항목 우클릭 OCR — image_data(DIB/PNG)를 PNG bytes로 변환 후 공용 워커 호출."""
-        import io
-        from PIL import Image
-        from pasteflow.ui.toast import ToastNotification
-
-        # summary 항목 등으로 image_data가 비어 있을 가능성 → DB에서 풀 로드 재시도
-        if not item.image_data:
-            full = self.db.get_item(item.id) if item.id else None
-            if full and full.image_data:
-                item = full
-            else:
-                ToastNotification("이미지 데이터를 찾을 수 없습니다", icon="🔤")
-                return
-
-        try:
-            img = Image.open(io.BytesIO(item.image_data))
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            png_bytes = buf.getvalue()
-        except Exception as e:
-            ToastNotification(f"이미지 변환 실패 — {e}", icon="🔤")
-            return
-
-        self._start_ocr_worker(png_bytes)
-
     def _on_ask_ai_for_image(self, item: ClipboardItem):
-        """핀 이미지 우클릭 "Gemini에게 질문" — 이미지를 미리 첨부한 채 AI 질문창을 연다
-        (2026-08-02 사용자 요청). image_data(DIB/PNG) → PNG 변환은 _on_ocr_image_item과
-        동일 패턴."""
+        """이미지 우클릭 "Gemini에게 질문"(핀·미리보기·히스토리 공용) — 이미지를 미리 첨부한 채
+        AI 질문창을 연다(2026-08-02 사용자 요청). image_data(DIB/PNG)를 PNG bytes로 변환해 첨부한다."""
         import io
         from PIL import Image
         from pasteflow.ui.toast import ToastNotification
@@ -1311,34 +1325,44 @@ class PasteFlowApp:
             return
         self._open_ai_dialog(initial_image_png=png_bytes)
 
-    def _on_ocr_image_by_id(self, item_id: int):
-        """패널 우클릭(item_id 기반) → DB에서 풀 로드 후 OCR 위임."""
-        from pasteflow.ui.toast import ToastNotification
-        item = self.db.get_item(item_id)
-        if not item:
-            ToastNotification("항목을 찾을 수 없습니다", icon="🔤")
-            return
-        self._on_ocr_image_item(item)
-
     def _on_copy_image_as_path(self, item_id: int):
         """우클릭 "파일로 저장 후 경로 복사"(item_id 기반) → DB 로드 후 항목 기반 코어로 위임."""
         item = self.db.get_item(item_id)
         if item:
             self._copy_image_as_path_for_item(item)
 
+    def _on_ask_ai_item_by_id(self, item_id: int):
+        """히스토리 우클릭 "Gemini에게 질문"(item_id 기반, 2026-08-03) → DB에서 풀 로드 후
+        핀·미리보기와 공유하는 코어(_on_ask_ai_for_image)로 위임."""
+        from pasteflow.ui.toast import ToastNotification
+        item = self.db.get_item(item_id)
+        if not item:
+            ToastNotification("항목을 찾을 수 없습니다", icon="✨")
+            return
+        self._on_ask_ai_for_image(item)
+
     def _copy_image_as_path_for_item(self, item: ClipboardItem):
-        """임시 PNG 저장 후 절대경로를 클립보드에 텍스트로 복사.
+        """캡처 저장 폴더(Alt+F2와 동일 — 설정 `capture_save_folder`, 기본 <사진>\\PasteFlow)에
+        PNG로 저장 후 절대경로를 클립보드에 텍스트로 복사.
         Claude CLI 등 "경로 텍스트"를 첨부로 받는 앱에 사용자가 직접 Ctrl+V로 붙여넣기 위한 경로.
         DB id가 없는 임시 항목(화면 핀 등)도 받을 수 있도록 ClipboardItem을 직접 받는다.
+
+        %TEMP%가 아니라 캡처 폴더를 쓰는 이유: 이 메뉴는 "파일로 저장"이라 사용자가
+        결과물을 나중에 다시 찾을 수 있어야 하는데, 임시 폴더는 관리 폴더가 두 개로
+        나뉘는 데다 시스템이 언제든 비울 수 있어 부적합하다(2026-08-02 사용자 판단).
+        이미지→경로 단축키(Ctrl+Shift+P·[)·Alt+드래그는 반복 실행되는 일회성 브리지
+        파일이라 여기와 무관하게 계속 `_save_image_to_drop_temp`(temp)를 쓴다.
         """
         from pasteflow.ui.toast import ToastNotification
         if not item or not item.image_data:
             ToastNotification("이미지 데이터를 찾을 수 없습니다", icon="🔤")
             return
+        folder = self.db.get_setting("capture_save_folder", "") or _default_capture_folder()
         try:
-            saved_path = _save_image_to_drop_temp(item.image_data)
+            os.makedirs(folder, exist_ok=True)
+            saved_path = _save_image_to_folder(item.image_data, folder)
         except Exception as e:
-            ToastNotification(f"임시 파일 저장 실패 — {e}", icon="🔤")
+            ToastNotification(f"파일 저장 실패 — {e}", icon="🔤")
             return
         path_item = ClipboardItem(
             content_type="text",
@@ -1361,9 +1385,11 @@ class PasteFlowApp:
         **소스 = 라이브 클립보드가 아니라 최신 히스토리 항목**(Ctrl+V의 "마지막 복사물"에 대응).
         경로 텍스트는 히스토리에 안 남으므로(_set_clipboard의 self_triggered) 원본 이미지가
         최신 자리에 유지돼 이 키를 여러 번 눌러도 같은 이미지를 무한히 경로로 붙일 수 있다
-        (Ctrl+V의 무한 반복과 대칭). 같은 이미지에 반복 실행 시 _img_to_path_cache로 임시 PNG를
-        재사용해 디스크 재저장을 피한다. 최신 항목이 이미지가 아니면 토스트만 표시(경로 붙여넣기는
-        이미지에만 의미) — 큐 기반 순차 경로 붙여넣기는 Ctrl+Shift+[가 담당.
+        (Ctrl+V의 무한 반복과 대칭). 같은 항목에 반복 실행 시 _img_to_path_cache로 저장된 경로를
+        재사용해 디스크 재저장을 피한다 — 이 캐시는 영역 캡처(Alt+F2)도 채워 넣는다(2026-08-02):
+        캡처→Ctrl+Shift+P가 흔한 흐름이라, 그때는 temp에 새로 안 만들고 캡처가 이미 저장해 둔
+        캡처 폴더의 파일 경로를 그대로 쓴다. 최신 항목이 이미지가 아니면 토스트만 표시(경로
+        붙여넣기는 이미지에만 의미) — 큐 기반 순차 경로 붙여넣기는 Ctrl+Shift+[가 담당.
 
         **클립보드는 붙여넣기 직후 원본 이미지로 복원된다**(주입 250ms 후) — 그렇지 않으면
         실제 Windows 클립보드에 경로 텍스트만 남아, 이 단축키 다음에 일반 Ctrl+V를 누르면
@@ -1539,9 +1565,8 @@ class PasteFlowApp:
         anchor = QRect(cursor_pos.x(), cursor_pos.y(), 1, 1)
         # place_rect가 있으면 캡처 자리에 1:1로 정확히 덮고, 없으면 커서 옆에 1:1로 띄운다.
         popup = ImagePreviewPopup.open_new(item, anchor, native=True, place_rect=place_rect)
-        # 핀 창에서도 복사·OCR·AI 질문·경로 복사·Space 주석 편집 후 복사/저장이 동작하도록 연결
+        # 핀 창에서도 복사·AI 질문·경로 복사·Space 주석 편집 후 복사/저장이 동작하도록 연결
         popup.copy_requested.connect(self._on_copy_item)
-        popup.ocr_requested.connect(self._on_ocr_image_item)
         popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
         popup.ask_ai_requested.connect(self._on_ask_ai_for_image)
         popup.annotated_copy_requested.connect(self._on_annotation_copy)
@@ -1591,7 +1616,6 @@ class PasteFlowApp:
             anchor = QRect(cursor_pos.x(), cursor_pos.y(), 1, 1)
             popup = ImagePreviewPopup.open_new(item, anchor, native=True)
             popup.copy_requested.connect(self._on_copy_item)
-            popup.ocr_requested.connect(self._on_ocr_image_item)
             popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
             popup.ask_ai_requested.connect(self._on_ask_ai_for_image)
             popup.annotated_copy_requested.connect(self._on_annotation_copy)
@@ -2035,7 +2059,6 @@ class PasteFlowApp:
         if item and item.image_data:
             popup = ImagePreviewPopup.open_new(item, self.panel.geometry())
             popup.copy_requested.connect(self._on_copy_item)
-            popup.ocr_requested.connect(self._on_ocr_image_item)
             popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
             popup.ask_ai_requested.connect(self._on_ask_ai_for_image)
             # 인라인 주석 편집(Space) 완료 액션 — 같은 창에서 emit
@@ -2536,6 +2559,7 @@ class PasteFlowApp:
         old_pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
         old_seq_pin_hotkey = self.db.get_setting("hotkey_seq_pin", "alt+shift+f3")
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
+        old_capture_ask_hotkey = self.db.get_setting("hotkey_capture_ask", "win+`")
         old_ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+`")
         old_record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
         old_stt_hotkey = self.db.get_setting("hotkey_stt", "ctrl+win")
@@ -2580,6 +2604,11 @@ class PasteFlowApp:
         new_capture_hotkey = new_settings.get("hotkey_capture", "alt+f2")
         if old_capture_hotkey != new_capture_hotkey:
             self.interceptor.set_capture_hotkey(new_capture_hotkey)
+
+        # 영역 캡처 + Gemini 질문창 첨부 단축키 재설정
+        new_capture_ask_hotkey = new_settings.get("hotkey_capture_ask", "win+`")
+        if old_capture_ask_hotkey != new_capture_ask_hotkey:
+            self.interceptor.set_capture_ask_hotkey(new_capture_ask_hotkey)
 
         # AI 자유질문 단축키 재설정
         new_ask_ai_hotkey = new_settings.get("hotkey_ask_ai", "alt+`")

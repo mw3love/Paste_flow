@@ -616,6 +616,7 @@ class SettingsDialog(QDialog):
     KEY_PIN_IMAGE_HOTKEY = "hotkey_pin_image"
     KEY_SEQ_PIN_HOTKEY = "hotkey_seq_pin"
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
+    KEY_CAPTURE_ASK_HOTKEY = "hotkey_capture_ask"
     KEY_RECORD_GIF_HOTKEY = "hotkey_record_gif"
     KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
     KEY_STT_HOTKEY = "hotkey_stt"
@@ -823,7 +824,8 @@ class SettingsDialog(QDialog):
         self._image_to_path_hotkey.setToolTip(
             "현재 클립보드 이미지를 임시 PNG로 저장하고 절대경로를 클립보드 텍스트로 교체합니다.\n"
             "이어서 포그라운드 창에 Ctrl+V를 자동 전송합니다.\n"
-            "Claude Code CLI 등 '파일 경로 텍스트'를 첨부로 받는 앱에 한 키로 붙여넣기 위한 단축키."
+            "Claude Code CLI 등 '파일 경로 텍스트'를 첨부로 받는 앱에 한 키로 붙여넣기 위한 단축키.\n"
+            "팁: 패널에서 이미지 항목을 Alt를 누른 채 그 앱으로 드래그해도 같은 방식(경로 붙여넣기)으로 동작합니다."
         )
         hotkey_form.addRow("•  경로 붙여넣기:", self._image_to_path_hotkey)
 
@@ -888,6 +890,18 @@ class SettingsDialog(QDialog):
             "결과 텍스트가 클립보드·히스토리에 들어갑니다."
         )
         hotkey_form.addRow("•  AI OCR:", self._ocr_hotkey)
+
+        # 영역 캡처 + Gemini 질문창 첨부 — 영역 캡처(Alt+F2)와 같은 오버레이로 캡처하되
+        # 저장까지 끝낸 뒤 그 이미지를 곧장 Gemini 질문창에 첨부해 연다(2026-08-02, 사용자
+        # 요청 — 캡처→질문이 잦은 흐름이라 한 키로 묶음). allow_mod_only=True가 필요한 이유는
+        # STT와 같다: Win키를 조합의 일부로 인식하려면 이 플래그가 있어야 한다(기본값이
+        # Win+`이고, Win 단독 조합이 아니어도 이 플래그가 Win 인식 자체를 담당한다).
+        self._capture_ask_hotkey = HotkeyEdit(allow_mod_only=True)
+        self._capture_ask_hotkey.setToolTip(
+            "화면 영역을 드래그로 선택해 캡처하고(영역 캡처와 동일), 저장까지 끝낸 그 이미지를\n"
+            "곧장 Gemini 질문창에 첨부해 엽니다 — 질문만 타이핑하면 됩니다."
+        )
+        hotkey_form.addRow("•  캡처 후 질문:", self._capture_ask_hotkey)
         hotkey_form.addRow(_hk_sep())
 
         # ⑤ 음성 입력(STT) — 누르고 있는 동안 녹음(푸시투토크), 떼면 인식 후 자동 붙여넣기.
@@ -1447,6 +1461,9 @@ class SettingsDialog(QDialog):
         self._ask_ai_hotkey.set_value(
             self._settings.get(self.KEY_ASK_AI_HOTKEY, "alt+`")
         )
+        self._capture_ask_hotkey.set_value(
+            self._settings.get(self.KEY_CAPTURE_ASK_HOTKEY, "win+`")
+        )
         self._stt_hotkey.set_value(
             self._settings.get(self.KEY_STT_HOTKEY, "ctrl+win")
         )
@@ -1980,6 +1997,7 @@ class SettingsDialog(QDialog):
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
             self.KEY_RECORD_GIF_HOTKEY: self._record_gif_hotkey.value() or "ctrl+shift+g",
             self.KEY_ASK_AI_HOTKEY: self._ask_ai_hotkey.value() or "alt+`",
+            self.KEY_CAPTURE_ASK_HOTKEY: self._capture_ask_hotkey.value() or "win+`",
             self.KEY_STT_HOTKEY: self._stt_hotkey.value() or "ctrl+win",
             self.KEY_CAPTURE_FOLDER: self._capture_folder_edit.text(),
             # OCR은 별도 엔진 선택 없이 항상 AI(Gemini/Mindlogic) API로 처리 → kind 고정.
