@@ -2538,6 +2538,9 @@ class PasteFlowApp:
         }
         dlg = SettingsDialog(current, parent=self.panel)
         dlg.settings_changed.connect(self._on_settings_changed)
+        # 단축키 녹화 중엔 전역 훅을 멈춰, 재바인딩하려는 옛 단축키를 눌러도 그
+        # 동작이 실행되지 않고 키 이벤트가 그대로 HotkeyEdit에 도달하게 한다.
+        dlg.recording_active.connect(self._on_hotkey_recording_active)
         dlg.raise_()
         dlg.activateWindow()
         # exec()는 기본이 application-modal이라 부모 없는 최상위 오버레이(캡처·OCR)까지
@@ -2548,6 +2551,16 @@ class PasteFlowApp:
             dlg.exec()
         finally:
             self._settings_dialog = None
+            # 안전망 — 녹화 중 다이얼로그가 닫혀 종료 시그널을 못 받아도 훅이 영구히
+            # suspend된 채 남지 않도록 항상 재개(멱등).
+            self.interceptor.resume()
+
+    def _on_hotkey_recording_active(self, active: bool):
+        """설정창에서 단축키를 녹화하는 동안 전역 훅을 suspend, 끝나면 resume."""
+        if active:
+            self.interceptor.suspend()
+        else:
+            self.interceptor.resume()
 
     def _on_settings_changed(self, new_settings: dict):
         """설정 변경 적용"""

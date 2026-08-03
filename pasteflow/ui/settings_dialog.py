@@ -429,6 +429,10 @@ def _bullet_checkbox_row(checkbox: QCheckBox) -> QWidget:
 class HotkeyEdit(QPushButton):
     """클릭 후 키 조합을 누르면 단축키를 캡처하는 위젯"""
 
+    # 녹화 시작/종료(True/False) — SettingsDialog가 모아서 전역 훅 suspend/resume에 쓴다
+    # (녹화 중 옛 단축키를 눌러도 그 동작이 실행되지 않아야 재바인딩이 가능하다).
+    listening_changed = pyqtSignal(bool)
+
     def __init__(self, parent=None, allow_mod_only: bool = False):
         """allow_mod_only=True면 Ctrl+Win처럼 일반키 없이 수식키만으로 된 조합도
         캡처할 수 있다(음성 입력의 Wispr Flow 스타일 제스처, 2026-08-02). 다른
@@ -460,6 +464,7 @@ class HotkeyEdit(QPushButton):
         self._held_mods = set()
         self._update_display()
         self.grabKeyboard()
+        self.listening_changed.emit(True)
 
     @staticmethod
     def format_hotkey(value: str) -> str:
@@ -512,6 +517,7 @@ class HotkeyEdit(QPushButton):
             self._held_mods = set()
             self.releaseKeyboard()
             self._update_display()
+            self.listening_changed.emit(False)
             return
 
         modifiers = event.modifiers()
@@ -534,6 +540,7 @@ class HotkeyEdit(QPushButton):
         self._held_mods = set()
         self.releaseKeyboard()
         self._update_display()
+        self.listening_changed.emit(False)
 
     def keyReleaseEvent(self, event):
         """`allow_mod_only`일 때만 — 일반키 없이 수식키를 뗀 순간 그 조합으로 확정한다
@@ -563,6 +570,7 @@ class HotkeyEdit(QPushButton):
             self._held_mods = set()
             self.releaseKeyboard()
             self._update_display()
+            self.listening_changed.emit(False)
 
     def focusOutEvent(self, event):
         if self._listening:
@@ -570,6 +578,7 @@ class HotkeyEdit(QPushButton):
             self._held_mods = set()
             self.releaseKeyboard()
             self._update_display()
+            self.listening_changed.emit(False)
         super().focusOutEvent(event)
 
     def _qt_key_to_name(self, key) -> str:
@@ -604,6 +613,9 @@ class SettingsDialog(QDialog):
     """설정 다이얼로그"""
 
     settings_changed = pyqtSignal(dict)  # 변경된 설정 dict
+    # True=단축키 녹화 시작, False=종료 — main이 이 동안 전역 훅(interceptor)을
+    # suspend/resume해, 재바인딩하려는 옛 단축키를 눌러도 그 동작이 실행되지 않게 한다.
+    recording_active = pyqtSignal(bool)
 
     # 설정 키 상수
     KEY_PANEL_TOGGLE = "hotkey_panel_toggle"
@@ -916,6 +928,17 @@ class SettingsDialog(QDialog):
             "게이트웨이 오디오 입력은 Gemini 계열 모델만 지원합니다 — 아래 STT 모델에서 선택하세요."
         )
         hotkey_form.addRow("•  음성 입력(STT):", self._stt_hotkey)
+
+        # 녹화 시작/종료를 하나의 다이얼로그 시그널로 모은다 — main이 이걸로 전역 훅을
+        # suspend/resume한다(어느 HotkeyEdit이든 녹화를 시작하면 suspend, 끝나면 resume).
+        for _hk in (
+            self._panel_toggle_hotkey, self._image_to_path_hotkey,
+            self._seq_image_to_path_hotkey, self._capture_hotkey,
+            self._pin_image_hotkey, self._seq_pin_hotkey, self._record_gif_hotkey,
+            self._ask_ai_hotkey, self._ocr_hotkey, self._capture_ask_hotkey,
+            self._stt_hotkey,
+        ):
+            _hk.listening_changed.connect(self.recording_active.emit)
 
         # ── 기본 단축키 그룹 (고정) — 복사/붙여넣기 등 변경 불가한 핵심 기능. 맨 위 배치 ──
         info_group = QGroupBox("기본 단축키 (고정)")

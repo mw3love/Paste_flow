@@ -363,6 +363,10 @@ class PasteInterceptor:
         self._stt_mod_only: bool = False
         self._stt_active: bool = False  # 키 반복(auto-repeat) keydown 무시 + 정확한 keyup 매칭용
         self._mod_win: bool = False  # Win키 눌림 상태 — Alt(_mod_alt)와 동일하게 자체 추적
+        # 설정창에서 새 단축키를 녹화하는 동안 True — 전역 단축키 감지를 통째로 멈춰
+        # 이전 단축키를 눌러도 그 동작이 실행되지 않고 키 이벤트가 그대로 통과하게 한다
+        # (suspend()/resume() 참고, 2026-08-03 사용자 리포트: 재바인딩 중 옛 단축키가 계속 발동).
+        self._suspended: bool = False
         # 콜백 참조 유지 (GC 방지)
         self._hook_proc = HOOKPROC(self._low_level_keyboard_proc)
 
@@ -548,6 +552,17 @@ class PasteInterceptor:
             _user32.PostThreadMessageW(self._hook_thread_id, WM_QUIT, 0, 0)
             self._hook_thread_id = 0
 
+    def suspend(self):
+        """전역 단축키 감지를 일시 중단한다 — 설정창 `HotkeyEdit`가 새 조합을 녹화하는
+        동안 호출된다. 훅 자체는 유지한 채 `_low_level_keyboard_proc`이 모든 키를
+        아무 처리 없이 통과시키므로, 기존에 등록된 단축키(예: 재할당하려는 그 조합)를
+        눌러도 동작이 실행되지 않고 키 이벤트가 그대로 포커스된 위젯에 도달한다."""
+        self._suspended = True
+
+    def resume(self):
+        """suspend() 해제 — 전역 단축키 감지를 재개한다."""
+        self._suspended = False
+
     def _hook_thread(self):
         """훅 메시지 루프 스레드"""
         self._hook_thread_id = _kernel32.GetCurrentThreadId()
@@ -600,6 +615,12 @@ class PasteInterceptor:
         반드시 모든 예외를 잡아야 한다.
         """
         try:
+            # 설정창에서 새 단축키를 녹화하는 동안 — 모든 키를 그대로 통과시킨다.
+            # 이걸 건너뛰면 재할당하려는 그 조합을 누르는 순간 옛 동작이 실행돼
+            # 버리고, 키 이벤트 자체도 suppress돼 HotkeyEdit가 캡처하지 못한다.
+            if nCode >= 0 and self._suspended:
+                return _user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
+
             # keydown을 막은 키의 keyup도 함께 막는다 (_suppress 참고)
             # ⚠ **주입된 keyup은 막지 않는다** — Ctrl+Shift+V는 V의 물리 keydown을 막은 직후
             # 스스로 Ctrl+V를 SendInput으로 주입하는데, 그 주입된 V의 keyup까지 삼키면 대상
