@@ -1308,6 +1308,22 @@ class SettingsDialog(QDialog):
         general_form.setVerticalSpacing(4)
         general_form.setContentsMargins(10, 8, 10, 8)
 
+        def _gen_sep():
+            line = QFrame()
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setFrameShadow(QFrame.Shadow.Plain)
+            line.setStyleSheet(f"color:{_LINE}; background-color:{_LINE};")
+            line.setFixedHeight(1)
+            return line
+
+        self._auto_start_check = QCheckBox("Windows 시작 시 자동 실행")
+        general_form.addRow(_bullet_checkbox_row(self._auto_start_check))
+
+        self._notify_copy_check = QCheckBox("복사 시 우하단 알림 표시")
+        general_form.addRow(_bullet_checkbox_row(self._notify_copy_check))
+
+        general_form.addRow(_gen_sep())
+
         self._history_max_spin = QSpinBox()
         self._history_max_spin.setRange(10, 500)
         self._history_max_spin.setValue(50)
@@ -1336,11 +1352,18 @@ class SettingsDialog(QDialog):
         folder_row.addWidget(browse_btn)
         general_form.addRow("•  캡처 저장 폴더:", folder_row)
 
-        self._auto_start_check = QCheckBox("Windows 시작 시 자동 실행")
-        general_form.addRow(_bullet_checkbox_row(self._auto_start_check))
+        # ── GIF/녹화 설정 그룹 ── 「일반 설정」과 별도 카드로 분리해 녹화 관련
+        # 옵션(5개)을 한눈에 묶어 보여준다(2026-08-04 — 색깔 구분선 대신 그룹박스 분리로
+        # 정리, 코랄 강조선은 이 카드 하나 크기에 비해 과했다는 사용자 피드백 반영).
+        recording_group = QGroupBox("GIF/녹화 설정")
+        recording_form = QFormLayout(recording_group)
+        recording_form.setVerticalSpacing(4)
+        recording_form.setContentsMargins(10, 8, 10, 8)
 
-        self._notify_copy_check = QCheckBox("복사 시 우하단 알림 표시")
-        general_form.addRow(_bullet_checkbox_row(self._notify_copy_check))
+        self._gif_cursor_check = QCheckBox("GIF/영상 녹화 시 마우스 커서 표시")
+        recording_form.addRow(_bullet_checkbox_row(self._gif_cursor_check))
+
+        recording_form.addRow(_gen_sep())
 
         self._gif_fps_spin = QSpinBox()
         self._gif_fps_spin.setRange(1, 30)
@@ -1349,7 +1372,7 @@ class SettingsDialog(QDialog):
         self._gif_fps_spin.setToolTip(
             "GIF 녹화 초당 프레임 수. 높을수록 부드럽지만 파일 용량이 커집니다."
         )
-        general_form.addRow("•  GIF 녹화 fps:", self._gif_fps_spin)
+        recording_form.addRow("•  GIF 녹화 fps:", self._gif_fps_spin)
 
         self._gif_max_sec_spin = QSpinBox()
         self._gif_max_sec_spin.setRange(5, 60)
@@ -1359,7 +1382,9 @@ class SettingsDialog(QDialog):
             "GIF 녹화 최대 길이. 프레임을 전부 메모리에 모았다가 인코딩하므로,\n"
             "fps·녹화 영역이 클수록 메모리 사용량이 커집니다(영상(MP4) 녹화는 이 제약이 없습니다)."
         )
-        general_form.addRow("•  GIF 최대 길이:", self._gif_max_sec_spin)
+        recording_form.addRow("•  GIF 최대 길이:", self._gif_max_sec_spin)
+
+        recording_form.addRow(_gen_sep())
 
         self._video_fps_spin = QSpinBox()
         self._video_fps_spin.setRange(1, 30)
@@ -1368,7 +1393,7 @@ class SettingsDialog(QDialog):
         self._video_fps_spin.setToolTip(
             "영상(MP4) 녹화 초당 프레임 수. 높을수록 부드럽지만 파일 용량이 커집니다."
         )
-        general_form.addRow("•  영상 녹화 fps:", self._video_fps_spin)
+        recording_form.addRow("•  영상 녹화 fps:", self._video_fps_spin)
 
         self._video_max_sec_spin = QSpinBox()
         self._video_max_sec_spin.setRange(10, 3600)
@@ -1378,14 +1403,13 @@ class SettingsDialog(QDialog):
             "영상 녹화 최대 길이. 프레임을 디스크에 즉시 흘려쓰므로 메모리 제약이 없어\n"
             "GIF보다 훨씬 길게 잡아도 안전합니다(디스크 용량만 소비)."
         )
-        general_form.addRow("•  영상 최대 길이:", self._video_max_sec_spin)
+        recording_form.addRow("•  영상 최대 길이:", self._video_max_sec_spin)
 
-        self._gif_cursor_check = QCheckBox("GIF/영상 녹화 시 마우스 커서 표시")
-        general_form.addRow(_bullet_checkbox_row(self._gif_cursor_check))
-
-        # insertWidget(0, ...) — 기본/기능 단축키 그룹은 이 시점보다 앞서(위쪽) 이미
-        # tab_general에 append돼 있으므로, 맨 위로 오려면 append가 아니라 0번 위치 삽입.
+        # insertWidget(0/1, ...) — 기본/기능 단축키 그룹은 이 시점보다 앞서(위쪽) 이미
+        # tab_general에 append돼 있으므로, 맨 위로 오려면 append가 아니라 인덱스 삽입.
+        # 순서: 일반 설정(0) → GIF/녹화 설정(1) → 기본 단축키 → 기능 단축키.
         tab_general.insertWidget(0, general_group)
+        tab_general.insertWidget(1, recording_group)
 
         # ── 버튼 바 (탭 밖, 항상 노출) ──
         self._btn_bar = QWidget()
