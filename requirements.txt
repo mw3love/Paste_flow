@@ -6,5 +6,8 @@ comtypes        # Windows UI Automation (마그네틱 캡처 — ElementFromPoin
 openai                  # Mindlogic 게이트웨이 OCR (lazy import)
 certifi                 # 크레딧 확인(urllib 직접 호출)의 CA 번들 — openai(httpx)의 전이 의존성이라
                         # 이미 설치돼 있지만, 직접 import하므로 명시 선언(2026-08-02)
-numpy                   # 음성 입력(STT) — 마이크 PCM 프레임 버퍼링
+numpy                   # 음성 입력(STT) — 마이크 PCM 프레임 버퍼링 / 영상 녹화 — 프레임 배열 변환
 sounddevice             # 음성 입력(STT) — 마이크 녹음 (PortAudio 번들 wheel, 추가 설치 불필요)
+opencv-python-headless  # 영상 녹화(video_recorder.py) — cv2.VideoWriter(mp4v). *-headless를 쓰는 이유:
+                        # 일반 opencv-python은 highgui용 Qt5 플러그인을 번들해 PyQt6와 같은 프로세스에서
+                        # 플러그인 경로 충돌 위험이 있음 — VideoWriter만 쓰므로 GUI 불필요(2026-08-03)

@@ -10,25 +10,197 @@
   누적. 최대 길이 초과 / stop() / ESC 시 종료하고 finished(frames, interval_ms) emit.
 - _RecordController: 녹화 중 화면에 떠 있는 ■ 정지 위젯(항상 위, 경과시간 표시).
 - encode_gif(): 프레임 리스트를 Pillow로 GIF 저장(다운스케일·팔레트 양자화·optimize).
+- composite_cursor(): 프레임에 실제 커서를 GDI로 합성(video_recorder.py도 공유 재사용).
+
+커서 합성 방식(2026-08-03)
+--------------------------
+`screen.grabWindow()`(Qt/BitBlt)는 마우스 커서를 안 담는다. 커서 아이콘을 별도로 추출해
+알파 블렌딩하는 대신, **이미 캡처된 프레임을 GDI 비트맵에 그대로 실어(SetDIBits) 그 위에
+`DrawIconEx`로 커서를 그린 뒤 다시 꺼낸다(GetDIBits)** — Windows가 실제 배경 위에 커서를
+합성하므로 모노크롬(AND/XOR 마스크) 커서든 최신 32bpp ARGB 커서든 형식 무관하게 정확하다.
+좌표 변환(물리 커서 위치 → 캡처 영역의 로컬 물리 픽셀)은 `capture_overlay._monitor_phys_origin`과
+동일한 패턴(모니터 물리 원점 + QScreen DPR)을 그대로 재사용한다.
 
 한계(MVP)
 ---------
-- 커서 미포함(grabWindow는 마우스 커서를 안 담는다).
 - 선택이 시작된 단일 모니터 한정(크로스 모니터 녹화 미지원).
 - GIF는 클립보드에 애니메이션으로 못 올라가므로 파일 저장 + 경로 복사로 넘긴다(main).
 """
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 
 from PyQt6.QtWidgets import QWidget, QApplication, QLabel, QPushButton, QHBoxLayout
 from PyQt6.QtCore import Qt, QRect, QObject, pyqtSignal, QTimer, QElapsedTimer
-from PyQt6.QtGui import QImage
+from PyQt6.QtGui import QImage, QScreen
 
 from pasteflow.ui.theme import PEACH, PEACH_HOVER, BASE, TEXT, SURFACE2
+from pasteflow.ui.capture_overlay import _monitor_phys_origin
 
 _VK_ESCAPE = 0x1B
 _user32 = ctypes.windll.user32
+
+# 커서 합성 전용 — 다른 모듈(capture_overlay·uia)의 argtypes와 절대 안 섞이도록 전용
+# WinDLL 인스턴스를 쓴다(uia.py가 이미 겪은 교훈: 공유 windll.user32에 argtypes를 걸면
+# 같은 함수를 쓰는 다른 모듈의 설정과 충돌해 ArgumentError가 난다).
+_cur_user32 = ctypes.WinDLL("user32", use_last_error=True)
+_cur_gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+
+_CURSOR_SHOWING = 0x00000001
+_DI_NORMAL = 0x0003
+_DIB_RGB_COLORS = 0
+_SRCCOPY = 0x00CC0020
+
+
+class _CURSORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("hCursor", wintypes.HANDLE),
+        ("ptScreenPos", wintypes.POINT),
+    ]
+
+
+class _ICONINFO(ctypes.Structure):
+    _fields_ = [
+        ("fIcon", wintypes.BOOL),
+        ("xHotspot", wintypes.DWORD),
+        ("yHotspot", wintypes.DWORD),
+        ("hbmMask", wintypes.HANDLE),
+        ("hbmColor", wintypes.HANDLE),
+    ]
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD),
+        ("biWidth", ctypes.c_long),
+        ("biHeight", ctypes.c_long),
+        ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD),
+        ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD),
+        ("biXPelsPerMeter", ctypes.c_long),
+        ("biYPelsPerMeter", ctypes.c_long),
+        ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+_cur_user32.GetCursorInfo.argtypes = [ctypes.POINTER(_CURSORINFO)]
+_cur_user32.GetCursorInfo.restype = wintypes.BOOL
+_cur_user32.GetIconInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ICONINFO)]
+_cur_user32.GetIconInfo.restype = wintypes.BOOL
+_cur_user32.DrawIconEx.argtypes = [
+    wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.HANDLE,
+    ctypes.c_int, ctypes.c_int, wintypes.UINT, wintypes.HANDLE, wintypes.UINT]
+_cur_user32.DrawIconEx.restype = wintypes.BOOL
+_cur_user32.GetDC.argtypes = [wintypes.HWND]
+_cur_user32.GetDC.restype = wintypes.HDC
+_cur_user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+_cur_user32.ReleaseDC.restype = ctypes.c_int
+_cur_gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+_cur_gdi32.CreateCompatibleDC.restype = wintypes.HDC
+_cur_gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+_cur_gdi32.CreateCompatibleBitmap.restype = wintypes.HANDLE
+_cur_gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
+_cur_gdi32.SelectObject.restype = wintypes.HANDLE
+_cur_gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
+_cur_gdi32.DeleteObject.restype = wintypes.BOOL
+_cur_gdi32.DeleteDC.argtypes = [wintypes.HDC]
+_cur_gdi32.DeleteDC.restype = wintypes.BOOL
+_cur_gdi32.SetDIBits.argtypes = [
+    wintypes.HDC, wintypes.HANDLE, wintypes.UINT, wintypes.UINT,
+    ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+_cur_gdi32.SetDIBits.restype = ctypes.c_int
+_cur_gdi32.GetDIBits.argtypes = [
+    wintypes.HDC, wintypes.HANDLE, wintypes.UINT, wintypes.UINT,
+    ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+_cur_gdi32.GetDIBits.restype = ctypes.c_int
+
+
+def _make_bmi_top_down(w: int, h: int) -> _BITMAPINFOHEADER:
+    """32bpp BI_RGB, biHeight를 음수로 줘 top-down(=QImage와 같은 행 순서)."""
+    bmi = _BITMAPINFOHEADER()
+    bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+    bmi.biWidth = w
+    bmi.biHeight = -h
+    bmi.biPlanes = 1
+    bmi.biBitCount = 32
+    bmi.biCompression = 0  # BI_RGB
+    return bmi
+
+
+def composite_cursor(qimg: QImage, screen: QScreen, local_rect: QRect) -> QImage:
+    """qimg(local_rect를 grab한 프레임)에 현재 커서를 합성해 반환.
+
+    local_rect: screen 안에서의 캡처 사각형(screen-local **논리** 좌표 — GifRecorder가
+    쓰는 것과 동일한 rect). 커서가 숨겨져 있거나 이 화면 밖이면 원본을 그대로 반환한다.
+    실패해도 녹화 자체는 계속돼야 하므로 어떤 예외든 원본 프레임을 반환(최선 노력형).
+    """
+    try:
+        ci = _CURSORINFO()
+        ci.cbSize = ctypes.sizeof(_CURSORINFO)
+        if not _cur_user32.GetCursorInfo(ctypes.byref(ci)):
+            return qimg
+        if not (ci.flags & _CURSOR_SHOWING):
+            return qimg
+        hcursor = ci.hCursor
+        sx, sy = ci.ptScreenPos.x, ci.ptScreenPos.y
+
+        icon_info = _ICONINFO()
+        if not _cur_user32.GetIconInfo(hcursor, ctypes.byref(icon_info)):
+            return qimg
+        # hbmMask/hbmColor는 GetIconInfo 문서상 호출자가 항상 delete해야 한다.
+        # hCursor 자체는 시스템 공유 핸들이라 파괴하면 안 된다(DestroyIcon 호출 금지).
+        if icon_info.hbmMask:
+            _cur_gdi32.DeleteObject(icon_info.hbmMask)
+        if icon_info.hbmColor:
+            _cur_gdi32.DeleteObject(icon_info.hbmColor)
+        hotspot_x, hotspot_y = icon_info.xHotspot, icon_info.yHotspot
+
+        mon_x, mon_y = _monitor_phys_origin(sx, sy)
+        dpr = screen.devicePixelRatio()
+        region_phys_x = mon_x + round(local_rect.x() * dpr)
+        region_phys_y = mon_y + round(local_rect.y() * dpr)
+        cx = (sx - region_phys_x) - hotspot_x
+        cy = (sy - region_phys_y) - hotspot_y
+
+        w, h = qimg.width(), qimg.height()
+        # 캡처 영역과 커서 아이콘 박스가 전혀 안 겹치면 합성할 필요 없음
+        if cx <= -128 or cy <= -128 or cx >= w or cy >= h:
+            return qimg
+
+        img = qimg.convertToFormat(QImage.Format.Format_RGB32)
+        bits_ptr = img.constBits()
+        bits_ptr.setsize(img.sizeInBytes())
+        src_bytes = bytes(bits_ptr)
+
+        hdc_screen = _cur_user32.GetDC(None)
+        hdc_mem = _cur_gdi32.CreateCompatibleDC(hdc_screen)
+        hbmp = _cur_gdi32.CreateCompatibleBitmap(hdc_screen, w, h)
+        old = _cur_gdi32.SelectObject(hdc_mem, hbmp)
+        try:
+            bmi = _make_bmi_top_down(w, h)
+            buf = ctypes.create_string_buffer(src_bytes)
+            _cur_gdi32.SetDIBits(
+                hdc_mem, hbmp, 0, h, buf, ctypes.byref(bmi), _DIB_RGB_COLORS)
+            _cur_user32.DrawIconEx(
+                hdc_mem, cx, cy, hcursor, 0, 0, 0, None, _DI_NORMAL)
+            out = ctypes.create_string_buffer(w * h * 4)
+            _cur_gdi32.GetDIBits(
+                hdc_mem, hbmp, 0, h, out, ctypes.byref(bmi), _DIB_RGB_COLORS)
+        finally:
+            _cur_gdi32.SelectObject(hdc_mem, old)
+            _cur_gdi32.DeleteObject(hbmp)
+            _cur_gdi32.DeleteDC(hdc_mem)
+            _cur_user32.ReleaseDC(None, hdc_screen)
+
+        result = QImage(bytes(out.raw), w, h, QImage.Format.Format_RGB32)
+        return result.copy()
+    except Exception:
+        return qimg
 
 
 # ── QImage → PIL 변환 / GIF 인코딩 ───────────────────────────────────────────────
@@ -166,11 +338,12 @@ class GifRecorder(QObject):
     finished = pyqtSignal(list, int)   # (list[QImage], interval_ms)
     cancelled = pyqtSignal()
 
-    def __init__(self, fps: int = 12, max_seconds: int = 15):
+    def __init__(self, fps: int = 12, max_seconds: int = 15, show_cursor: bool = True):
         super().__init__()
         self._fps = max(1, min(30, int(fps)))
         self._interval_ms = round(1000 / self._fps)
         self._max_frames = self._fps * max(1, int(max_seconds))
+        self._show_cursor = show_cursor
         self._timer = QTimer(self)
         self._timer.setInterval(self._interval_ms)
         self._timer.timeout.connect(self._tick)
@@ -205,7 +378,10 @@ class GifRecorder(QObject):
             return
         pm = self._screen.grabWindow(0, r.x(), r.y(), r.width(), r.height())
         if pm is not None and not pm.isNull():
-            self._frames.append(pm.toImage())
+            img = pm.toImage()
+            if self._show_cursor:
+                img = composite_cursor(img, self._screen, r)
+            self._frames.append(img)
         if len(self._frames) >= self._max_frames:
             self.stop()
 

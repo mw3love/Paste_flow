@@ -717,6 +717,7 @@ class _SignalBridge(QObject):
     capture_ask_requested = pyqtSignal()     # 훅 스레드 → 메인: 영역 캡처 + Gemini 질문창 첨부
     ask_ai             = pyqtSignal()        # 훅 스레드 → 메인: AI 자유질문 입력창 띄우기
     record_gif         = pyqtSignal()        # 훅 스레드 → 메인: GIF 녹화(영역 선택 오버레이) 띄우기
+    record_video       = pyqtSignal()        # 훅 스레드 → 메인: 영상(MP4) 녹화(영역 선택 오버레이) 띄우기
     gif_saved          = pyqtSignal(str)     # 인코딩 워커 → 메인: 저장된 GIF 경로
     gif_error          = pyqtSignal(str)     # 인코딩 워커 → 메인: 에러 메시지
     annotation_copied  = pyqtSignal(bytes)   # 주석 복사 워커 → 메인: 클립보드+DB 저장 완료(썸네일 토스트용)
@@ -762,6 +763,7 @@ class PasteFlowApp:
         self._bridge.capture_ask_requested.connect(self._on_capture_ask_hotkey)
         self._bridge.ask_ai.connect(self._on_ask_ai_hotkey)
         self._bridge.record_gif.connect(self._on_record_gif_hotkey)
+        self._bridge.record_video.connect(self._on_record_video_hotkey)
         self._bridge.gif_saved.connect(self._on_gif_saved)
         self._bridge.gif_error.connect(self._on_gif_error)
         self._bridge.annotation_copied.connect(self._on_annotation_copied)
@@ -813,6 +815,7 @@ class PasteFlowApp:
             on_capture_ask=self._bridge.capture_ask_requested.emit,
             on_ask_ai=self._bridge.ask_ai.emit,
             on_record_gif=self._bridge.record_gif.emit,
+            on_record_video=self._bridge.record_video.emit,
             on_stt_start=self._bridge.stt_start.emit,
             on_stt_stop=self._bridge.stt_stop.emit,
         )
@@ -849,6 +852,12 @@ class PasteFlowApp:
         from concurrent.futures import ThreadPoolExecutor
         self._gif_recorder = None
         self._gif_executor = ThreadPoolExecutor(max_workers=1)
+        # 영상(MP4) 녹화기 — GIF와 같은 select_only 흐름을 공유하되 프레임을 즉시 파일에
+        # 써서 별도 인코딩 워커가 필요 없다(video_recorder.py). 어느 쪽으로 갈지는
+        # _recording_mode("gif"|"video")로 구분 — region_selected 시그널이 단일 경로라
+        # 이 선택이 어느 녹화기용인지 여기 남겨둬야 한다.
+        self._video_recorder = None
+        self._recording_mode = "gif"
         # 마지막 캡처 위치(논리 전역) — 그 직후 핀(Alt+F3)이 캡처 자리에 그대로 덮게 함.
         # 외부 복사가 들어오면 무효화(_on_new_clipboard_item)해 "방금 캡처한 그 이미지"일 때만 적용.
         self._pin_place_rect: QRect | None = None
@@ -946,6 +955,9 @@ class PasteFlowApp:
 
         record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
         self.interceptor.set_record_gif_hotkey(record_hotkey)
+
+        record_video_hotkey = self.db.get_setting("hotkey_record_video", "ctrl+shift+r")
+        self.interceptor.set_record_video_hotkey(record_video_hotkey)
 
         stt_hotkey = self.db.get_setting("hotkey_stt", "ctrl+win")
         self.interceptor.set_stt_hotkey(stt_hotkey)
@@ -1112,6 +1124,12 @@ class PasteFlowApp:
 
     # ── GIF 녹화 (Ctrl+Shift+G) ──
 
+    def _recording_in_progress(self) -> bool:
+        return (
+            (self._gif_recorder is not None and self._gif_recorder.is_active())
+            or (self._video_recorder is not None and self._video_recorder.is_active())
+        )
+
     def _on_record_gif_hotkey(self):
         """메인 스레드: 이미 녹화 중이 아니면 선택 오버레이(select_only)를 띄운다.
 
@@ -1119,16 +1137,35 @@ class PasteFlowApp:
         (region_selected → _on_record_region_selected) 그 자리를 라이브로 연속 캡처한다.
         """
         from pasteflow.ui.toast import ToastNotification
-        if self._gif_recorder is not None and self._gif_recorder.is_active():
+        if self._recording_in_progress():
             ToastNotification("이미 녹화 중입니다 (■ 정지 또는 ESC)", icon="🎬")
             return
+        self._recording_mode = "gif"
+        self._capture_overlay.start(select_only=True)
+
+    def _on_record_video_hotkey(self):
+        """메인 스레드: GIF 녹화와 완전히 같은 흐름(같은 capture_overlay·select_only)을 타되,
+
+        _recording_mode 플래그로 이번 선택이 GIF가 아니라 영상(MP4) 녹화로 가게 표시한다.
+        """
+        from pasteflow.ui.toast import ToastNotification
+        if self._recording_in_progress():
+            ToastNotification("이미 녹화 중입니다 (■ 정지 또는 ESC)", icon="🎬")
+            return
+        self._recording_mode = "video"
         self._capture_overlay.start(select_only=True)
 
     def _on_record_region_selected(self, rect):
-        """메인 스레드: 선택된 논리 전역 사각형을 라이브 녹화 시작.
+        """메인 스레드: 선택된 논리 전역 사각형을 라이브 녹화 시작 — _recording_mode로 GIF/영상 분기.
 
         오버레이가 완전히 닫히도록 짧게(150ms) 미룬 뒤 시작 — 잔상이 첫 프레임에 안 잡히게.
         """
+        if self._recording_mode == "video":
+            self._start_video_recording(rect)
+        else:
+            self._start_gif_recording(rect)
+
+    def _start_gif_recording(self, rect):
         from pasteflow.gif_recorder import GifRecorder
 
         try:
@@ -1139,11 +1176,60 @@ class PasteFlowApp:
             max_sec = int(self.db.get_setting("gif_max_seconds", "15") or 15)
         except ValueError:
             max_sec = 15
+        show_cursor = self.db.get_setting("gif_show_cursor", "1") != "0"
 
-        self._gif_recorder = GifRecorder(fps=fps, max_seconds=max_sec)
+        self._gif_recorder = GifRecorder(fps=fps, max_seconds=max_sec, show_cursor=show_cursor)
         self._gif_recorder.finished.connect(self._on_record_finished)
         self._gif_recorder.cancelled.connect(self._on_record_cancelled)
         QTimer.singleShot(150, lambda: self._gif_recorder.start(QRect(rect)))
+
+    def _start_video_recording(self, rect):
+        """영상(MP4) 녹화 시작 — GIF와 달리 프레임을 즉시 파일에 쓰므로 별도 인코딩 워커가 없다."""
+        from pasteflow.video_recorder import VideoRecorder
+        from datetime import datetime
+
+        from pasteflow.ui.toast import ToastNotification
+
+        show_cursor = self.db.get_setting("gif_show_cursor", "1") != "0"
+        folder = self.db.get_setting("capture_save_folder", "") or _default_capture_folder()
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as e:
+            ToastNotification(f"영상 저장 폴더를 만들 수 없습니다 — {e}", icon="🎬")
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(folder, f"vid_{ts}.mp4")
+
+        self._video_recorder = VideoRecorder(fps=15, max_seconds=600, show_cursor=show_cursor)
+        self._video_recorder.finished.connect(self._on_video_saved)
+        self._video_recorder.cancelled.connect(self._on_record_cancelled)
+        QTimer.singleShot(150, lambda: self._start_video_recorder_now(rect, path))
+
+    def _start_video_recorder_now(self, rect, path):
+        """cv2.VideoWriter가 코덱을 못 열면 예외 없이 조용히 무효화되므로(video_recorder.py의
+        isOpened() 체크가 그걸 RuntimeError로 바꿔줌) 여기서 잡아 토스트로 알린다."""
+        from pasteflow.ui.toast import ToastNotification
+        try:
+            self._video_recorder.start(QRect(rect), path)
+        except Exception as e:
+            ToastNotification(f"영상 녹화 시작 실패 — {e}", icon="🎬")
+
+    def _on_video_saved(self, path):
+        """메인 스레드: 영상 저장 완료 — GIF(_on_gif_saved)와 동일 패턴(경로 복사+히스토리·큐 저장+토스트).
+
+        mp4는 프레임을 이미 즉시 파일에 써 왔으므로(video_recorder.py) 별도 인코딩 단계가 없다.
+        """
+        from pasteflow.ui.toast import ToastNotification
+        path_item = ClipboardItem(
+            content_type="text",
+            text_content=path,
+            preview_text=path[:200],
+        )
+        self.interceptor._set_clipboard(path_item)
+        self._persist_clipboard_item(path_item)
+        ToastNotification(
+            f"영상 저장·경로 복사됨: {os.path.basename(path)}",
+            icon="🎬")
 
     def _on_record_finished(self, frames, interval_ms):
         """메인 스레드: 녹화 종료 → 인코딩을 워커에 넘긴다(프레임 수가 많으면 UI 블로킹)."""
@@ -1170,19 +1256,21 @@ class PasteFlowApp:
             self._bridge.gif_error.emit(str(e))
 
     def _on_gif_saved(self, path):
-        """메인 스레드: GIF 저장 완료 → 경로를 클립보드 텍스트로 복사 + 썸네일 토스트.
+        """메인 스레드: GIF 저장 완료 → 경로를 클립보드 텍스트로 복사 + 히스토리·큐 저장 + 썸네일 토스트.
 
         GIF는 클립보드에 애니메이션으로 못 올라가므로(이미지→경로 패턴과 동일) 파일 경로를
-        클립보드에 넣어 노션·슬랙 등엔 경로/파일로 넘긴다. 첫 프레임 썸네일로 결과를 시각 확인.
+        클립보드에 넣어 노션·슬랙 등엔 경로/파일로 넘긴다. 단 이미지→경로(Ctrl+Shift+P)와
+        달리 이 경로에는 히스토리에 남아 있는 '원본'이 따로 없다(녹화 자체가 새 콘텐츠) —
+        캡처(Alt+F2)와 같은 성격이라 여기서도 _persist_clipboard_item으로 저장한다.
         """
         from pasteflow.ui.toast import ToastNotification
-        # 경로를 클립보드 텍스트로 (self_triggered라 히스토리엔 안 남음 — 이미지→경로와 동일)
         path_item = ClipboardItem(
             content_type="text",
             text_content=path,
             preview_text=path[:200],
         )
         self.interceptor._set_clipboard(path_item)
+        self._persist_clipboard_item(path_item)
         ToastNotification(
             f"GIF 저장·경로 복사됨: {os.path.basename(path)}",
             icon="", image_path=path)
@@ -2524,6 +2612,8 @@ class PasteFlowApp:
             "hotkey_ask_ai": self.db.get_setting("hotkey_ask_ai", "alt+1"),
             "ai_palette_sites": self.db.get_setting("ai_palette_sites", ""),
             "hotkey_record_gif": self.db.get_setting("hotkey_record_gif", "ctrl+shift+g"),
+            "hotkey_record_video": self.db.get_setting("hotkey_record_video", "ctrl+shift+r"),
+            "gif_show_cursor": self.db.get_setting("gif_show_cursor", "1"),
             "hotkey_stt": self.db.get_setting("hotkey_stt", "ctrl+win"),
             "stt_model_gateway": self.db.get_setting("stt_model_gateway", ""),
             "stt_mic_device": self.db.get_setting("stt_mic_device", ""),
@@ -2581,6 +2671,7 @@ class PasteFlowApp:
         old_capture_ask_hotkey = self.db.get_setting("hotkey_capture_ask", "alt+2")
         old_ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+1")
         old_record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
+        old_record_video_hotkey = self.db.get_setting("hotkey_record_video", "ctrl+shift+r")
         old_stt_hotkey = self.db.get_setting("hotkey_stt", "ctrl+win")
 
         from pasteflow.crypto import protect
@@ -2638,6 +2729,11 @@ class PasteFlowApp:
         new_record_hotkey = new_settings.get("hotkey_record_gif", "ctrl+shift+g")
         if old_record_hotkey != new_record_hotkey:
             self.interceptor.set_record_gif_hotkey(new_record_hotkey)
+
+        # 영상 녹화 단축키 재설정
+        new_record_video_hotkey = new_settings.get("hotkey_record_video", "ctrl+shift+r")
+        if old_record_video_hotkey != new_record_video_hotkey:
+            self.interceptor.set_record_video_hotkey(new_record_video_hotkey)
 
         # 음성 입력(STT) 단축키 재설정
         new_stt_hotkey = new_settings.get("hotkey_stt", "ctrl+win")

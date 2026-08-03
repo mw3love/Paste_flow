@@ -261,6 +261,7 @@ class PasteInterceptor:
         on_capture_ask: Optional[Callable[[], None]] = None,
         on_ask_ai: Optional[Callable[[], None]] = None,
         on_record_gif: Optional[Callable[[], None]] = None,
+        on_record_video: Optional[Callable[[], None]] = None,
         on_stt_start: Optional[Callable[[], None]] = None,
         on_stt_stop: Optional[Callable[[], None]] = None,
     ):
@@ -279,6 +280,7 @@ class PasteInterceptor:
         self.on_capture_ask = on_capture_ask
         self.on_ask_ai = on_ask_ai
         self.on_record_gif = on_record_gif
+        self.on_record_video = on_record_video
         self.on_stt_start = on_stt_start
         self.on_stt_stop = on_stt_stop
         self._hook = None
@@ -352,6 +354,11 @@ class PasteInterceptor:
         self._record_need_ctrl: bool = False
         self._record_need_shift: bool = False
         self._record_need_alt: bool = False
+        # 영상(MP4) 녹화 단축키 (GIF 녹화와 동일 구조)
+        self._record_video_vk: int = 0
+        self._record_video_need_ctrl: bool = False
+        self._record_video_need_shift: bool = False
+        self._record_video_need_alt: bool = False
         # 음성 입력(STT) 단축키 — 다른 단축키와 달리 keydown(녹음 시작)·keyup(녹음 종료+전송)
         # 둘 다 동작하는 푸시투토크 패턴이라 진행 상태(_stt_active)를 별도로 추적한다.
         self._stt_vk: int = 0
@@ -495,6 +502,19 @@ class PasteInterceptor:
             self._record_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._record_vk = 0
+
+    def set_record_video_hotkey(self, hotkey_str: str):
+        """영상(MP4) 녹화 단축키 설정 — GIF 녹화와 같은 방식으로 영역을 드래그로 선택."""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._record_video_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._record_video_need_shift = "shift" in parts
+        self._record_video_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._record_video_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._record_video_vk = 0
 
     def set_ask_ai_hotkey(self, hotkey_str: str):
         """AI 자유질문 단축키 설정 — 컨텍스트 없이 즉석에서 AI 질문 입력창을 띄운다."""
@@ -893,6 +913,19 @@ class PasteInterceptor:
                     if self.on_record_gif:
                         try:
                             self.on_record_gif()
+                        except Exception:
+                            pass
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
+
+                # 영상(MP4) 녹화 단축키 감지 (기본 Ctrl+Shift+R, GIF 녹화와 동일 구조)
+                if (self._record_video_vk and vk_code == self._record_video_vk
+                        and ctrl_pressed  == self._record_video_need_ctrl
+                        and shift_pressed == self._record_video_need_shift
+                        and alt_pressed   == self._record_video_need_alt):
+                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
+                    if self.on_record_video:
+                        try:
+                            self.on_record_video()
                         except Exception:
                             pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)

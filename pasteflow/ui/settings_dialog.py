@@ -638,6 +638,8 @@ class SettingsDialog(QDialog):
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
     KEY_CAPTURE_ASK_HOTKEY = "hotkey_capture_ask"
     KEY_RECORD_GIF_HOTKEY = "hotkey_record_gif"
+    KEY_RECORD_VIDEO_HOTKEY = "hotkey_record_video"
+    KEY_GIF_SHOW_CURSOR = "gif_show_cursor"
     KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
     KEY_STT_HOTKEY = "hotkey_stt"
     KEY_STT_MIC_DEVICE = "stt_mic_device"  # 빈 문자열=시스템 기본, 아니면 특정 장치 이름
@@ -904,9 +906,17 @@ class SettingsDialog(QDialog):
             "화면 영역을 드래그로 선택해 GIF로 녹화합니다.\n"
             "녹화 중 뜨는 ■ 정지 버튼(또는 ESC로 취소)으로 끝내면 GIF로 저장되고\n"
             "파일 경로가 클립보드에 복사됩니다(노션·슬랙 등엔 파일/경로로 넘김).\n"
-            "커서는 녹화되지 않으며, 선택이 시작된 단일 모니터만 녹화됩니다(MVP)."
+            "선택이 시작된 단일 모니터만 녹화됩니다(MVP)."
         )
         hotkey_form.addRow("•  GIF 녹화:", self._record_gif_hotkey)
+
+        self._record_video_hotkey = HotkeyEdit()
+        self._record_video_hotkey.setToolTip(
+            "화면 영역을 드래그로 선택해 MP4 영상으로 녹화합니다(GIF 녹화와 같은 방식).\n"
+            "GIF보다 파일 용량이 훨씬 작고 길게 녹화할 수 있습니다(최대 길이 제한 없음).\n"
+            "■ 정지 버튼(또는 ESC로 취소)으로 끝내면 저장되고 파일 경로가 클립보드에 복사됩니다."
+        )
+        hotkey_form.addRow("•  영상 녹화:", self._record_video_hotkey)
         hotkey_form.addRow(_hk_sep())
 
         # ④ Gemini 호출(alt+1) / Gemini(캡처, alt+2) / OCR
@@ -966,6 +976,7 @@ class SettingsDialog(QDialog):
             self._panel_toggle_hotkey, self._image_to_path_hotkey,
             self._seq_image_to_path_hotkey, self._capture_hotkey,
             self._pin_image_hotkey, self._seq_pin_hotkey, self._record_gif_hotkey,
+            self._record_video_hotkey,
             self._ask_ai_hotkey, self._ocr_hotkey, self._capture_ask_hotkey,
             self._stt_hotkey,
         ):
@@ -1327,6 +1338,9 @@ class SettingsDialog(QDialog):
         self._notify_copy_check = QCheckBox("복사 시 우하단 알림 표시")
         general_form.addRow(_bullet_checkbox_row(self._notify_copy_check))
 
+        self._gif_cursor_check = QCheckBox("GIF/영상 녹화 시 마우스 커서 표시")
+        general_form.addRow(_bullet_checkbox_row(self._gif_cursor_check))
+
         # insertWidget(0, ...) — 기본/기능 단축키 그룹은 이 시점보다 앞서(위쪽) 이미
         # tab_general에 append돼 있으므로, 맨 위로 오려면 append가 아니라 0번 위치 삽입.
         tab_general.insertWidget(0, general_group)
@@ -1513,6 +1527,9 @@ class SettingsDialog(QDialog):
         self._record_gif_hotkey.set_value(
             self._settings.get(self.KEY_RECORD_GIF_HOTKEY, "ctrl+shift+g")
         )
+        self._record_video_hotkey.set_value(
+            self._settings.get(self.KEY_RECORD_VIDEO_HOTKEY, "ctrl+shift+r")
+        )
         self._ask_ai_hotkey.set_value(
             self._settings.get(self.KEY_ASK_AI_HOTKEY, "alt+1")
         )
@@ -1552,6 +1569,9 @@ class SettingsDialog(QDialog):
         )
         self._notify_copy_check.setChecked(
             self._settings.get(self.KEY_NOTIFY_ON_COPY, "1") == "1"
+        )
+        self._gif_cursor_check.setChecked(
+            self._settings.get(self.KEY_GIF_SHOW_CURSOR, "1") == "1"
         )
 
     def _creds(self) -> tuple[str, str]:
@@ -2051,6 +2071,7 @@ class SettingsDialog(QDialog):
             self.KEY_SEQ_PIN_HOTKEY: self._seq_pin_hotkey.value() or "alt+shift+f3",
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
             self.KEY_RECORD_GIF_HOTKEY: self._record_gif_hotkey.value() or "ctrl+shift+g",
+            self.KEY_RECORD_VIDEO_HOTKEY: self._record_video_hotkey.value() or "ctrl+shift+r",
             self.KEY_ASK_AI_HOTKEY: self._ask_ai_hotkey.value() or "alt+1",
             self.KEY_CAPTURE_ASK_HOTKEY: self._capture_ask_hotkey.value() or "alt+2",
             self.KEY_STT_HOTKEY: self._stt_hotkey.value() or "ctrl+win",
@@ -2061,6 +2082,7 @@ class SettingsDialog(QDialog):
             self.KEY_QUEUE_IDLE_RESET: str(self._queue_idle_spin.value()),
             self.KEY_AUTO_START: "1" if auto_start else "0",
             self.KEY_NOTIFY_ON_COPY: "1" if self._notify_copy_check.isChecked() else "0",
+            self.KEY_GIF_SHOW_CURSOR: "1" if self._gif_cursor_check.isChecked() else "0",
         }
         # 크리덴셜 — 화면 편집칸에서 직접 읽어 저장.
         new_settings[self.KEY_OCR_GEMINI_API_KEY_GATEWAY] = self._gateway_key_edit.text()
