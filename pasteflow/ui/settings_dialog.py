@@ -713,6 +713,20 @@ class SettingsDialog(QDialog):
         super().showEvent(event)
         self._strip_min_max_buttons()
 
+    def done(self, r):
+        # 안전망 ①: accept()(저장)·reject()(취소·Esc)가 거치는 공통 종료 경로. 단축키
+        # 필드가 리스닝 중인 채로 어떤 경로로 닫히든 recording_active(False)를 무조건
+        # 한 번 더 보내 전역 훅이 suspend 상태에 영구히 갇히지 않게 한다(그러면 재시작
+        # 전까지 전역 단축키가 전부 죽는다) — 이미 False면 main 쪽에서 idempotent.
+        self.recording_active.emit(False)
+        super().done(r)
+
+    def closeEvent(self, event):
+        # 안전망 ②: 네이티브 X 버튼·Alt+F4 등 done()을 안 거칠 수 있는 경로 대비
+        # (오프스크린 테스트로 close()가 done()을 안 태우는 경우가 실제 관측됨).
+        self.recording_active.emit(False)
+        super().closeEvent(event)
+
     def _strip_min_max_buttons(self):
         """타이틀바에서 최소화·최대화 버튼을 실제로 제거한다.
 
