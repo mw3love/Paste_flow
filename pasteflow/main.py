@@ -1191,6 +1191,14 @@ class PasteFlowApp:
         from pasteflow.ui.toast import ToastNotification
 
         show_cursor = self.db.get_setting("gif_show_cursor", "1") != "0"
+        try:
+            fps = int(self.db.get_setting("video_fps", "15") or 15)
+        except ValueError:
+            fps = 15
+        try:
+            max_sec = int(self.db.get_setting("video_max_seconds", "600") or 600)
+        except ValueError:
+            max_sec = 600
         folder = self.db.get_setting("capture_save_folder", "") or _default_capture_folder()
         try:
             os.makedirs(folder, exist_ok=True)
@@ -1200,7 +1208,7 @@ class PasteFlowApp:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(folder, f"vid_{ts}.mp4")
 
-        self._video_recorder = VideoRecorder(fps=15, max_seconds=600, show_cursor=show_cursor)
+        self._video_recorder = VideoRecorder(fps=fps, max_seconds=max_sec, show_cursor=show_cursor)
         self._video_recorder.finished.connect(self._on_video_saved)
         self._video_recorder.cancelled.connect(self._on_record_cancelled)
         QTimer.singleShot(150, lambda: self._start_video_recorder_now(rect, path))
@@ -2614,6 +2622,10 @@ class PasteFlowApp:
             "hotkey_record_gif": self.db.get_setting("hotkey_record_gif", "ctrl+shift+g"),
             "hotkey_record_video": self.db.get_setting("hotkey_record_video", "ctrl+shift+r"),
             "gif_show_cursor": self.db.get_setting("gif_show_cursor", "1"),
+            "gif_fps": self.db.get_setting("gif_fps", "12"),
+            "gif_max_seconds": self.db.get_setting("gif_max_seconds", "15"),
+            "video_fps": self.db.get_setting("video_fps", "15"),
+            "video_max_seconds": self.db.get_setting("video_max_seconds", "600"),
             "hotkey_stt": self.db.get_setting("hotkey_stt", "ctrl+win"),
             "stt_model_gateway": self.db.get_setting("stt_model_gateway", ""),
             "stt_mic_device": self.db.get_setting("stt_mic_device", ""),

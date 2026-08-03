@@ -642,6 +642,8 @@ class SettingsDialog(QDialog):
     KEY_GIF_SHOW_CURSOR = "gif_show_cursor"
     KEY_GIF_FPS = "gif_fps"
     KEY_GIF_MAX_SECONDS = "gif_max_seconds"
+    KEY_VIDEO_FPS = "video_fps"
+    KEY_VIDEO_MAX_SECONDS = "video_max_seconds"
     KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
     KEY_STT_HOTKEY = "hotkey_stt"
     KEY_STT_MIC_DEVICE = "stt_mic_device"  # 빈 문자열=시스템 기본, 아니면 특정 장치 이름
@@ -1359,6 +1361,25 @@ class SettingsDialog(QDialog):
         )
         general_form.addRow("•  GIF 최대 길이:", self._gif_max_sec_spin)
 
+        self._video_fps_spin = QSpinBox()
+        self._video_fps_spin.setRange(1, 30)
+        self._video_fps_spin.setSuffix(" fps")
+        self._video_fps_spin.setValue(15)
+        self._video_fps_spin.setToolTip(
+            "영상(MP4) 녹화 초당 프레임 수. 높을수록 부드럽지만 파일 용량이 커집니다."
+        )
+        general_form.addRow("•  영상 녹화 fps:", self._video_fps_spin)
+
+        self._video_max_sec_spin = QSpinBox()
+        self._video_max_sec_spin.setRange(10, 3600)
+        self._video_max_sec_spin.setSuffix(" 초")
+        self._video_max_sec_spin.setValue(600)
+        self._video_max_sec_spin.setToolTip(
+            "영상 녹화 최대 길이. 프레임을 디스크에 즉시 흘려쓰므로 메모리 제약이 없어\n"
+            "GIF보다 훨씬 길게 잡아도 안전합니다(디스크 용량만 소비)."
+        )
+        general_form.addRow("•  영상 최대 길이:", self._video_max_sec_spin)
+
         self._gif_cursor_check = QCheckBox("GIF/영상 녹화 시 마우스 커서 표시")
         general_form.addRow(_bullet_checkbox_row(self._gif_cursor_check))
 
@@ -1604,6 +1625,16 @@ class SettingsDialog(QDialog):
         except (ValueError, TypeError):
             gif_max_sec = 15
         self._gif_max_sec_spin.setValue(gif_max_sec)
+        try:
+            video_fps = int(self._settings.get(self.KEY_VIDEO_FPS, "15"))
+        except (ValueError, TypeError):
+            video_fps = 15
+        self._video_fps_spin.setValue(video_fps)
+        try:
+            video_max_sec = int(self._settings.get(self.KEY_VIDEO_MAX_SECONDS, "600"))
+        except (ValueError, TypeError):
+            video_max_sec = 600
+        self._video_max_sec_spin.setValue(video_max_sec)
 
     def _creds(self) -> tuple[str, str]:
         """게이트웨이 (api_key, base_url) — 편집칸에서 직접 읽는다."""
@@ -2116,6 +2147,8 @@ class SettingsDialog(QDialog):
             self.KEY_GIF_SHOW_CURSOR: "1" if self._gif_cursor_check.isChecked() else "0",
             self.KEY_GIF_FPS: str(self._gif_fps_spin.value()),
             self.KEY_GIF_MAX_SECONDS: str(self._gif_max_sec_spin.value()),
+            self.KEY_VIDEO_FPS: str(self._video_fps_spin.value()),
+            self.KEY_VIDEO_MAX_SECONDS: str(self._video_max_sec_spin.value()),
         }
         # 크리덴셜 — 화면 편집칸에서 직접 읽어 저장.
         new_settings[self.KEY_OCR_GEMINI_API_KEY_GATEWAY] = self._gateway_key_edit.text()
