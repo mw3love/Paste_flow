@@ -640,6 +640,8 @@ class SettingsDialog(QDialog):
     KEY_RECORD_GIF_HOTKEY = "hotkey_record_gif"
     KEY_RECORD_VIDEO_HOTKEY = "hotkey_record_video"
     KEY_GIF_SHOW_CURSOR = "gif_show_cursor"
+    KEY_GIF_FPS = "gif_fps"
+    KEY_GIF_MAX_SECONDS = "gif_max_seconds"
     KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
     KEY_STT_HOTKEY = "hotkey_stt"
     KEY_STT_MIC_DEVICE = "stt_mic_device"  # 빈 문자열=시스템 기본, 아니면 특정 장치 이름
@@ -1338,6 +1340,25 @@ class SettingsDialog(QDialog):
         self._notify_copy_check = QCheckBox("복사 시 우하단 알림 표시")
         general_form.addRow(_bullet_checkbox_row(self._notify_copy_check))
 
+        self._gif_fps_spin = QSpinBox()
+        self._gif_fps_spin.setRange(1, 30)
+        self._gif_fps_spin.setSuffix(" fps")
+        self._gif_fps_spin.setValue(12)
+        self._gif_fps_spin.setToolTip(
+            "GIF 녹화 초당 프레임 수. 높을수록 부드럽지만 파일 용량이 커집니다."
+        )
+        general_form.addRow("•  GIF 녹화 fps:", self._gif_fps_spin)
+
+        self._gif_max_sec_spin = QSpinBox()
+        self._gif_max_sec_spin.setRange(5, 60)
+        self._gif_max_sec_spin.setSuffix(" 초")
+        self._gif_max_sec_spin.setValue(15)
+        self._gif_max_sec_spin.setToolTip(
+            "GIF 녹화 최대 길이. 프레임을 전부 메모리에 모았다가 인코딩하므로,\n"
+            "fps·녹화 영역이 클수록 메모리 사용량이 커집니다(영상(MP4) 녹화는 이 제약이 없습니다)."
+        )
+        general_form.addRow("•  GIF 최대 길이:", self._gif_max_sec_spin)
+
         self._gif_cursor_check = QCheckBox("GIF/영상 녹화 시 마우스 커서 표시")
         general_form.addRow(_bullet_checkbox_row(self._gif_cursor_check))
 
@@ -1573,6 +1594,16 @@ class SettingsDialog(QDialog):
         self._gif_cursor_check.setChecked(
             self._settings.get(self.KEY_GIF_SHOW_CURSOR, "1") == "1"
         )
+        try:
+            gif_fps = int(self._settings.get(self.KEY_GIF_FPS, "12"))
+        except (ValueError, TypeError):
+            gif_fps = 12
+        self._gif_fps_spin.setValue(gif_fps)
+        try:
+            gif_max_sec = int(self._settings.get(self.KEY_GIF_MAX_SECONDS, "15"))
+        except (ValueError, TypeError):
+            gif_max_sec = 15
+        self._gif_max_sec_spin.setValue(gif_max_sec)
 
     def _creds(self) -> tuple[str, str]:
         """게이트웨이 (api_key, base_url) — 편집칸에서 직접 읽는다."""
@@ -2083,6 +2114,8 @@ class SettingsDialog(QDialog):
             self.KEY_AUTO_START: "1" if auto_start else "0",
             self.KEY_NOTIFY_ON_COPY: "1" if self._notify_copy_check.isChecked() else "0",
             self.KEY_GIF_SHOW_CURSOR: "1" if self._gif_cursor_check.isChecked() else "0",
+            self.KEY_GIF_FPS: str(self._gif_fps_spin.value()),
+            self.KEY_GIF_MAX_SECONDS: str(self._gif_max_sec_spin.value()),
         }
         # 크리덴셜 — 화면 편집칸에서 직접 읽어 저장.
         new_settings[self.KEY_OCR_GEMINI_API_KEY_GATEWAY] = self._gateway_key_edit.text()
