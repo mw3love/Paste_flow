@@ -332,9 +332,11 @@ class PasteInterceptor:
         self._capture_need_ctrl: bool = False
         self._capture_need_shift: bool = False
         self._capture_need_alt: bool = False
-        # 영역 캡처 + Gemini 질문창 첨부 단축키 (기본 Win+` — Win키도 수식키로 판정해야
-        # 하므로 다른 단축키와 달리 _need_win까지 갖는다. 패널 토글 등과 달리 Win은
-        # _mod_win으로 별도 추적되므로 dispatch에서 win_pressed와 비교한다.)
+        # 영역 캡처 + Gemini 질문창 첨부 단축키 (기본 Alt+2, 2026-08-03부터 — 예전 기본값
+        # Win+`는 Windows Terminal의 퀘이크 모드 전역 단축키와 충돌해 변경. Win 조합도
+        # 여전히 고를 수 있어 Win키도 수식키로 판정해야 하므로 다른 단축키와 달리
+        # _need_win까지 갖는다. 패널 토글 등과 달리 Win은 _mod_win으로 별도 추적되므로
+        # dispatch에서 win_pressed와 비교한다.)
         self._captureask_vk: int = 0
         self._captureask_need_ctrl: bool = False
         self._captureask_need_shift: bool = False
@@ -463,7 +465,7 @@ class PasteInterceptor:
             self._capture_vk = 0
 
     def set_capture_ask_hotkey(self, hotkey_str: str):
-        """영역 캡처 + Gemini 질문창 첨부 단축키 설정(기본 Win+`) — 영역 캡처(Alt+F2)와
+        """영역 캡처 + Gemini 질문창 첨부 단축키 설정(기본 Alt+2) — 영역 캡처(Alt+F2)와
         동일하게 캡처하되, 그 이미지를 곧장 Gemini 질문창에 첨부해 질문만 타이핑하면
         되게 한다. Win키도 수식키로 받을 수 있어야 하므로 mod_tokens에 win을 포함한다
         (STT의 set_stt_hotkey와 동일한 토큰 집합 — 단 이쪽은 항상 일반키가 있는
@@ -619,6 +621,23 @@ class PasteInterceptor:
             # 이걸 건너뛰면 재할당하려는 그 조합을 누르는 순간 옛 동작이 실행돼
             # 버리고, 키 이벤트 자체도 suppress돼 HotkeyEdit가 캡처하지 못한다.
             if nCode >= 0 and self._suspended:
+                # ⚠ Win 포함 조합(Gemini(캡처) win+`, STT ctrl+win)을 녹화할 때도 Win키가
+                # '단독 눌림'으로 오인돼 시작 메뉴가 뜨는 걸 막아야 한다(2026-08-03 사용자
+                # 리포트: "설정에서 윈도우키 안 먹는다 — 밖에서 윈도우키로 실행돼 시작 메뉴가
+                # 열림"). 녹화 중엔 아무 키도 suppress하지 않으므로(재바인딩 대상 키까지
+                # 전부 통과) 두 번째 키가 함께 눌리면 Explorer도 정상적으로 '조합'으로 보지만,
+                # 사용자가 Win을 먼저 누르고 두 번째 키를 누르기 전 잠깐이라도 멈추면 그 순간
+                # Explorer가 '단독 Win'으로 판정해 시작 메뉴를 띄우고, 그 포커스 이탈이
+                # HotkeyEdit.focusOutEvent를 통해 녹화 자체를 취소시킨다. 미할당 키(VK_MASK)를
+                # 더미로 눌렀다 떼면 물리 키 전달(Qt·HotkeyEdit에는 그대로 보임)은 안 바뀌고
+                # Explorer의 '단독 Win' 판정만 무효화된다(win+backtick 실행 경로의 기존 기법과
+                # 동일 — 아래 _captureask_vk 분기 참고).
+                if wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                    kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                    if (kbd.vkCode in (VK_LWIN, VK_RWIN)
+                            and not (kbd.flags & LLKHF_INJECTED)):
+                        _send_inputs([_make_key_input(VK_MASK),
+                                      _make_key_input(VK_MASK, KEYEVENTF_KEYUP)])
                 return _user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
 
             # keydown을 막은 키의 keyup도 함께 막는다 (_suppress 참고)

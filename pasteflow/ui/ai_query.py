@@ -4,13 +4,17 @@ Alt+` 자유질문 단축키 → 이 다이얼로그로 질문을 입력받아 �
 모드 하나, 사용자가 설정에서 추가한 웹사이트) 중 하나로 라우팅한다(목록·URL 빌더는
 `pasteflow/ai_palette.py`). v1.6x에서 우클릭 "AI에게 질문"·여러 모델 비교·기록·구글
 드라이브 연동을 통째로 제거했다 — 실사용 결과 Google AI 텍스트검색만 견고했고, 나머지는
-과도했다(사용자 판단, 2026-07-29). 고르는 방법 셋을 동시에 지원한다:
+과도했다(사용자 판단, 2026-07-29). 고르는 방법을 지원한다:
 
 - `Tab`/`Shift+Tab` — 하이라이트(칩)를 순환한다.
-- `Alt+1~9` — 그 번호의 타겟으로 즉시 전송한다(하이라이트 이동 없이).
 - 등록된 키워드+공백으로 문장을 시작하면(예: `"yt 고양이"`) 자동으로 그 타겟이
   하이라이트되고, 실행 시 키워드 접두어는 질의에서 잘려 나간다.
 - `Enter`/`Ctrl+Enter` — 지금 하이라이트된 타겟으로 전송.
+
+`Alt+1~9` 즉시전송 단축키는 2026-08-03에 제거했다 — 타겟이 사실상 Gemini 하나로
+통합돼 있고(Google AI 모드), Tab 순환만으로 충분해 번호 단축키가 군더더기였다
+(사용자 판단). 이 단축키가 전역 단축키(Gemini 호출=Alt+1, Gemini(캡처)=Alt+2)와
+번호가 겹쳐 안쪽 선택이 씹힐 수 있던 부작용도 함께 해소된다.
 
 Shift+Enter는 줄바꿈, Esc는 취소. 이미지는 Ctrl+V/드래그로 첨부하되 **1장만** 유지한다
 (Google AI 모드가 이미지 1장만 지원 — 2026-07-29 사용자 확인).
@@ -28,16 +32,15 @@ from pasteflow.ui.theme import COLORS
 
 
 class _QuestionEdit(QPlainTextEdit):
-    """Tab/Shift+Tab=타겟 순환, Alt+1~9=즉시전송, Enter/Ctrl+Enter=실행,
-    Shift+Enter=줄바꿈. Ctrl+V/드롭으로 이미지 첨부.
+    """Tab/Shift+Tab=타겟 순환, Enter/Ctrl+Enter=실행, Shift+Enter=줄바꿈.
+    Ctrl+V/드롭으로 이미지 첨부.
     """
 
-    def __init__(self, on_submit, on_tab, on_alt_number,
+    def __init__(self, on_submit, on_tab,
                  on_image_paste=None, parent=None):
         super().__init__(parent)
         self._on_submit = on_submit
         self._on_tab = on_tab              # on_tab("up"/"down")
-        self._on_alt_number = on_alt_number  # on_alt_number(1~9)
         self._on_image_paste = on_image_paste
         self.setAcceptDrops(True)
 
@@ -53,12 +56,6 @@ class _QuestionEdit(QPlainTextEdit):
             return
         if key == Qt.Key.Key_Backtab:
             self._on_tab("up")
-            return
-
-        # Alt+1~9 — 그 번호 타겟으로 즉시 전송.
-        if (mods & Qt.KeyboardModifier.AltModifier
-                and Qt.Key.Key_1 <= key <= Qt.Key.Key_9):
-            self._on_alt_number(key - Qt.Key.Key_0)
             return
 
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -184,31 +181,30 @@ class AiQueryDialog(QDialog):
         self._refresh_image_preview()
 
         self._editor = _QuestionEdit(
-            self._on_submit, self._on_tab, self._on_alt_number,
+            self._on_submit, self._on_tab,
             on_image_paste=self._on_image_pasted)
         # 설정창 "빠른 검색" 그룹의 설명 문구를 없앤 대신(2026-07-29), 실제로 쓰는 이
         # 자리에 사용법을 옮겨왔다 — 내용이 늘어난 만큼 불릿+들여쓰기로 가독성을 준다.
         self._editor.setPlaceholderText(
             "질문을 입력하세요\n\n"
             "  •  Tab / Shift+Tab — 타겟 전환\n"
-            "  •  Alt+숫자 — 그 타겟으로 즉시 전송\n"
             "  •  Enter — 실행 (Shift+Enter는 줄바꿈)\n"
             "  •  Ctrl+V / 드래그 — 이미지 첨부(1장)\n"
             "  •  키워드+공백으로 시작 — 예: yt 강아지")
         self._editor.setFocus()
         layout.addWidget(self._editor, 1)
 
-        # 타겟 칩 로우(PowerToys Run/Raycast식) — 번호(Alt+숫자)+라벨, 하이라이트=코랄.
-        # 클릭하면 그 타겟으로 즉시 실행(마우스 전용 경로).
+        # 타겟 칩 로우(PowerToys Run/Raycast식) — 라벨, 하이라이트=코랄.
+        # 클릭하면 그 타겟으로 즉시 실행(마우스 전용 경로), Tab으로도 순환 가능.
         chip_row = QHBoxLayout()
         chip_row.setContentsMargins(0, 0, 0, 0)
         chip_row.setSpacing(4)
         for i, site in enumerate(self._sites[:9]):
-            btn = QPushButton(f"{i + 1} {site.get('label', '')}".strip())
+            btn = QPushButton(site.get('label', '').strip())
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             kw = (site.get("keyword") or "").strip()
-            tip = f"Alt+{i + 1}로 즉시 전송"
+            tip = "클릭하면 이 타겟으로 즉시 전송"
             if kw:
                 tip += f" · \"{kw} \"로 문장을 시작하면 자동 선택"
             btn.setToolTip(tip)
@@ -317,9 +313,6 @@ class AiQueryDialog(QDialog):
             return
         self._tab_index = (self._tab_index + (1 if direction == "down" else -1)) % n
         self._update_highlight()
-
-    def _on_alt_number(self, n: int):
-        self._execute(n - 1)
 
     def _on_submit(self):
         self._execute(self._effective_index())

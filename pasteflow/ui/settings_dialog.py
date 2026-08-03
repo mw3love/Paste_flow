@@ -76,8 +76,11 @@ class _DragHandle(QLabel):
 class _PaletteSiteRow(QWidget):
     """Gemini 팔레트(Alt+` 자유질문창) 타겟 한 줄 — 번호·드래그손잡이·라벨·키워드·URL·삭제.
 
-    순서가 곧 팔레트의 번호(Alt+1~9)이므로 드래그 손잡이로 순서를 바꿀 수 있다(번호는
-    그 순서를 즉시 반영해 표시 — `set_number`). **종류 선택 드롭다운은 없다**(2026-07-29
+    번호는 질문창에서 Tab으로 순환하는 순서를 보여준다(드래그 손잡이로 순서를 바꿀 수
+    있고, 번호는 그 순서를 즉시 반영해 표시 — `set_number`). 예전엔 이 번호가 질문창의
+    `Alt+숫자` 즉시전송 단축키와도 대응했으나, 그 단축키는 2026-08-03에 제거했다(타겟이
+    사실상 Gemini 하나뿐이라 Tab 순환만으로 충분했다 — `ai_query.py` 참고). **종류 선택
+    드롭다운은 없다**(2026-07-29
     개편) — Google AI 타겟은 `ensure_google_ai()`가 항상 정확히 1개로 보장하는 **고정
     타겟**(`fixed=True`: 삭제 불가·URL 칸 없음·main.py의 기존 배관을 그대로 탐)이고,
     사용자가 추가하는 나머지 타겟은 전부 URL 종류 하나뿐이라 고를 게 없다(추가 버튼이
@@ -123,7 +126,7 @@ class _PaletteSiteRow(QWidget):
         self.number_label.setFixedWidth(20)
         self.number_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.number_label.setStyleSheet(f"color: {_TITLE}; font-size: 11px;")
-        self.number_label.setToolTip("Alt+숫자로 이 타겟에 바로 보냅니다")
+        self.number_label.setToolTip("질문창에서 Tab으로 순환하는 순서")
 
         self.label_edit = QLineEdit(site.get("label", ""))
         self.label_edit.setPlaceholderText("표시 이름")
@@ -192,7 +195,7 @@ class _PaletteSiteRow(QWidget):
             outer.addLayout(url_row)
 
     def set_number(self, n: int):
-        """드래그·추가·삭제로 순서가 바뀔 때마다 표시 번호(=Alt+숫자)를 갱신."""
+        """드래그·추가·삭제로 순서가 바뀔 때마다 표시 번호(=Tab 순환 순서)를 갱신."""
         self.number_label.setText(str(n))
 
     def to_dict(self) -> dict:
@@ -531,10 +534,15 @@ class HotkeyEdit(QPushButton):
         if self._allow_mod_only and (modifiers & Qt.KeyboardModifier.MetaModifier):
             parts.append("win")
 
+        # 매핑 안 되는 키(미할당 가상 키 등)는 무시하고 계속 대기한다 — 그냥 넘기면
+        # 아무 것도 캡처하지 않은 채 녹화가 취소돼 버린다. 훅이 Win 단독 눌림 오인을
+        # 막으려 주입하는 더미 키(VK_MASK)가 바로 이런 매핑 안 되는 키라, 이 가드가
+        # 없으면 그 더미 키 자체가 진행 중인 녹화를 끊어버린다(2026-08-03).
         key_name = self._qt_key_to_name(key)
-        if key_name:
-            parts.append(key_name)
-            self._value = "+".join(parts)
+        if not key_name:
+            return
+        parts.append(key_name)
+        self._value = "+".join(parts)
 
         self._listening = False
         self._held_mods = set()
@@ -887,7 +895,7 @@ class SettingsDialog(QDialog):
         hotkey_form.addRow("•  GIF 녹화:", self._record_gif_hotkey)
         hotkey_form.addRow(_hk_sep())
 
-        # ④ AI 호출(alt+`) / AI OCR
+        # ④ Gemini 호출(alt+1) / Gemini(캡처, alt+2) / OCR
         self._ask_ai_hotkey = HotkeyEdit()
         self._ask_ai_hotkey.setToolTip(
             "컨텍스트 없이 즉석에서 Gemini에게 질문하는 입력창을 띄웁니다.\n"
@@ -895,25 +903,34 @@ class SettingsDialog(QDialog):
         )
         hotkey_form.addRow("•  Gemini 호출:", self._ask_ai_hotkey)
 
-        # AI OCR — 화면 영역을 AI(설정된 API)로 텍스트 인식. 별도 엔진 없음.
-        self._ocr_hotkey = HotkeyEdit()
-        self._ocr_hotkey.setToolTip(
-            "화면 영역을 드래그로 선택해 그 안의 텍스트를 AI(설정된 API)로 인식합니다.\n"
-            "결과 텍스트가 클립보드·히스토리에 들어갑니다."
-        )
-        hotkey_form.addRow("•  AI OCR:", self._ocr_hotkey)
-
         # 영역 캡처 + Gemini 질문창 첨부 — 영역 캡처(Alt+F2)와 같은 오버레이로 캡처하되
         # 저장까지 끝낸 뒤 그 이미지를 곧장 Gemini 질문창에 첨부해 연다(2026-08-02, 사용자
-        # 요청 — 캡처→질문이 잦은 흐름이라 한 키로 묶음). allow_mod_only=True가 필요한 이유는
-        # STT와 같다: Win키를 조합의 일부로 인식하려면 이 플래그가 있어야 한다(기본값이
-        # Win+`이고, Win 단독 조합이 아니어도 이 플래그가 Win 인식 자체를 담당한다).
+        # 요청 — 캡처→질문이 잦은 흐름이라 한 키로 묶음).
+        # "Gemini 호출" 바로 아래 배치 + "Gemini(캡처)"로 개명(2026-08-03, 사용자 요청) —
+        # 둘 다 Gemini를 호출하는 기능이라 나란히 둬야 관련성이 보이고, 옛 이름 "캡처 후
+        # 질문"은 아래 OCR(옛 "AI OCR")과 이름이 비슷해 헷갈렸다.
+        # 기본값을 win+`에서 alt+2로 변경(2026-08-03) — Windows Terminal이 win+`를
+        # '퀘이크 모드' 전역 단축키로 기본 등록해 둬서, 이 필드를 녹화하려 하면 터미널이
+        # 먼저 반응해 캡처 자체가 안 되는 충돌이 있었다(마이크로소프트 공식 이슈에도
+        # 등재된 잘 알려진 기본 동작). Gemini 호출도 같은 이유로 alt+`에서 alt+1로
+        # 함께 옮겨 "Alt+숫자로 나란히"라는 통일감을 유지했다. allow_mod_only는 사용자가
+        # 원하면 여전히 Win 조합도 고를 수 있게 남겨둔다(강제하지 않을 뿐 막지도 않음).
         self._capture_ask_hotkey = HotkeyEdit(allow_mod_only=True)
         self._capture_ask_hotkey.setToolTip(
             "화면 영역을 드래그로 선택해 캡처하고(영역 캡처와 동일), 저장까지 끝낸 그 이미지를\n"
             "곧장 Gemini 질문창에 첨부해 엽니다 — 질문만 타이핑하면 됩니다."
         )
-        hotkey_form.addRow("•  캡처 후 질문:", self._capture_ask_hotkey)
+        hotkey_form.addRow("•  Gemini(캡처):", self._capture_ask_hotkey)
+
+        # OCR(옛 이름 "AI OCR") — 화면 영역을 AI(설정된 API)로 텍스트 인식. 별도 엔진 없음.
+        # 음성 입력(STT) 바로 위로 이동(2026-08-03, 사용자 요청) — 텍스트 인식·음성 인식이
+        # 나란히 있는 편이 자연스럽다.
+        self._ocr_hotkey = HotkeyEdit()
+        self._ocr_hotkey.setToolTip(
+            "화면 영역을 드래그로 선택해 그 안의 텍스트를 AI(설정된 API)로 인식합니다.\n"
+            "결과 텍스트가 클립보드·히스토리에 들어갑니다."
+        )
+        hotkey_form.addRow("•  OCR:", self._ocr_hotkey)
         hotkey_form.addRow(_hk_sep())
 
         # ⑤ 음성 입력(STT) — 누르고 있는 동안 녹음(푸시투토크), 떼면 인식 후 자동 붙여넣기.
@@ -1190,7 +1207,8 @@ class SettingsDialog(QDialog):
         tab_ai.addWidget(ai_group)
 
         # ── 빠른 검색 (Alt+` 자유질문창의 목적지 목록) ──
-        # 질문을 어디로 보낼지 사용자가 직접 관리하는 목록 — 순서가 팔레트 번호(Alt+1~9).
+        # 질문을 어디로 보낼지 사용자가 직접 관리하는 목록 — 순서가 팔레트 번호(질문창
+        # Tab 순환 순서).
         # Google AI는 항상 정확히 1개인 고정 타겟, 나머지는 전부 URL 타겟이라 {q} 자리에
         # 질의가 채워진다(pasteflow/ai_palette.py 참고). "Gemini 팔레트"였던 그룹명을
         # "빠른 검색"으로 단순화했다(2026-07-29 사용자 요청) — Google AI뿐 아니라 네이버
@@ -1200,7 +1218,7 @@ class SettingsDialog(QDialog):
         palette_layout.setSpacing(4)
         palette_layout.setContentsMargins(10, 8, 10, 8)
 
-        # 설명 문구 없음(2026-07-29 사용자 요청) — 여기 있던 사용법(Tab/Alt+숫자/키워드)과
+        # 설명 문구 없음(2026-07-29 사용자 요청) — 여기 있던 사용법(Tab/키워드)과
         # 예시는 실제로 그걸 쓰는 자리인 Alt+` 질문창의 입력란 placeholder로 옮겼다
         # (`ui/ai_query.py`의 `_editor.setPlaceholderText` 참고). 설정창은 목록 편집만.
 
@@ -1482,10 +1500,10 @@ class SettingsDialog(QDialog):
             self._settings.get(self.KEY_RECORD_GIF_HOTKEY, "ctrl+shift+g")
         )
         self._ask_ai_hotkey.set_value(
-            self._settings.get(self.KEY_ASK_AI_HOTKEY, "alt+`")
+            self._settings.get(self.KEY_ASK_AI_HOTKEY, "alt+1")
         )
         self._capture_ask_hotkey.set_value(
-            self._settings.get(self.KEY_CAPTURE_ASK_HOTKEY, "win+`")
+            self._settings.get(self.KEY_CAPTURE_ASK_HOTKEY, "alt+2")
         )
         self._stt_hotkey.set_value(
             self._settings.get(self.KEY_STT_HOTKEY, "ctrl+win")
@@ -1745,7 +1763,7 @@ class SettingsDialog(QDialog):
         self._renumber_palette_rows()
 
     def _renumber_palette_rows(self):
-        """표시 번호(=Alt+숫자)를 화면 순서에 맞게 갱신한다."""
+        """표시 번호(=질문창 Tab 순환 순서)를 화면 순서에 맞게 갱신한다."""
         for i, row in enumerate(self._palette_rows):
             row.set_number(i + 1)
 
@@ -2019,8 +2037,8 @@ class SettingsDialog(QDialog):
             self.KEY_SEQ_PIN_HOTKEY: self._seq_pin_hotkey.value() or "alt+shift+f3",
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
             self.KEY_RECORD_GIF_HOTKEY: self._record_gif_hotkey.value() or "ctrl+shift+g",
-            self.KEY_ASK_AI_HOTKEY: self._ask_ai_hotkey.value() or "alt+`",
-            self.KEY_CAPTURE_ASK_HOTKEY: self._capture_ask_hotkey.value() or "win+`",
+            self.KEY_ASK_AI_HOTKEY: self._ask_ai_hotkey.value() or "alt+1",
+            self.KEY_CAPTURE_ASK_HOTKEY: self._capture_ask_hotkey.value() or "alt+2",
             self.KEY_STT_HOTKEY: self._stt_hotkey.value() or "ctrl+win",
             self.KEY_CAPTURE_FOLDER: self._capture_folder_edit.text(),
             # OCR은 별도 엔진 선택 없이 항상 AI(Gemini/Mindlogic) API로 처리 → kind 고정.
@@ -2047,7 +2065,7 @@ class SettingsDialog(QDialog):
         new_settings[self.KEY_AI_PROFILES] = json.dumps(self._profiles, ensure_ascii=False)
         new_settings[self.KEY_AI_ACTIVE_PROFILE] = self._profile_combo.currentText()
 
-        # AI 팔레트 타겟 — 화면의 각 행을 순서 그대로 직렬화(순서=Alt+숫자 번호).
+        # AI 팔레트 타겟 — 화면의 각 행을 순서 그대로 직렬화(순서=질문창 Tab 순환 순서).
         new_settings[self.KEY_AI_PALETTE_SITES] = ai_palette.dump_sites(
             [row.to_dict() for row in self._palette_rows])
 

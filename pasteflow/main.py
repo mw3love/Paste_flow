@@ -933,10 +933,15 @@ class PasteFlowApp:
         capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         self.interceptor.set_capture_hotkey(capture_hotkey)
 
-        capture_ask_hotkey = self.db.get_setting("hotkey_capture_ask", "win+`")
+        # 기본값을 win+`/alt+`에서 alt+2/alt+1로 변경(2026-08-03) — Windows Terminal이
+        # win+`를 '퀘이크 모드' 전용 전역 단축키로 기본 등록해 두므로(마이크로소프트 공식
+        # 이슈에도 등재된 잘 알려진 기본 동작), 설정창에서 그 조합을 녹화하려 하면
+        # 터미널이 먼저 반응해 캡처가 아예 안 되는 충돌이 있었다. Windows Terminal이
+        # 깔린 PC라면 전부 겪을 문제라 앱 기본값 자체를 바꿨다.
+        capture_ask_hotkey = self.db.get_setting("hotkey_capture_ask", "alt+2")
         self.interceptor.set_capture_ask_hotkey(capture_ask_hotkey)
 
-        ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+`")
+        ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+1")
         self.interceptor.set_ask_ai_hotkey(ask_ai_hotkey)
 
         record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
@@ -1041,7 +1046,7 @@ class PasteFlowApp:
         self._capture_overlay.start()
 
     def _on_capture_ask_hotkey(self):
-        """메인 스레드: 영역 캡처 + Gemini 질문창 첨부 단축키(기본 Win+`).
+        """메인 스레드: 영역 캡처 + Gemini 질문창 첨부 단축키(기본 Alt+2).
 
         영역 캡처(Alt+F2)와 완전히 같은 오버레이를 그대로 띄우되, 이번 캡처는
         저장이 끝난 뒤 곧장 Gemini 질문창에 이미지를 첨부해 열도록 플래그만 세운다
@@ -1062,7 +1067,7 @@ class PasteFlowApp:
         _persist_clipboard_item). 이미지는 붙여넣기 호환성이 가장 넓은 CF_DIB로 넣는다.
         rect(캡처한 논리 전역 사각형)를 기억해 직후 핀(Alt+F3)이 그 자리에 그대로 덮게 한다.
         """
-        from pasteflow.ui.toast import ToastNotification
+        from pasteflow.ui.toast import ToastNotification, show_copy_toast
 
         self._pin_place_rect = QRect(rect) if rect is not None else None
         dib = _qpixmap_to_dib(pixmap)
@@ -1088,11 +1093,11 @@ class PasteFlowApp:
             # 이미지→경로 단축키의 재사용 캐시에 이 경로를 미리 등록해 둔다 — 그러면
             # temp에 별도 사본을 또 만들지 않고 방금 저장한 이 파일 경로를 그대로 쓴다.
             self._img_to_path_cache = (saved_item.id, saved_path)
-            ToastNotification(
-                f"캡처됨: {os.path.basename(saved_path)}",
-                icon="", image_path=saved_path)
-        else:
-            ToastNotification("캡처를 클립보드에 복사했습니다", icon="📷")
+
+        # 일반 복사와 동일한 토스트(Q{n} 배지+썸네일)로 통일 — "캡처됨" 문구·파일명
+        # 노출 없이 텍스트/이미지 복사와 같은 UX로 몇 번째 큐에 걸렸는지 바로 보여준다.
+        _, total = self.queue.get_status()
+        show_copy_toast(saved_item, total)
 
         # Win+`(캡처+질문)로 트리거된 캡처면, 저장까지 끝난 이 이미지를 곧장
         # Gemini 질문창에 첨부해 연다 — 사용자는 질문만 타이핑하면 된다.
@@ -2515,7 +2520,8 @@ class PasteFlowApp:
             "hotkey_pin_image": self.db.get_setting("hotkey_pin_image", "alt+f3"),
             "hotkey_seq_pin": self.db.get_setting("hotkey_seq_pin", "alt+shift+f3"),
             "hotkey_capture": self.db.get_setting("hotkey_capture", "alt+f2"),
-            "hotkey_ask_ai": self.db.get_setting("hotkey_ask_ai", "alt+`"),
+            "hotkey_capture_ask": self.db.get_setting("hotkey_capture_ask", "alt+2"),
+            "hotkey_ask_ai": self.db.get_setting("hotkey_ask_ai", "alt+1"),
             "ai_palette_sites": self.db.get_setting("ai_palette_sites", ""),
             "hotkey_record_gif": self.db.get_setting("hotkey_record_gif", "ctrl+shift+g"),
             "hotkey_stt": self.db.get_setting("hotkey_stt", "ctrl+win"),
@@ -2572,8 +2578,8 @@ class PasteFlowApp:
         old_pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
         old_seq_pin_hotkey = self.db.get_setting("hotkey_seq_pin", "alt+shift+f3")
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
-        old_capture_ask_hotkey = self.db.get_setting("hotkey_capture_ask", "win+`")
-        old_ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+`")
+        old_capture_ask_hotkey = self.db.get_setting("hotkey_capture_ask", "alt+2")
+        old_ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+1")
         old_record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
         old_stt_hotkey = self.db.get_setting("hotkey_stt", "ctrl+win")
 
@@ -2619,12 +2625,12 @@ class PasteFlowApp:
             self.interceptor.set_capture_hotkey(new_capture_hotkey)
 
         # 영역 캡처 + Gemini 질문창 첨부 단축키 재설정
-        new_capture_ask_hotkey = new_settings.get("hotkey_capture_ask", "win+`")
+        new_capture_ask_hotkey = new_settings.get("hotkey_capture_ask", "alt+2")
         if old_capture_ask_hotkey != new_capture_ask_hotkey:
             self.interceptor.set_capture_ask_hotkey(new_capture_ask_hotkey)
 
         # AI 자유질문 단축키 재설정
-        new_ask_ai_hotkey = new_settings.get("hotkey_ask_ai", "alt+`")
+        new_ask_ai_hotkey = new_settings.get("hotkey_ask_ai", "alt+1")
         if old_ask_ai_hotkey != new_ask_ai_hotkey:
             self.interceptor.set_ask_ai_hotkey(new_ask_ai_hotkey)
 

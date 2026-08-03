@@ -295,13 +295,12 @@ def show_copy_toast(item, queue_count: int) -> ToastNotification:
     # QPixmap이 못 여므로 BMP 헤더를 조립해 로드 가능하게 만들고(핀 항목은 thumbnail이
     # 없어 이 변환이 없으면 아이콘만 떴다), 그래도 안 되면 thumbnail로 폴백.
     thumb_bytes = None
-    _renderable = False   # QPixmap이 실제로 로드에 성공한 경우만 True
     if getattr(item, "content_type", None) == "image":
         data = getattr(item, "image_data", None)
         if data:
             _probe = QPixmap()
             if _probe.loadFromData(data):
-                thumb_bytes, _renderable = data, True
+                thumb_bytes = data
             else:
                 # raw CF_DIB(QPixmap 미지원) → BMP 파일 헤더 조립 후 재시도
                 from pasteflow.clipboard_monitor import is_encoded_image, _dib_to_bmp
@@ -309,21 +308,17 @@ def show_copy_toast(item, queue_count: int) -> ToastNotification:
                     try:
                         bmp = _dib_to_bmp(data)
                         if QPixmap().loadFromData(bmp):
-                            thumb_bytes, _renderable = bmp, True
+                            thumb_bytes = bmp
                     except Exception:
                         pass
         if thumb_bytes is None:
             thumb_bytes = getattr(item, "thumbnail", None) or data
-            if thumb_bytes is not None:
-                _renderable = QPixmap().loadFromData(thumb_bytes)
-    # 렌더 가능한 썸네일이 있을 때만 이모지(📋) 생략 — 썸네일이 카테고리를 대신한다
-    # (image_path 토스트와 동일 규칙). 텍스트 항목이나 로드 불가 폴백값이면 📋를 유지해야
-    # '아이콘도 썸네일도 없는' 상태(회귀)를 막는다.
-    _has_thumb = _renderable
+    # 아이콘은 생략한다 — Q{n} 배지가 이미 "복사됨" 카테고리를 나타내므로 중복.
+    # 이미지는 썸네일이 그 자리를 대신하고, 텍스트는 배지+본문만으로 충분하다.
     return ToastNotification(
         preview,
         duration_ms=COPY_TOAST_DURATION_MS,
-        icon="" if _has_thumb else "📋",
+        icon="",
         badge=f"Q{queue_count}",
         badge_position="leading",
         image_bytes=thumb_bytes,

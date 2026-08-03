@@ -25,7 +25,7 @@ from urllib.parse import quote_plus
 KIND_URL = "url"
 KIND_GOOGLE_AI = "google_ai"
 
-# 첫 실행(저장된 값이 없을 때) 기본 타겟 — 순서가 곧 팔레트 번호(Alt+1~9).
+# 첫 실행(저장된 값이 없을 때) 기본 타겟 — 순서가 곧 팔레트 번호(질문창 Tab 순환 순서).
 DEFAULT_SITES: list[dict] = [
     {"label": "Google AI", "keyword": "g", "kind": KIND_GOOGLE_AI, "url": ""},
 ]
