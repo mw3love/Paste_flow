@@ -2772,8 +2772,11 @@ class PasteFlowApp:
             except (ValueError, TypeError):
                 pass
 
-    # 부팅 후 Drive 마운트 대기 시간(초). 이 시간이 지난 뒤 launcher VBS가 PasteFlow를 실행한다.
-    _AUTOSTART_DRIVE_WAIT_SEC = 15
+    # 로그온 직후 대기 시간(초). 이 시간이 지난 뒤 launcher VBS가 PasteFlow를 실행한다.
+    # 옛 15초는 "코드가 구글 드라이브 마운트 경로에 있어 그 마운트를 기다림"이 목적이었으나,
+    # 지금은 코드 경로가 로컬 디스크(Dev\Paste_flow)라 그 이유가 더 이상 적용되지 않는다(2026-08-05 실측 확인).
+    # 2초는 로그온 초반 COM/WScript.Shell 초기화 여유만 남긴 값.
+    _AUTOSTART_DRIVE_WAIT_SEC = 2
 
     def _write_autostart_launcher_vbs(self, target_cmd: str) -> str:
         """%LOCALAPPDATA%\\PasteFlow\\autostart_launcher.vbs 생성/갱신.
