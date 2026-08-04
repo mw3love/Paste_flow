@@ -48,6 +48,27 @@ def _qimage_to_bgr_array(qimg):
     return np.ascontiguousarray(arr[:, :w, :3])
 
 
+def extract_first_frame_png(path: str) -> bytes | None:
+    """저장된 mp4의 첫 프레임을 PNG bytes로 반환 — 토스트 썸네일용(실패 시 None).
+
+    GIF는 QPixmap이 파일을 직접 디코딩해 썸네일을 그리지만 mp4는 Qt가 못 읽으므로,
+    이미 녹화에 쓰던 cv2로 첫 프레임만 다시 읽어 PNG로 인코딩한다.
+    """
+    import cv2
+
+    cap = cv2.VideoCapture(path)
+    try:
+        ok, frame = cap.read()
+    finally:
+        cap.release()
+    if not ok or frame is None:
+        return None
+    ok2, buf = cv2.imencode(".png", frame)
+    if not ok2:
+        return None
+    return buf.tobytes()
+
+
 class VideoRecorder(QObject):
     """지정 영역을 fps마다 grab해 곧장 mp4 파일에 기록하는 녹화 매니저.
 

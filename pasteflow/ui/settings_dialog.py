@@ -839,8 +839,10 @@ class SettingsDialog(QDialog):
         tab_ai = _make_tab("AI")
 
         # ── 기능 단축키 그룹 (변경 가능) — 아래 기본 단축키 다음에 배치 ──
-        # 인식 편의를 위해 4개 하위 묶음을 얇은 구분선으로 분리(쭉 나열 대신 시각 그룹화):
-        #  ① 패널  ② 경로 붙여넣기류  ③ 영역 캡처·핀류  ④ AI(호출·OCR)
+        # 인식 편의를 위해 3개 하위 묶음을 얇은 구분선으로 분리(쭉 나열 대신 시각 그룹화):
+        #  ① 패널  ② 경로 붙여넣기류  ③ 영역 캡처·핀류
+        # AI 호출류(Gemini 호출·Gemini(캡처)·OCR·STT)는 「AI」 탭의 별도 그룹으로 옮겼다
+        # (2026-08-04, 사용자 요청 — 이 4개만 AI 관련이라 AI 탭에 있는 편이 자연스럽다).
         hotkey_group = QGroupBox("기능 단축키 (변경 가능)")
         hotkey_form = QFormLayout(hotkey_group)
         hotkey_form.setVerticalSpacing(4)
@@ -921,15 +923,23 @@ class SettingsDialog(QDialog):
             "■ 정지 버튼(또는 ESC로 취소)으로 끝내면 저장되고 파일 경로가 클립보드에 복사됩니다."
         )
         hotkey_form.addRow("•  영상 녹화:", self._record_video_hotkey)
-        hotkey_form.addRow(_hk_sep())
 
-        # ④ Gemini 호출(alt+1) / Gemini(캡처, alt+2) / OCR
+        # ── AI 단축키 그룹 — Gemini 호출/Gemini(캡처)/OCR/STT(2026-08-04: 「일반」 탭
+        # 기능 단축키에서 「AI」 탭으로 이동, 사용자 요청 — 이 4개만 AI 호출 기능이라
+        # AI 탭에 있는 편이 자연스럽다). 회색 테두리(그룹박스 전역 스타일)와 OCR↔STT
+        # 사이 구분선은 그대로 유지.
+        ai_hotkey_group = QGroupBox("AI 단축키 (변경 가능)")
+        ai_hotkey_form = QFormLayout(ai_hotkey_group)
+        ai_hotkey_form.setVerticalSpacing(4)
+        ai_hotkey_form.setContentsMargins(10, 8, 10, 8)
+
+        # Gemini 호출(alt+1) / Gemini(캡처, alt+2) / OCR
         self._ask_ai_hotkey = HotkeyEdit()
         self._ask_ai_hotkey.setToolTip(
             "컨텍스트 없이 즉석에서 Gemini에게 질문하는 입력창을 띄웁니다.\n"
             "클립보드 항목과 무관하게 아무 때나 한 키로 Gemini를 호출해 자유 질문하고 답변을 받습니다."
         )
-        hotkey_form.addRow("•  Gemini 호출:", self._ask_ai_hotkey)
+        ai_hotkey_form.addRow("•  Gemini 호출:", self._ask_ai_hotkey)
 
         # 영역 캡처 + Gemini 질문창 첨부 — 영역 캡처(Alt+F2)와 같은 오버레이로 캡처하되
         # 저장까지 끝낸 뒤 그 이미지를 곧장 Gemini 질문창에 첨부해 연다(2026-08-02, 사용자
@@ -948,7 +958,7 @@ class SettingsDialog(QDialog):
             "화면 영역을 드래그로 선택해 캡처하고(영역 캡처와 동일), 저장까지 끝낸 그 이미지를\n"
             "곧장 Gemini 질문창에 첨부해 엽니다 — 질문만 타이핑하면 됩니다."
         )
-        hotkey_form.addRow("•  Gemini(캡처):", self._capture_ask_hotkey)
+        ai_hotkey_form.addRow("•  Gemini(캡처):", self._capture_ask_hotkey)
 
         # OCR(옛 이름 "AI OCR") — 화면 영역을 AI(설정된 API)로 텍스트 인식. 별도 엔진 없음.
         # 음성 입력(STT) 바로 위로 이동(2026-08-03, 사용자 요청) — 텍스트 인식·음성 인식이
@@ -958,10 +968,10 @@ class SettingsDialog(QDialog):
             "화면 영역을 드래그로 선택해 그 안의 텍스트를 AI(설정된 API)로 인식합니다.\n"
             "결과 텍스트가 클립보드·히스토리에 들어갑니다."
         )
-        hotkey_form.addRow("•  OCR:", self._ocr_hotkey)
-        hotkey_form.addRow(_hk_sep())
+        ai_hotkey_form.addRow("•  OCR:", self._ocr_hotkey)
+        ai_hotkey_form.addRow(_hk_sep())
 
-        # ⑤ 음성 입력(STT) — 누르고 있는 동안 녹음(푸시투토크), 떼면 인식 후 자동 붙여넣기.
+        # 음성 입력(STT) — 누르고 있는 동안 녹음(푸시투토크), 떼면 인식 후 자동 붙여넣기.
         # allow_mod_only=True — Ctrl+Win처럼 일반키 없이 수식키만으로 된 조합도 캡처
         # 가능(Wispr Flow와 동일 제스처로 비교하려는 사용자 요청, 2026-08-02). 기본값
         # 자체가 ctrl+win(main.py)이라 여기서도 그 조합을 재캡처할 수 있어야 한다.
@@ -972,7 +982,10 @@ class SettingsDialog(QDialog):
             "Ctrl+Win처럼 일반키 없이 수식키만으로 된 조합도 가능합니다(Wispr Flow와 동일 제스처).\n"
             "게이트웨이 오디오 입력은 Gemini 계열 모델만 지원합니다 — 아래 STT 모델에서 선택하세요."
         )
-        hotkey_form.addRow("•  음성 입력(STT):", self._stt_hotkey)
+        ai_hotkey_form.addRow("•  음성 입력(STT):", self._stt_hotkey)
+        # tab_ai.addWidget(ai_hotkey_group)는 AI 탭 맨 아래(빠른 검색 다음)에 배치하려고
+        # 여기서 바로 호출하지 않고 뒤로 미룬다(2026-08-04, 사용자 요청) — 그 자리에서
+        # 그대로 호출.
 
         # 녹화 시작/종료를 하나의 다이얼로그 시그널로 모은다 — main이 이걸로 전역 훅을
         # suspend/resume한다(어느 HotkeyEdit이든 녹화를 시작하면 suspend, 끝나면 resume).
@@ -1300,6 +1313,10 @@ class SettingsDialog(QDialog):
         palette_layout.addWidget(add_site_btn, 0, Qt.AlignmentFlag.AlignLeft)
 
         tab_ai.addWidget(palette_group)
+
+        # AI 단축키 그룹은 AI 탭 맨 아래에 배치(2026-08-04, 사용자 요청 — 크리덴셜·팔레트가
+        # 우선이고 단축키는 참고용으로 하단에).
+        tab_ai.addWidget(ai_hotkey_group)
 
         # ── 일반 설정 그룹 ── 「일반」 탭의 맨 위(아래 insertWidget(0, ...) 참고).
         # 탭 제목도 "일반"이라 그룹박스 제목까지 "일반"이면 중복으로 읽혀 "일반 설정"으로 구분.

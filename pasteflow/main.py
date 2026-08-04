@@ -1235,9 +1235,14 @@ class PasteFlowApp:
         )
         self.interceptor._set_clipboard(path_item)
         self._persist_clipboard_item(path_item)
+        from pasteflow.video_recorder import extract_first_frame_png
+        try:
+            thumb = extract_first_frame_png(path)
+        except Exception:
+            thumb = None
         ToastNotification(
             f"영상 저장·경로 복사됨: {os.path.basename(path)}",
-            icon="🎬")
+            icon="" if thumb else "🎬", image_bytes=thumb)
 
     def _on_record_finished(self, frames, interval_ms):
         """메인 스레드: 녹화 종료 → 인코딩을 워커에 넘긴다(프레임 수가 많으면 UI 블로킹)."""
