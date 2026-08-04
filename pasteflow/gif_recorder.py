@@ -11,6 +11,8 @@
 - _RecordController: 녹화 중 화면에 떠 있는 ■ 정지 위젯(항상 위, 경과시간 표시).
 - encode_gif(): 프레임 리스트를 Pillow로 GIF 저장(다운스케일·팔레트 양자화·optimize).
 - composite_cursor(): 프레임에 실제 커서를 GDI로 합성(video_recorder.py도 공유 재사용).
+  저수준 조각(sample_cursor·cursor_hotspot·blit_icon_at)은 capture_overlay.py의 정지 캡처
+  '커서 포함' 미리보기 마커도 직접 가져다 쓴다(오버레이가 커서를 가로채기 전에 얼려두는 값).
 
 커서 합성 방식(2026-08-03)
 --------------------------
@@ -132,41 +134,50 @@ def _make_bmi_top_down(w: int, h: int) -> _BITMAPINFOHEADER:
     return bmi
 
 
-def composite_cursor(qimg: QImage, screen: QScreen, local_rect: QRect) -> QImage:
-    """qimg(local_rect를 grab한 프레임)에 현재 커서를 합성해 반환.
+def sample_cursor() -> tuple[int, int, int] | None:
+    """지금 화면에 떠 있는 커서를 (hCursor, 물리 x, 물리 y)로 1회 샘플링. 숨겨져 있으면 None.
 
-    local_rect: screen 안에서의 캡처 사각형(screen-local **논리** 좌표 — GifRecorder가
-    쓰는 것과 동일한 rect). 커서가 숨겨져 있거나 이 화면 밖이면 원본을 그대로 반환한다.
-    실패해도 녹화 자체는 계속돼야 하므로 어떤 예외든 원본 프레임을 반환(최선 노력형).
+    capture_overlay가 자기 오버레이(십자선)로 커서를 가로채기 '전'에 이 함수로 진짜 커서를
+    얼려두는 데도 쓴다(정지 캡처의 '커서 포함' 기능) — GIF/영상 녹화는 이 값을 매 프레임
+    라이브로 다시 구해 composite_cursor에 넘긴다.
     """
     try:
         ci = _CURSORINFO()
         ci.cbSize = ctypes.sizeof(_CURSORINFO)
         if not _cur_user32.GetCursorInfo(ctypes.byref(ci)):
-            return qimg
+            return None
         if not (ci.flags & _CURSOR_SHOWING):
-            return qimg
-        hcursor = ci.hCursor
-        sx, sy = ci.ptScreenPos.x, ci.ptScreenPos.y
+            return None
+        return (ci.hCursor, ci.ptScreenPos.x, ci.ptScreenPos.y)
+    except Exception:
+        return None
 
+
+def cursor_hotspot(hcursor) -> tuple[int, int] | None:
+    """hcursor의 핫스팟(아이콘 좌상단 기준 오프셋). 실패하면 None."""
+    try:
         icon_info = _ICONINFO()
         if not _cur_user32.GetIconInfo(hcursor, ctypes.byref(icon_info)):
-            return qimg
+            return None
         # hbmMask/hbmColor는 GetIconInfo 문서상 호출자가 항상 delete해야 한다.
         # hCursor 자체는 시스템 공유 핸들이라 파괴하면 안 된다(DestroyIcon 호출 금지).
         if icon_info.hbmMask:
             _cur_gdi32.DeleteObject(icon_info.hbmMask)
         if icon_info.hbmColor:
             _cur_gdi32.DeleteObject(icon_info.hbmColor)
-        hotspot_x, hotspot_y = icon_info.xHotspot, icon_info.yHotspot
+        return (icon_info.xHotspot, icon_info.yHotspot)
+    except Exception:
+        return None
 
-        mon_x, mon_y = _monitor_phys_origin(sx, sy)
-        dpr = screen.devicePixelRatio()
-        region_phys_x = mon_x + round(local_rect.x() * dpr)
-        region_phys_y = mon_y + round(local_rect.y() * dpr)
-        cx = (sx - region_phys_x) - hotspot_x
-        cy = (sy - region_phys_y) - hotspot_y
 
+def blit_icon_at(qimg: QImage, hcursor, cx: int, cy: int) -> QImage:
+    """qimg(물리픽셀 버퍼)의 (cx,cy)(아이콘 좌상단 기준, 물리픽셀)에 hcursor를 GDI로 그려 합성.
+
+    composite_cursor의 실제 GDI 블릿 부분(SetDIBits→DrawIconEx→GetDIBits)을 그대로 뽑아낸
+    저수준 조각 — capture_overlay의 커서 미리보기 마커도 작은 패치에 이 함수를 직접 쓴다.
+    실패하면 원본을 그대로 반환(최선 노력형).
+    """
+    try:
         w, h = qimg.width(), qimg.height()
         # 캡처 영역과 커서 아이콘 박스가 전혀 안 겹치면 합성할 필요 없음
         if cx <= -128 or cy <= -128 or cx >= w or cy >= h:
@@ -199,6 +210,42 @@ def composite_cursor(qimg: QImage, screen: QScreen, local_rect: QRect) -> QImage
 
         result = QImage(bytes(out.raw), w, h, QImage.Format.Format_RGB32)
         return result.copy()
+    except Exception:
+        return qimg
+
+
+def composite_cursor(qimg: QImage, screen: QScreen, local_rect: QRect, cursor=None) -> QImage:
+    """qimg(local_rect를 grab한 프레임)에 커서를 합성해 반환.
+
+    local_rect: screen 안에서의 캡처 사각형(screen-local **논리** 좌표 — GifRecorder가
+    쓰는 것과 동일한 rect).
+    cursor: (hCursor, 물리x, 물리y)를 주면 그 '얼려둔' 커서를 굽는다(정지 캡처의 커서 포함
+    기능 — capture_overlay가 오버레이를 띄우기 전에 sample_cursor()로 미리 떠둔 값).
+    None(기본)이면 지금 이 순간을 sample_cursor()로 라이브 샘플링한다(GIF/영상 녹화가 매
+    프레임 호출하는 기존 동작, 하위호환).
+    커서가 숨겨져 있거나 이 화면 밖이면 원본을 그대로 반환한다. 실패해도 녹화 자체는
+    계속돼야 하므로 어떤 예외든 원본 프레임을 반환(최선 노력형).
+    """
+    try:
+        if cursor is None:
+            cursor = sample_cursor()
+            if cursor is None:
+                return qimg
+        hcursor, sx, sy = cursor
+
+        hs = cursor_hotspot(hcursor)
+        if hs is None:
+            return qimg
+        hotspot_x, hotspot_y = hs
+
+        mon_x, mon_y = _monitor_phys_origin(sx, sy)
+        dpr = screen.devicePixelRatio()
+        region_phys_x = mon_x + round(local_rect.x() * dpr)
+        region_phys_y = mon_y + round(local_rect.y() * dpr)
+        cx = (sx - region_phys_x) - hotspot_x
+        cy = (sy - region_phys_y) - hotspot_y
+
+        return blit_icon_at(qimg, hcursor, cx, cy)
     except Exception:
         return qimg
 
