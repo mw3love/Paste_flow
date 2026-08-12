@@ -942,6 +942,9 @@ class PasteFlowApp:
         capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         self.interceptor.set_capture_hotkey(capture_hotkey)
 
+        capture_use_printscreen = self.db.get_setting("capture_use_printscreen", "0") == "1"
+        self.interceptor.set_capture_via_printscreen(capture_use_printscreen)
+
         # 기본값을 win+`/alt+`에서 alt+2/alt+1로 변경(2026-08-03) — Windows Terminal이
         # win+`를 '퀘이크 모드' 전용 전역 단축키로 기본 등록해 두므로(마이크로소프트 공식
         # 이슈에도 등재된 잘 알려진 기본 동작), 설정창에서 그 조합을 녹화하려 하면
@@ -2685,6 +2688,7 @@ class PasteFlowApp:
         old_pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
         old_seq_pin_hotkey = self.db.get_setting("hotkey_seq_pin", "alt+shift+f3")
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
+        old_capture_use_printscreen = self.db.get_setting("capture_use_printscreen", "0")
         old_capture_ask_hotkey = self.db.get_setting("hotkey_capture_ask", "alt+2")
         old_ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+1")
         old_record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
@@ -2731,6 +2735,11 @@ class PasteFlowApp:
         new_capture_hotkey = new_settings.get("hotkey_capture", "alt+f2")
         if old_capture_hotkey != new_capture_hotkey:
             self.interceptor.set_capture_hotkey(new_capture_hotkey)
+
+        # PrintScreen 대체 실행 재설정
+        new_capture_use_printscreen = new_settings.get("capture_use_printscreen", "0")
+        if old_capture_use_printscreen != new_capture_use_printscreen:
+            self.interceptor.set_capture_via_printscreen(new_capture_use_printscreen == "1")
 
         # 영역 캡처 + Gemini 질문창 첨부 단축키 재설정
         new_capture_ask_hotkey = new_settings.get("hotkey_capture_ask", "alt+2")

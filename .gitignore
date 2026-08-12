@@ -19,3 +19,6 @@ client_secret*.json
 .playwright-mcp/
 # webchat 로컬 런처 — 개인 API 키를 담으므로 커밋 금지.
 webchat/run_local.bat
+
+# Claude Code personal local settings
+.claude/settings.local.json

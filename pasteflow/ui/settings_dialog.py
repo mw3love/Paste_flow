@@ -636,6 +636,7 @@ class SettingsDialog(QDialog):
     KEY_PIN_IMAGE_HOTKEY = "hotkey_pin_image"
     KEY_SEQ_PIN_HOTKEY = "hotkey_seq_pin"
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
+    KEY_CAPTURE_USE_PRINTSCREEN = "capture_use_printscreen"
     KEY_CAPTURE_ASK_HOTKEY = "hotkey_capture_ask"
     KEY_RECORD_GIF_HOTKEY = "hotkey_record_gif"
     KEY_RECORD_VIDEO_HOTKEY = "hotkey_record_video"
@@ -889,6 +890,15 @@ class SettingsDialog(QDialog):
             "ESC 또는 우클릭으로 취소합니다."
         )
         hotkey_form.addRow("•  영역 캡처:", self._capture_hotkey)
+
+        self._capture_printscreen_check = QCheckBox("PrintScreen 키로도 실행")
+        self._capture_printscreen_check.setToolTip(
+            "PrintScreen 키를 단독으로 누르면(Alt/Ctrl/Shift/Win 없이) 위 영역 캡처와\n"
+            "완전히 동일하게 동작합니다. Alt를 누르면 사라지는 메뉴 등을 캡처할 때 유용합니다.\n"
+            "⚠ 켜면 Windows 기본 PrintScreen 동작(전체화면 클립보드 복사/스니핑 도구 실행)을\n"
+            "대체합니다. Alt+PrtScn·Win+PrtScn 등 다른 조합은 그대로 OS가 처리합니다."
+        )
+        hotkey_form.addRow(_bullet_checkbox_row(self._capture_printscreen_check))
 
         self._pin_image_hotkey = HotkeyEdit()
         self._pin_image_hotkey.setToolTip(
@@ -1607,6 +1617,9 @@ class SettingsDialog(QDialog):
         self._capture_hotkey.set_value(
             self._settings.get(self.KEY_CAPTURE_HOTKEY, "alt+f2")
         )
+        self._capture_printscreen_check.setChecked(
+            self._settings.get(self.KEY_CAPTURE_USE_PRINTSCREEN, "0") == "1"
+        )
         self._record_gif_hotkey.set_value(
             self._settings.get(self.KEY_RECORD_GIF_HOTKEY, "ctrl+shift+g")
         )
@@ -2173,6 +2186,7 @@ class SettingsDialog(QDialog):
             self.KEY_PIN_IMAGE_HOTKEY: self._pin_image_hotkey.value() or "alt+f3",
             self.KEY_SEQ_PIN_HOTKEY: self._seq_pin_hotkey.value() or "alt+shift+f3",
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
+            self.KEY_CAPTURE_USE_PRINTSCREEN: "1" if self._capture_printscreen_check.isChecked() else "0",
             self.KEY_RECORD_GIF_HOTKEY: self._record_gif_hotkey.value() or "ctrl+shift+g",
             self.KEY_RECORD_VIDEO_HOTKEY: self._record_video_hotkey.value() or "ctrl+shift+r",
             self.KEY_ASK_AI_HOTKEY: self._ask_ai_hotkey.value() or "alt+1",

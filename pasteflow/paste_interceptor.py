@@ -56,6 +56,7 @@ VK_LWIN = 0x5B
 VK_RWIN = 0x5C
 VK_MASK = 0xE8  # 미할당 가상 키 — Ctrl+Shift 조합을 더럽혀 입력기 전환 팝업 방지
 VK_RETURN = 0x0D
+VK_SNAPSHOT = 0x2C  # PrintScreen — 설정 on일 때 영역 캡처(Alt+F2)와 동일 동작을 대체 발동
 LLKHF_INJECTED = 0x10  # KBDLLHOOKSTRUCT.flags 비트 — SendInput 등으로 주입된 키
 
 
@@ -334,6 +335,11 @@ class PasteInterceptor:
         self._capture_need_ctrl: bool = False
         self._capture_need_shift: bool = False
         self._capture_need_alt: bool = False
+        # PrintScreen으로 영역 캡처 대체 실행(설정 체크박스, 기본 꺼짐) — Alt+F2와 완전히
+        # 같은 on_capture 콜백을 호출한다. 수식키(Ctrl/Shift/Alt/Win) 없이 단독으로 눌렸을
+        # 때만 발동해 Alt+PrtScn(활성창 캡처)·Win+PrtScn(전체화면 파일저장) 등 다른 OS
+        # 조합은 건드리지 않는다.
+        self._capture_via_printscreen: bool = False
         # 영역 캡처 + Gemini 질문창 첨부 단축키 (기본 Alt+2, 2026-08-03부터 — 예전 기본값
         # Win+`는 Windows Terminal의 퀘이크 모드 전역 단축키와 충돌해 변경. Win 조합도
         # 여전히 고를 수 있어 Win키도 수식키로 판정해야 하므로 다른 단축키와 달리
@@ -470,6 +476,10 @@ class PasteInterceptor:
             self._capture_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._capture_vk = 0
+
+    def set_capture_via_printscreen(self, enabled: bool):
+        """PrintScreen 키를 영역 캡처(Alt+F2)의 추가 트리거로 쓸지 설정한다."""
+        self._capture_via_printscreen = bool(enabled)
 
     def set_capture_ask_hotkey(self, hotkey_str: str):
         """영역 캡처 + Gemini 질문창 첨부 단축키 설정(기본 Alt+2) — 영역 캡처(Alt+F2)와
@@ -864,6 +874,20 @@ class PasteInterceptor:
                         except Exception:
                             pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)
+
+                # PrintScreen으로 영역 캡처 대체 실행(설정 체크박스) — Alt+F2와 동일한
+                # on_capture 콜백. 수식키가 하나라도 눌려 있으면(Alt+PrtScn·Win+PrtScn 등
+                # OS 고유 조합) 건드리지 않고 통과시킨다.
+                if (self._capture_via_printscreen and vk_code == VK_SNAPSHOT
+                        and not ctrl_pressed and not shift_pressed
+                        and not alt_pressed and not win_pressed):
+                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
+                    if self.on_capture:
+                        try:
+                            self.on_capture()
+                        except Exception:
+                            pass
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지, OS 기본 PrtScn 동작 차단)
 
                 # 영역 캡처 + Gemini 질문창 첨부 단축키 감지 (기본 Win+`) — 영역 캡처와
                 # 동일한 오버레이를 띄우되, 콜백이 main 쪽에서 "이번 캡처는 곧장 질문창에
