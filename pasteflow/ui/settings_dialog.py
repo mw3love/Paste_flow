@@ -683,12 +683,13 @@ class SettingsDialog(QDialog):
     # 워커 스레드 → UI 안전 통신용 내부 시그널 (models, error_msg)
     _models_fetched = pyqtSignal(list, str)  # (models, error)
     # 연결 테스트 단계별 결과 (run_id, slot, status, detail).
-    # slot: "conn" | "ocr" | "__end__"(버튼 복구 신호)
+    # slot: "conn" | "ocr" | "credit" | "__end__"(버튼 복구 신호)
     # status: ProbeResult.status + "run"(진행 중) / "skip"(앞 단계 실패로 건너뜀)
     # run_id: 이 결과를 만든 테스트 회차. 최신 회차가 아니면 UI가 버린다(아래 _on_probe_done).
+    # 크레딧 확인(2026-08-12)은 별도 버튼·시그널 없이 이 회차에 합류한다 — 연결 테스트와
+    # 크레딧 확인 둘 다 "지금 이 키로 뭐가 되는지" 확인이라는 성격이 같아 한 클릭으로 묶었다
+    # (사용자 요청, 모델조회는 콤보를 채우는 별개 준비 동작이라 그대로 분리 유지).
     _probe_done = pyqtSignal(int, str, str, str)
-    # 크레딧 확인 워커 → UI (remaining, quota, error_msg)
-    _credits_fetched = pyqtSignal(float, float, str)
 
     def __init__(self, current_settings: dict, parent=None):
         super().__init__(parent)
@@ -705,7 +706,6 @@ class SettingsDialog(QDialog):
         self._finalize_size()
         self._models_fetched.connect(self._on_models_fetched)
         self._probe_done.connect(self._on_probe_done)
-        self._credits_fetched.connect(self._on_credits_fetched)
 
     def _setup_window(self):
         self.setWindowTitle("PasteFlow 설정")
@@ -1175,11 +1175,15 @@ class SettingsDialog(QDialog):
         # 줄였다가(칸이 좁던 시절) 창을 넓힌 뒤 다시 "연결 테스트"로 되돌렸다
         # (2026-07-29 사용자 요청). setFixedWidth는 쓰지 않는다 — 전역 QPushButton
         # padding(6px 16px)보다 좁게 고정하면 글자가 양옆으로 잘린다(실측 확인됨).
+        # **크레딧 확인 병합(2026-08-12 사용자 요청)**: 원래 별도 버튼이던 크레딧 확인을
+        # 여기 흡수했다 — 둘 다 "지금 이 키로 뭐가 되는지" 그 자리에서 확인하는 동일 성격.
+        # 모델조회(콤보를 채우는 준비 동작, API 키 행 옆)는 성격이 달라 그대로 분리 유지.
         self._test_btn = QPushButton("연결 테스트")
         self._test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._test_btn.setToolTip(
             "키·연결을 확인하고, OCR 모델에 작은 테스트 이미지를 1회 실제로 보내\n"
-            "그 자리에서 되는지 확인합니다."
+            "그 자리에서 되는지 확인한 뒤, 게이트웨이 크레딧 잔액도 함께 조회합니다.\n"
+            "크레딧 조회는 Mindlogic 게이트웨이 전용 — 다른 API에서는 지원하지 않을 수 있습니다."
         )
         self._test_btn.clicked.connect(self._on_test_api)
 
@@ -1190,11 +1194,12 @@ class SettingsDialog(QDialog):
         model_row.addWidget(self._test_btn)
         ai_form.addRow(self._ocr_model_label, model_row)
 
-        # 연결·모델 프로브 결과 — 실행 순서(연결→모델)대로 콤보 아래에 쌓는다.
+        # 연결·모델·크레딧 프로브 결과 — 실행 순서(연결→모델→크레딧)대로 콤보 아래에 쌓는다.
         self._test_status = QLabel("")
         self._test_status.setWordWrap(True)
         self._test_status.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
-        ai_form.addRow("", self._stack(self._test_status, self._ocr_model_probe_status))
+        self._credit_status = self._make_probe_label()
+        ai_form.addRow("", self._stack(self._test_status, self._ocr_model_probe_status, self._credit_status))
 
         ai_form.addRow(_ai_sep())  # 모델 ↔ STT 모델 구분
 
@@ -1234,27 +1239,6 @@ class SettingsDialog(QDialog):
         mic_row.addWidget(self._mic_combo, 1)
         mic_row.addWidget(self._refresh_mic_btn)
         ai_form.addRow(QLabel("•  마이크:"), mic_row)
-
-        ai_form.addRow(_ai_sep())  # STT 모델 ↔ 크레딧 구분
-
-        # 크레딧 확인 — Mindlogic 게이트웨이 전용 엔드포인트(GET /credits/). 구글 직결 등
-        # 다른 base_url 프로필에서는 이 엔드포인트가 없어 실패할 수 있다(조용히 안내만).
-        self._credit_btn = QPushButton("크레딧 확인")
-        self._credit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._credit_btn.setToolTip(
-            "게이트웨이 크레딧 잔액을 그 자리에서 조회합니다.\n"
-            "Mindlogic 게이트웨이 전용 — 구글 AI Studio 등 다른 API에서는 지원하지 않을 수 있습니다."
-        )
-        self._credit_btn.clicked.connect(self._on_check_credits)
-        credit_row = QHBoxLayout()
-        credit_row.setContentsMargins(0, 0, 0, 0)
-        credit_row.addWidget(self._credit_btn)
-        credit_row.addStretch(1)
-        ai_form.addRow("•  크레딧:", credit_row)
-        self._credit_status = QLabel("")
-        self._credit_status.setWordWrap(True)
-        self._credit_status.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
-        ai_form.addRow("", self._credit_status)
 
         tab_ai.addWidget(ai_group)
 
@@ -1456,15 +1440,18 @@ class SettingsDialog(QDialog):
         outer.addWidget(self._btn_bar)
 
     def _on_test_api(self):
-        """연결 테스트 — 키·연결 + OCR 모델을 실호출해 결과를 콤보 아래에 보고한다(워커 스레드).
+        """연결 테스트 — 키·연결 + OCR 모델 + 크레딧 잔액을 실호출해 콤보 아래에 보고한다(워커 스레드).
 
         옛 버전은 모델 목록 조회 하나만 하고 "연결 성공 — API 키가 유효합니다"를 띄웠다.
         그 문구는 "고른 모델이 된다"로 읽히지만 실제로는 **모델을 호출하지 않았다** —
         OCR 모델의 이미지 입력 지원 여부는 목록 조회로 절대 알 수 없어, 텍스트 전용 모델을
         골라도 ✓가 떴다가 캡처할 때 400이 났다.
 
-        연결과 OCR 모델을 순서대로 실호출하고 각 결과를 제 자리(연결=상태 줄, 모델=콤보
-        아래)에 따로 쓴다. 연결이 실패하면 모델 테스트는 'skip'으로 남겨 원인을 흐리지 않는다.
+        연결·OCR 모델·크레딧을 순서대로 실호출하고 각 결과를 제 자리(연결=상태 줄, 모델·
+        크레딧=콤보 아래)에 따로 쓴다. 연결이 실패하면 모델 테스트는 'skip'으로 남겨 원인을
+        흐리지 않는다. **크레딧 조회는 연결 성패와 무관하게 항상 시도한다**(2026-08-12
+        병합 — 원래 별도 버튼이었고, 연결 프로브가 막혀도 크레딧 엔드포인트는 따로 열려
+        있을 수 있어 conn_ok에 종속시키지 않았다).
         """
         # creds는 UI 스레드에서 미리 읽어 넣는다(워커에서 위젯 접근 금지).
         api_key, base_url = self._creds()
@@ -1478,12 +1465,13 @@ class SettingsDialog(QDialog):
         self._test_btn.setEnabled(False)
         self._set_probe_status(self._test_status, "run", "연결 확인 중…")
         self._set_probe_status(self._ocr_model_probe_status, "run", "대기 중…")
+        self._set_probe_status(self._credit_status, "run", "대기 중…")
 
         import threading
 
         def _worker():
             try:
-                from pasteflow.ocr_engine import probe_connection, probe_ocr_model
+                from pasteflow.ocr_engine import probe_connection, probe_ocr_model, get_credit_balance
                 # 연결 프로브 1회 — 실패하면 모델 프로브는 skip해 원인을 흐리지 않는다.
                 if not api_key:
                     conn_ok = False
@@ -1503,6 +1491,20 @@ class SettingsDialog(QDialog):
                     self._probe_done.emit(run_id, "ocr", "run", f"{ocr_model} 호출 중…")
                     result = probe_ocr_model(api_key, base_url, ocr_model)
                     self._probe_done.emit(run_id, "ocr", result.status, result.detail)
+
+                if not api_key:
+                    self._probe_done.emit(run_id, "credit", "skip", "API 키가 없어 건너뛰었습니다.")
+                else:
+                    self._probe_done.emit(run_id, "credit", "run", "크레딧 조회 중…")
+                    try:
+                        remaining, quota = get_credit_balance(api_key, base_url)
+                        self._probe_done.emit(
+                            run_id, "credit", "ok",
+                            f"잔여 {remaining:,.1f} / {quota:,.0f} 크레딧")
+                    except Exception as e:
+                        self._probe_done.emit(
+                            run_id, "credit", "fail",
+                            f"크레딧 조회 실패(이 API는 지원하지 않을 수 있습니다) — {e}")
             except Exception as e:
                 # 프로브 함수 밖의 예상 못 한 오류(패키지 미설치 등)
                 self._probe_done.emit(run_id, "conn", "fail", f"테스트 실행 실패: {e}")
@@ -1528,6 +1530,7 @@ class SettingsDialog(QDialog):
         label = {
             "conn": self._test_status,
             "ocr": self._ocr_model_probe_status,
+            "credit": self._credit_status,
         }[slot]
         self._set_probe_status(label, status, detail)
 
@@ -1552,40 +1555,6 @@ class SettingsDialog(QDialog):
         """새로고침 버튼 — 방금 꽂은 마이크를 반영. 현재 선택은 보존한다."""
         current = self._mic_combo.currentData() or ""
         self._fill_mic_combo(current)
-
-    def _on_check_credits(self):
-        """크레딧 확인 버튼 — 게이트웨이 잔액을 실호출로 조회한다(워커 스레드)."""
-        api_key, base_url = self._creds()
-        if not api_key or not base_url:
-            self._credit_status.setStyleSheet(f"color: {COLORS['red']}; font-size: 11px;")
-            self._credit_status.setText("✗ API 키/Base URL을 먼저 입력하세요.")
-            return
-
-        self._credit_btn.setEnabled(False)
-        self._credit_status.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
-        self._credit_status.setText("조회 중…")
-
-        import threading
-
-        def _worker():
-            try:
-                from pasteflow.ocr_engine import get_credit_balance
-                remaining, quota = get_credit_balance(api_key, base_url)
-                self._credits_fetched.emit(remaining, quota, "")
-            except Exception as e:
-                self._credits_fetched.emit(0.0, 0.0, str(e))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _on_credits_fetched(self, remaining: float, quota: float, err: str):
-        self._credit_btn.setEnabled(True)
-        if err:
-            self._credit_status.setStyleSheet(f"color: {COLORS['red']}; font-size: 11px;")
-            self._credit_status.setText(
-                f"✗ 조회 실패(이 API는 크레딧 조회를 지원하지 않을 수 있습니다) — {err}")
-            return
-        self._credit_status.setStyleSheet(f"color: {COLORS['green']}; font-size: 11px;")
-        self._credit_status.setText(f"✓ 잔여 {remaining:,.1f} / {quota:,.0f} 크레딧")
 
     def _pick_capture_folder(self):
         """캡처 저장 폴더 선택 다이얼로그"""
