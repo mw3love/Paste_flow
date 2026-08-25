@@ -1090,6 +1090,7 @@ class PasteFlowApp:
         self.panel.preview_text_requested.connect(self._on_preview_text)
         self.panel.copy_image_as_path_requested.connect(self._on_copy_image_as_path)
         self.panel.ask_ai_item_requested.connect(self._on_ask_ai_item_by_id)
+        self.panel.open_file_location_requested.connect(self._on_open_file_location)
         self.panel.open_settings_requested.connect(self._open_settings)
         self.panel.quit_requested.connect(self._quit)
         self.panel.clear_history_requested.connect(self._on_clear_history)
@@ -1616,6 +1617,33 @@ class PasteFlowApp:
         item = self.db.get_item(item_id)
         if item:
             self._copy_image_as_path_for_item(item)
+
+    def _on_open_file_location(self, item_id: int):
+        """우클릭 "파일 위치 열기(탐색기)" — 경로 텍스트 항목이 가리키는 파일을 탐색기에서
+        선택 표시. 녹화(GIF/영상)·"파일로 저장 후 경로 복사"·이미지→경로 단축키 등으로
+        생긴 경로 텍스트 항목 전용(메뉴 자체가 panel._on_item_context_menu에서 파일이
+        실제 존재할 때만 노출됨). `explorer /select,` 는 해당 파일이 든 폴더를 열고
+        그 파일을 하이라이트한다(shell=True 없이 인자 리스트로 호출해 경로에 특수문자가
+        섞여도 안전).
+
+        ⚠ `os.path.normpath()`로 슬래시를 백슬래시로 통일한 뒤 넘겨야 한다 — 실측 확인:
+        `capture_save_folder` 설정에 슬래시(`/`)가 섞여 있으면(사용자가 직접 입력해
+        저장한 경우) `os.path.join`이 뒤에 붙이는 파일명과 합쳐져 `C:/Users/...\\file.mp4`
+        같은 혼합 경로가 되는데, `explorer.exe`가 `/select,` 뒤 경로 안의 `/`를 새 스위치
+        구분자로 오인해 대상 폴더 대신 그냥 "내 PC"를 연다(`os.path.isfile`은 슬래시
+        혼용도 정상 인식하므로 위 존재 확인은 통과 — 이 버그를 못 잡음).
+        """
+        from pasteflow.ui.toast import ToastNotification
+        import subprocess
+        item = self.db.get_item(item_id)
+        path = (item.text_content or "").strip() if item else ""
+        if not path or not os.path.isfile(path):
+            ToastNotification("파일을 찾을 수 없습니다", icon="📁")
+            return
+        try:
+            subprocess.Popen(["explorer", f"/select,{os.path.normpath(path)}"])
+        except Exception as e:
+            ToastNotification(f"탐색기 열기 실패 — {e}", icon="📁")
 
     def _on_ask_ai_item_by_id(self, item_id: int):
         """히스토리 우클릭 "Gemini에게 질문"(item_id 기반, 2026-08-03) → DB에서 풀 로드 후

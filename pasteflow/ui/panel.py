@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
 )
 import ctypes
 import ctypes.wintypes
+import os
 
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QRect, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QPixmap, QCursor, QFontMetrics, QFont
@@ -464,6 +465,7 @@ class ClipboardPanel(QWidget):
     preview_text_requested = pyqtSignal(int)   # item_id — 동상
     copy_image_as_path_requested = pyqtSignal(int)  # item_id — 이미지를 임시 PNG로 저장 후 경로를 클립보드에 텍스트로 복사
     ask_ai_item_requested = pyqtSignal(int)  # item_id — 이미지를 미리 첨부한 채 Gemini 질문창 열기
+    open_file_location_requested = pyqtSignal(int)  # item_id — 텍스트가 가리키는 파일을 탐색기에서 선택 표시
     open_settings_requested = pyqtSignal()
     quit_requested = pyqtSignal()
     clear_history_requested = pyqtSignal()
@@ -1122,6 +1124,11 @@ class ClipboardPanel(QWidget):
         else:
             edit_action = menu.addAction("수정")
             edit_action.triggered.connect(lambda: self._on_edit_item(item))
+            if item.text_content and os.path.isfile(item.text_content.strip()):
+                open_loc_action = menu.addAction("파일 위치 열기(탐색기)")
+                open_loc_action.triggered.connect(
+                    lambda: self.open_file_location_requested.emit(item_id)
+                )
 
         if item.is_pinned:
             unpin_action = menu.addAction("고정 해제\tP")
