@@ -37,7 +37,8 @@ class Database:
                 created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
                 is_pinned    BOOLEAN DEFAULT 0,
                 pin_order    INTEGER DEFAULT 0,
-                extra_formats TEXT
+                extra_formats TEXT,
+                saved_image_path TEXT
             )
         """)
         # 기존 DB에 extra_formats 컬럼이 없으면 추가
@@ -49,6 +50,11 @@ class Database:
         try:
             cur.execute("ALTER TABLE clipboard_items ADD COLUMN history_order INTEGER")
             self._migrate_history_order(cur)
+        except sqlite3.OperationalError:
+            pass  # 이미 존재
+        # 기존 DB에 saved_image_path 컬럼이 없으면 추가 (영역 캡처 저장 경로 — 파일 위치 열기용)
+        try:
+            cur.execute("ALTER TABLE clipboard_items ADD COLUMN saved_image_path TEXT")
         except sqlite3.OperationalError:
             pass  # 이미 존재
         cur.execute("""
@@ -90,8 +96,8 @@ class Database:
                 """INSERT INTO clipboard_items
                    (content_type, text_content, image_data, html_content,
                     rtf_content, preview_text, thumbnail, is_pinned, pin_order,
-                    extra_formats, history_order)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    extra_formats, history_order, saved_image_path)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     item.content_type,
                     item.text_content,
@@ -104,6 +110,7 @@ class Database:
                     item.pin_order,
                     extra_json,
                     hist_order,
+                    item.saved_image_path,
                 ),
             )
             self.conn.commit()
@@ -142,7 +149,8 @@ class Database:
             cur.execute(
                 """SELECT id, content_type, text_content, NULL AS image_data,
                           html_content, rtf_content, preview_text, thumbnail,
-                          created_at, is_pinned, pin_order, NULL AS extra_formats
+                          created_at, is_pinned, pin_order, NULL AS extra_formats,
+                          saved_image_path
                    FROM clipboard_items
                    WHERE is_pinned = 0
                    ORDER BY history_order ASC
@@ -171,7 +179,8 @@ class Database:
             cur.execute(
                 """SELECT id, content_type, text_content, NULL AS image_data,
                           html_content, rtf_content, preview_text, thumbnail,
-                          created_at, is_pinned, pin_order, NULL AS extra_formats
+                          created_at, is_pinned, pin_order, NULL AS extra_formats,
+                          saved_image_path
                    FROM clipboard_items
                    WHERE is_pinned = 1
                    ORDER BY pin_order ASC"""
@@ -356,6 +365,7 @@ class Database:
             is_pinned=bool(row["is_pinned"]),
             pin_order=row["pin_order"],
             extra_formats=self._deserialize_extra_formats(extra_json),
+            saved_image_path=row["saved_image_path"] if "saved_image_path" in row.keys() else None,
         )
 
     @staticmethod

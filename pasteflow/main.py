@@ -1270,16 +1270,21 @@ class PasteFlowApp:
             thumbnail=self.monitor._create_thumbnail(dib),
         )
         self.interceptor._set_clipboard(item)
-        saved_item = self._persist_clipboard_item(item)
 
         # 지정 폴더에 PNG 저장 (없으면 생성, 미설정 시 <사진>\PasteFlow)
+        # DB 저장 전에 먼저 파일을 써서 saved_image_path를 item에 실어 보낸다 — 우클릭
+        # "파일 위치 열기"가 참조할 경로를 처음부터 히스토리에 함께 남기기 위함
+        # (클립보드 교체는 이미 위에서 끝나 있어 Ctrl+V 응답성엔 영향 없음).
         folder = self.db.get_setting("capture_save_folder", "") or _default_capture_folder()
         saved_path = None
         try:
             os.makedirs(folder, exist_ok=True)
             saved_path = _save_image_to_folder(dib, folder)
+            item.saved_image_path = saved_path
         except Exception as e:
             ToastNotification(f"캡처 파일 저장 실패 — {e}", icon="📷")
+
+        saved_item = self._persist_clipboard_item(item)
 
         if saved_path:
             # 캡처 직후 Ctrl+Shift+P를 누르는 것이 흔한 흐름(캡처→경로 붙여넣기)이라,
@@ -1619,12 +1624,13 @@ class PasteFlowApp:
             self._copy_image_as_path_for_item(item)
 
     def _on_open_file_location(self, item_id: int):
-        """우클릭 "파일 위치 열기(탐색기)" — 경로 텍스트 항목이 가리키는 파일을 탐색기에서
-        선택 표시. 녹화(GIF/영상)·"파일로 저장 후 경로 복사"·이미지→경로 단축키 등으로
-        생긴 경로 텍스트 항목 전용(메뉴 자체가 panel._on_item_context_menu에서 파일이
-        실제 존재할 때만 노출됨). `explorer /select,` 는 해당 파일이 든 폴더를 열고
-        그 파일을 하이라이트한다(shell=True 없이 인자 리스트로 호출해 경로에 특수문자가
-        섞여도 안전).
+        """우클릭 "파일 위치 열기(탐색기)" — 항목이 가리키는 파일을 탐색기에서 선택 표시.
+        텍스트 항목은 경로 텍스트(녹화 GIF/영상·"파일로 저장 후 경로 복사"·이미지→경로
+        단축키 등으로 생긴 것), 이미지 항목은 영역 캡처(Alt+F2)가 저장한 원본 PNG
+        (`saved_image_path` — 캡처 시점에 함께 기록됨, 위 `_on_capture_region` 참고)를
+        쓴다(메뉴 자체가 panel._on_item_context_menu에서 파일이 실제 존재할 때만 노출됨).
+        `explorer /select,` 는 해당 파일이 든 폴더를 열고 그 파일을 하이라이트한다
+        (shell=True 없이 인자 리스트로 호출해 경로에 특수문자가 섞여도 안전).
 
         ⚠ `os.path.normpath()`로 슬래시를 백슬래시로 통일한 뒤 넘겨야 한다 — 실측 확인:
         `capture_save_folder` 설정에 슬래시(`/`)가 섞여 있으면(사용자가 직접 입력해
@@ -1636,7 +1642,10 @@ class PasteFlowApp:
         from pasteflow.ui.toast import ToastNotification
         import subprocess
         item = self.db.get_item(item_id)
-        path = (item.text_content or "").strip() if item else ""
+        if item and item.content_type == "image":
+            path = (item.saved_image_path or "").strip()
+        else:
+            path = (item.text_content or "").strip() if item else ""
         if not path or not os.path.isfile(path):
             ToastNotification("파일을 찾을 수 없습니다", icon="📁")
             return

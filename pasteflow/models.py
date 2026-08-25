@@ -22,6 +22,7 @@ class ClipboardItem:
     is_pinned: bool = False
     pin_order: int = 0
     extra_formats: Optional[dict] = None  # {format_id: bytes} — 앱 전용 포맷 보존
+    saved_image_path: Optional[str] = None  # 영역 캡처(Alt+F2)가 디스크에 저장한 PNG 경로 — 우클릭 "파일 위치 열기"용
 
     def __post_init__(self):
         if self.content_type not in VALID_CONTENT_TYPES:

@@ -1119,6 +1119,11 @@ class ClipboardPanel(QWidget):
         if item.content_type == "image":
             path_action = menu.addAction("파일로 저장 후 경로 복사\tS")
             path_action.triggered.connect(lambda: self.copy_image_as_path_requested.emit(item_id))
+            if item.saved_image_path and os.path.isfile(item.saved_image_path):
+                open_loc_action = menu.addAction("파일 위치 열기(탐색기)")
+                open_loc_action.triggered.connect(
+                    lambda: self.open_file_location_requested.emit(item_id)
+                )
             ask_ai_action = menu.addAction("Gemini에게 질문")
             ask_ai_action.triggered.connect(lambda: self.ask_ai_item_requested.emit(item_id))
         else:
