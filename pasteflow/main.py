@@ -1119,7 +1119,7 @@ class PasteFlowApp:
         capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         self.interceptor.set_capture_hotkey(capture_hotkey)
 
-        capture_use_printscreen = self.db.get_setting("capture_use_printscreen", "0") == "1"
+        capture_use_printscreen = self.db.get_setting("capture_use_printscreen", "1") == "1"
         self.interceptor.set_capture_via_printscreen(capture_use_printscreen)
 
         # 기본값을 win+`/alt+`에서 alt+2/alt+1로 변경(2026-08-03) — Windows Terminal이
@@ -2887,7 +2887,7 @@ class PasteFlowApp:
         old_pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
         old_seq_pin_hotkey = self.db.get_setting("hotkey_seq_pin", "alt+shift+f3")
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
-        old_capture_use_printscreen = self.db.get_setting("capture_use_printscreen", "0")
+        old_capture_use_printscreen = self.db.get_setting("capture_use_printscreen", "1")
         old_capture_ask_hotkey = self.db.get_setting("hotkey_capture_ask", "alt+2")
         old_ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+1")
         old_record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
@@ -2936,7 +2936,7 @@ class PasteFlowApp:
             self.interceptor.set_capture_hotkey(new_capture_hotkey)
 
         # PrintScreen 대체 실행 재설정
-        new_capture_use_printscreen = new_settings.get("capture_use_printscreen", "0")
+        new_capture_use_printscreen = new_settings.get("capture_use_printscreen", "1")
         if old_capture_use_printscreen != new_capture_use_printscreen:
             self.interceptor.set_capture_via_printscreen(new_capture_use_printscreen == "1")
 

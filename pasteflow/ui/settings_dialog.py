@@ -1587,7 +1587,7 @@ class SettingsDialog(QDialog):
             self._settings.get(self.KEY_CAPTURE_HOTKEY, "alt+f2")
         )
         self._capture_printscreen_check.setChecked(
-            self._settings.get(self.KEY_CAPTURE_USE_PRINTSCREEN, "0") == "1"
+            self._settings.get(self.KEY_CAPTURE_USE_PRINTSCREEN, "1") == "1"
         )
         self._record_gif_hotkey.set_value(
             self._settings.get(self.KEY_RECORD_GIF_HOTKEY, "ctrl+shift+g")
