@@ -2146,6 +2146,17 @@ class PasteFlowApp:
             self._stop_cursor_progress()
             return
 
+        # 무음/마이크 미연결 차단 — 침묵 오디오를 게이트웨이에 보내면 모델이 "00:01" 같은
+        # 그럴듯한 텍스트를 환각해 정상 인식과 구분이 안 됐다(2026-08-26 사용자 리포트).
+        # API를 부르기 전에 우리가 직접 측정한 피크 음량으로 차단 — 설정창 "마이크 테스트"
+        # (_on_test_mic)와 같은 임계값을 공유해 판정 기준이 어긋나지 않게 한다.
+        from pasteflow.stt_engine import SILENCE_RMS_THRESHOLD
+        if self._stt_recorder.last_peak_rms < SILENCE_RMS_THRESHOLD:
+            self._stop_cursor_progress()
+            from pasteflow.ui.toast import ToastNotification
+            ToastNotification("마이크에 소리가 감지되지 않았습니다 — 연결·음소거를 확인하세요", icon="🎤")
+            return
+
         self._start_cursor_progress("인식 중…", "🎤", QCursor.pos())  # 칩을 "녹음 중" → "인식 중"으로 전환
 
         def _run():

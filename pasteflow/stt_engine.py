@@ -24,6 +24,14 @@ from .ocr_engine import _get_client, family_of
 SAMPLE_RATE = 16000
 MAX_SECONDS = 30  # 무한 녹음 방지 — 토큰 비용·응답 지연 억제. 도달 시 호출자가 stop()해야 함.
 
+# 녹음 전체의 피크 RMS가 이 값 미만이면 "마이크 무음/미연결"로 판정 — 정상 발화는
+# 0.02~0.15대(ui/stt_indicator.py 실측 기준)이므로 그보다 한참 아래인 값. 마이크가
+# 연결이 안 됐거나 음소거면 게이트웨이가 침묵을 "00:01" 같은 그럴듯한 텍스트로
+# 환각(hallucinate)하는 경우가 있어(2026-08-26 사용자 리포트), 그 호출 자체를 막는
+# 용도 — API가 뭘 답하든 무음이면 신뢰하지 않는다. ⚠ 확인 필요: 실제 마이크·주변
+# 소음 환경에 따라 보정이 필요할 수 있음(과소음 환경에서 오탐 가능성).
+SILENCE_RMS_THRESHOLD = 0.004
+
 
 def list_input_devices() -> list[str]:
     """마이크 입력 장치 이름 목록 — MME 호스트 API로 한정한다.
@@ -76,6 +84,8 @@ class Recorder:
         # float 읽기/쓰기라 GIL 하에서 원자적이므로 락 없이 공유해도 안전(UI 미터용, 정밀도
         # 불필요). 녹음 중 이퀄라이저 표시(ui/stt_indicator.py)가 이 값을 폴링한다.
         self._level: float = 0.0
+        self._peak_rms: float = 0.0
+        self.last_peak_rms: float = 0.0  # 직전 stop()에서 확정된 녹음 전체 피크 RMS(무음 판정용)
         self.used_device: str = ""  # 마지막 start()에서 실제로 연 장치(폴백 여부 확인용)
 
     def is_recording(self) -> bool:
@@ -94,6 +104,7 @@ class Recorder:
             return
         self._frames = []
         self._sample_count = 0
+        self._peak_rms = 0.0
         # latency="low" — 기본(high) 버퍼링은 PortAudio가 언더런 방지용으로 크게 잡아
         # 마지막 발화가 stop() 시점에 아직 버퍼 안에 있어 잘리는 원인 중 하나였다
         # (2026-08-02 사용자 리포트: 말한 직후 떼면 끝이 잘림). main.py의 keyup 여유시간
@@ -120,6 +131,8 @@ class Recorder:
         rms = float(np.sqrt(np.mean(indata.astype(np.float64) ** 2))) / 32768.0
         self._level = rms
         with self._lock:
+            if rms > self._peak_rms:
+                self._peak_rms = rms
             if self._sample_count >= MAX_SECONDS * SAMPLE_RATE:
                 return  # 상한 도달 — 더 안 쌓음(호출자가 stop 호출할 때까지 무음 버림)
             self._frames.append(indata.copy())
@@ -139,6 +152,7 @@ class Recorder:
         with self._lock:
             frames = self._frames
             self._frames = []
+            self.last_peak_rms = self._peak_rms
         if not frames:
             return b""
         audio = np.concatenate(frames, axis=0)

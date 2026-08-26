@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QStyle, QStyledItemDelegate, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
     QInputDialog, QTabWidget,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize, QPoint
+from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize, QPoint, QTimer
 from PyQt6.QtGui import QColor, QFontMetrics
 
 from pasteflow import ai_palette
@@ -1233,12 +1233,23 @@ class SettingsDialog(QDialog):
         self._refresh_mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._refresh_mic_btn.setToolTip("방금 연결한 마이크가 안 보이면 눌러서 목록을 다시 불러오세요")
         self._refresh_mic_btn.clicked.connect(self._reload_mic_combo)
+        self._mic_test_btn = QPushButton("테스트")
+        self._mic_test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mic_test_btn.setToolTip(
+            "선택한 마이크로 2.5초간 녹음해 소리가 실제로 감지되는지 확인합니다.\n"
+            "마이크가 무음이면 음성 입력(STT)이 게이트웨이의 엉뚱한 인식 결과를\n"
+            "그대로 붙여넣을 수 있어(예: \"00:01\"), 미리 상태를 확인하는 용도입니다."
+        )
+        self._mic_test_btn.clicked.connect(self._on_test_mic)
         mic_row = QHBoxLayout()
         mic_row.setContentsMargins(0, 0, 0, 0)
         mic_row.setSpacing(4)
         mic_row.addWidget(self._mic_combo, 1)
         mic_row.addWidget(self._refresh_mic_btn)
+        mic_row.addWidget(self._mic_test_btn)
         ai_form.addRow(QLabel("•  마이크:"), mic_row)
+        self._mic_test_status = self._make_probe_label()
+        ai_form.addRow("", self._mic_test_status)
 
         tab_ai.addWidget(ai_group)
 
@@ -1555,6 +1566,48 @@ class SettingsDialog(QDialog):
         """새로고침 버튼 — 방금 꽂은 마이크를 반영. 현재 선택은 보존한다."""
         current = self._mic_combo.currentData() or ""
         self._fill_mic_combo(current)
+
+    def _on_test_mic(self):
+        """마이크 테스트 — 선택한 마이크로 2.5초 녹음해 소리가 실제로 잡히는지 확인한다.
+
+        STT 파이프라인이 무음을 걸러내는 기준(stt_engine.SILENCE_RMS_THRESHOLD)과 반드시
+        같은 값으로 판정한다 — 여기서 "정상"이라 떴는데 실제 음성 입력에선 차단되는 것 같은
+        불일치를 막기 위함(main.py `_finish_stt_recording`이 같은 상수를 쓴다).
+        """
+        from pasteflow.stt_engine import Recorder, SILENCE_RMS_THRESHOLD
+
+        device = self._mic_combo.currentData() or ""
+        recorder = Recorder()
+        try:
+            recorder.start(device=device)
+        except Exception as e:
+            self._set_probe_status(self._mic_test_status, "fail", f"마이크를 열 수 없습니다 — {e}")
+            return
+
+        self._mic_test_btn.setEnabled(False)
+        self._set_probe_status(self._mic_test_status, "run", "녹음 중… 지금 2~3초간 말해보세요")
+
+        def _finish():
+            try:
+                wav_bytes = recorder.stop()
+                peak = recorder.last_peak_rms
+                if not wav_bytes or peak < SILENCE_RMS_THRESHOLD:
+                    self._set_probe_status(
+                        self._mic_test_status, "fail",
+                        "소리가 감지되지 않았습니다 — 마이크 연결·음소거·Windows 마이크 권한을 확인하세요",
+                    )
+                else:
+                    pct = min(100, round(peak * 300))
+                    self._set_probe_status(self._mic_test_status, "ok", f"마이크 정상 (감지된 음량 {pct}%)")
+            except RuntimeError:
+                pass  # 2.5초 사이 다이얼로그가 닫혀 위젯이 사라진 경우 — 무시
+            finally:
+                try:
+                    self._mic_test_btn.setEnabled(True)
+                except RuntimeError:
+                    pass
+
+        QTimer.singleShot(2500, _finish)
 
     def _pick_capture_folder(self):
         """캡처 저장 폴더 선택 다이얼로그"""
