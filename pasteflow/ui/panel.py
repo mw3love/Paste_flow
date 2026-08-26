@@ -1120,17 +1120,17 @@ class ClipboardPanel(QWidget):
             path_action = menu.addAction("파일로 저장 후 경로 복사\tS")
             path_action.triggered.connect(lambda: self.copy_image_as_path_requested.emit(item_id))
             if item.saved_image_path and os.path.isfile(item.saved_image_path):
-                open_loc_action = menu.addAction("파일 위치 열기(탐색기)")
+                open_loc_action = menu.addAction("파일 위치 열기\tO")
                 open_loc_action.triggered.connect(
                     lambda: self.open_file_location_requested.emit(item_id)
                 )
-            ask_ai_action = menu.addAction("Gemini에게 질문")
+            ask_ai_action = menu.addAction("Gemini에게 질문\tG")
             ask_ai_action.triggered.connect(lambda: self.ask_ai_item_requested.emit(item_id))
         else:
             edit_action = menu.addAction("수정")
             edit_action.triggered.connect(lambda: self._on_edit_item(item))
             if item.text_content and os.path.isfile(item.text_content.strip()):
-                open_loc_action = menu.addAction("파일 위치 열기(탐색기)")
+                open_loc_action = menu.addAction("파일 위치 열기\tO")
                 open_loc_action.triggered.connect(
                     lambda: self.open_file_location_requested.emit(item_id)
                 )
@@ -1561,6 +1561,18 @@ class ClipboardPanel(QWidget):
             event.accept()
             return
 
+        # ── O: 포커스 항목이 가리키는 파일 위치 열기(우클릭 메뉴와 동일 조건) ──
+        if key == Qt.Key.Key_O and not mods & Qt.KeyboardModifier.ControlModifier:
+            self._kbd_open_file_location()
+            event.accept()
+            return
+
+        # ── G: 포커스 항목(이미지)을 Gemini에게 질문 ──
+        if key == Qt.Key.Key_G and not mods & Qt.KeyboardModifier.ControlModifier:
+            self._kbd_ask_ai()
+            event.accept()
+            return
+
         super().keyPressEvent(event)
 
     def _kbd_get_ordered_items(self) -> list:
@@ -1656,6 +1668,28 @@ class ClipboardPanel(QWidget):
         item = self._find_item(self._kbd_focus_id)
         if item and item.content_type == "image":
             self.copy_image_as_path_requested.emit(self._kbd_focus_id)
+
+    def _kbd_open_file_location(self):
+        """O: 포커스 항목이 가리키는 파일 위치를 탐색기에서 열기(우클릭 메뉴와 동일 조건)"""
+        if self._kbd_focus_id is None:
+            return
+        item = self._find_item(self._kbd_focus_id)
+        if not item:
+            return
+        if item.content_type == "image":
+            if item.saved_image_path and os.path.isfile(item.saved_image_path):
+                self.open_file_location_requested.emit(self._kbd_focus_id)
+        else:
+            if item.text_content and os.path.isfile(item.text_content.strip()):
+                self.open_file_location_requested.emit(self._kbd_focus_id)
+
+    def _kbd_ask_ai(self):
+        """G: 포커스 항목(이미지)을 미리 첨부한 채 Gemini 질문창 열기"""
+        if self._kbd_focus_id is None:
+            return
+        item = self._find_item(self._kbd_focus_id)
+        if item and item.content_type == "image":
+            self.ask_ai_item_requested.emit(self._kbd_focus_id)
 
     def _kbd_delete(self):
         """Delete: 포커스 항목 삭제 후 포커스를 다음 항목으로 이동"""

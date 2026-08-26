@@ -1624,7 +1624,7 @@ class PasteFlowApp:
             self._copy_image_as_path_for_item(item)
 
     def _on_open_file_location(self, item_id: int):
-        """우클릭 "파일 위치 열기(탐색기)" — 항목이 가리키는 파일을 탐색기에서 선택 표시.
+        """우클릭 "파일 위치 열기" — 항목이 가리키는 파일을 탐색기에서 선택 표시.
         텍스트 항목은 경로 텍스트(녹화 GIF/영상·"파일로 저장 후 경로 복사"·이미지→경로
         단축키 등으로 생긴 것), 이미지 항목은 영역 캡처(Alt+F2)가 저장한 원본 PNG
         (`saved_image_path` — 캡처 시점에 함께 기록됨, 위 `_on_capture_region` 참고)를
