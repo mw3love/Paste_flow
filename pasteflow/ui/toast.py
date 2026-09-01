@@ -20,6 +20,8 @@ _MAX_STACK = 5
 
 # 복사 알림 토스트 지속 시간 (복사가 잦으므로 기본 3초보다 짧게)
 COPY_TOAST_DURATION_MS = 2000
+# 클릭으로 닫을 때 fade-out 시간 (기본 400ms보다 빠르게 — 뚝 끊기지 않는 선에서 즉시성)
+_CLICK_FADE_MS = 150
 
 
 class _ToastStack:
@@ -267,10 +269,21 @@ class ToastNotification(QWidget):
         _stack.remove(self)
         super().closeEvent(event)
 
-    def _start_fade_out(self):
+    def mousePressEvent(self, event):
+        """클릭 시 남은 표시시간을 기다리지 않고 빠르게 닫는다.
+
+        커서 앵커 모드(OCR·AI 진행 칩)는 WindowTransparentForInput이라 이 이벤트
+        자체를 받지 않으므로, 실제로는 우하단 스택 토스트(복사·붙여넣기 알림)에만 적용된다.
+        """
+        self._start_fade_out(duration_ms=_CLICK_FADE_MS)
+        super().mousePressEvent(event)
+
+    def _start_fade_out(self, duration_ms: int = None):
         if self._closing:
             return
         self._closing = True
+        if duration_ms is not None:
+            self._anim_out.setDuration(duration_ms)
         self._anim_out.start()
 
 
