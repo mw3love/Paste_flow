@@ -256,6 +256,8 @@ class PasteInterceptor:
         on_plain_paste: Optional[Callable[[], None]] = None,
         on_image_to_path: Optional[Callable[[], None]] = None,
         on_seq_image_to_path: Optional[Callable[[], None]] = None,
+        on_bulk_paste: Optional[Callable[[], None]] = None,
+        on_bulk_path_paste: Optional[Callable[[], None]] = None,
         on_pin_image: Optional[Callable[[], None]] = None,
         on_seq_pin: Optional[Callable[[], None]] = None,
         on_capture: Optional[Callable[[], None]] = None,
@@ -275,6 +277,8 @@ class PasteInterceptor:
         self.on_plain_paste = on_plain_paste
         self.on_image_to_path = on_image_to_path
         self.on_seq_image_to_path = on_seq_image_to_path
+        self.on_bulk_paste = on_bulk_paste
+        self.on_bulk_path_paste = on_bulk_path_paste
         self.on_pin_image = on_pin_image
         self.on_seq_pin = on_seq_pin
         self.on_capture = on_capture
@@ -320,6 +324,16 @@ class PasteInterceptor:
         self._seqimg2path_need_ctrl: bool = False
         self._seqimg2path_need_shift: bool = False
         self._seqimg2path_need_alt: bool = False
+        # 순차 붙여넣기 전체 자동주입 단축키 (Ctrl+Shift+V의 '벌크' 버전, 동일 구조)
+        self._bulk_vk: int = 0
+        self._bulk_need_ctrl: bool = False
+        self._bulk_need_shift: bool = False
+        self._bulk_need_alt: bool = False
+        # 순차 경로 붙여넣기 전체 자동주입 단축키 (Ctrl+Shift+[의 '벌크' 버전, 동일 구조)
+        self._bulkpath_vk: int = 0
+        self._bulkpath_need_ctrl: bool = False
+        self._bulkpath_need_shift: bool = False
+        self._bulkpath_need_alt: bool = False
         # 화면에 핀(이미지 띄우기) 단축키 (패널 토글과 동일 구조)
         self._pin_vk: int = 0
         self._pin_need_ctrl: bool = False
@@ -437,6 +451,32 @@ class PasteInterceptor:
             self._seqimg2path_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._seqimg2path_vk = 0
+
+    def set_bulk_paste_hotkey(self, hotkey_str: str):
+        """순차 붙여넣기 전체 자동주입 단축키 설정 — 큐 전체를 간격 두고 순차 주입(Ctrl+Shift+V의 벌크 버전)."""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._bulk_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._bulk_need_shift = "shift" in parts
+        self._bulk_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._bulk_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._bulk_vk = 0
+
+    def set_bulk_path_paste_hotkey(self, hotkey_str: str):
+        """순차 경로 붙여넣기 전체 자동주입 단축키 설정 — 큐 전체를 경로 텍스트로 간격 두고 순차 주입(Ctrl+Shift+[의 벌크 버전)."""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._bulkpath_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._bulkpath_need_shift = "shift" in parts
+        self._bulkpath_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._bulkpath_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._bulkpath_vk = 0
 
     def set_seq_pin_hotkey(self, hotkey_str: str):
         """순차 핀 단축키 설정 — 큐에서 다음 항목을 꺼내 화면에 핀(이미지면 그대로, 텍스트면 이미지화)."""
@@ -829,6 +869,31 @@ class PasteInterceptor:
                     if self.on_seq_image_to_path:
                         try:
                             self.on_seq_image_to_path()
+                        except Exception:
+                            pass
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
+
+                # 순차 붙여넣기 전체 자동주입 단축키 감지 (기본 Ctrl+Shift+A) — Ctrl+Shift+V의 벌크 버전.
+                # 실제 반복 주입 루프는 main 쪽(_start_bulk_paste)이 QTimer로 돌린다 — 여기선 감지·suppress만.
+                if (self._bulk_vk and vk_code == self._bulk_vk
+                        and ctrl_pressed  == self._bulk_need_ctrl
+                        and shift_pressed == self._bulk_need_shift
+                        and alt_pressed   == self._bulk_need_alt):
+                    if self.on_bulk_paste:
+                        try:
+                            self.on_bulk_paste()
+                        except Exception:
+                            pass
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
+
+                # 순차 경로 붙여넣기 전체 자동주입 단축키 감지 (기본 Ctrl+Shift+]) — Ctrl+Shift+[의 벌크 버전
+                if (self._bulkpath_vk and vk_code == self._bulkpath_vk
+                        and ctrl_pressed  == self._bulkpath_need_ctrl
+                        and shift_pressed == self._bulkpath_need_shift
+                        and alt_pressed   == self._bulkpath_need_alt):
+                    if self.on_bulk_path_paste:
+                        try:
+                            self.on_bulk_path_paste()
                         except Exception:
                             pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)

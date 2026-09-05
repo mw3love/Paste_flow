@@ -607,6 +607,8 @@ class HotkeyEdit(QPushButton):
             Qt.Key.Key_QuoteLeft: "`", Qt.Key.Key_AsciiTilde: "`",
             # `[` 는 Shift가 눌리면 Qt가 `{`(BraceLeft)로 주므로 둘 다 "["로 취급
             Qt.Key.Key_BracketLeft: "[", Qt.Key.Key_BraceLeft: "[",
+            # `]` 도 동일 — Shift 시 `}`(BraceRight)로 오므로 둘 다 "]"로 취급
+            Qt.Key.Key_BracketRight: "]", Qt.Key.Key_BraceRight: "]",
         }
         if key in _MAP:
             return _MAP[key]
@@ -633,6 +635,8 @@ class SettingsDialog(QDialog):
     KEY_OCR_HOTKEY = "hotkey_ocr_trigger"
     KEY_IMAGE_TO_PATH_HOTKEY = "hotkey_image_to_path"
     KEY_SEQ_IMAGE_TO_PATH_HOTKEY = "hotkey_seq_image_to_path"
+    KEY_BULK_PASTE_HOTKEY = "hotkey_bulk_paste"
+    KEY_BULK_PATH_PASTE_HOTKEY = "hotkey_bulk_path_paste"
     KEY_PIN_IMAGE_HOTKEY = "hotkey_pin_image"
     KEY_SEQ_PIN_HOTKEY = "hotkey_seq_pin"
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
@@ -840,8 +844,8 @@ class SettingsDialog(QDialog):
         tab_ai = _make_tab("AI")
 
         # ── 기능 단축키 그룹 (변경 가능) — 아래 기본 단축키 다음에 배치 ──
-        # 인식 편의를 위해 3개 하위 묶음을 얇은 구분선으로 분리(쭉 나열 대신 시각 그룹화):
-        #  ① 패널  ② 경로 붙여넣기류  ③ 영역 캡처·핀류
+        # 인식 편의를 위해 4개 하위 묶음을 얇은 구분선으로 분리(쭉 나열 대신 시각 그룹화):
+        #  ① 패널  ② 경로 붙여넣기류  ③ 일괄 붙여넣기(벌크)  ④ 영역 캡처·핀류
         # AI 호출류(Gemini 호출·Gemini(캡처)·OCR·STT)는 「AI」 탭의 별도 그룹으로 옮겼다
         # (2026-08-04, 사용자 요청 — 이 4개만 AI 관련이라 AI 탭에 있는 편이 자연스럽다).
         hotkey_group = QGroupBox("기능 단축키 (변경 가능)")
@@ -882,7 +886,25 @@ class SettingsDialog(QDialog):
         hotkey_form.addRow("•  순차 경로 붙여넣기:", self._seq_image_to_path_hotkey)
         hotkey_form.addRow(_hk_sep())
 
-        # ③ 영역 캡처(Alt+F2) / 영역 캡처 핀(Alt+F3) — 이름을 '영역 캡처' 계열로 통일
+        # ③ 일괄 붙여넣기 — 순차/순차 경로 붙여넣기를 한 번에 큐 끝까지 자동 주입하는 '벌크' 버전.
+        # 반복해 누르지 않고 한 번 눌러 여러 항목을 순서대로 붙여넣고 싶을 때 사용(2026-09-06 도입).
+        self._bulk_paste_hotkey = HotkeyEdit()
+        self._bulk_paste_hotkey.setToolTip(
+            "순차 붙여넣기(Ctrl+Shift+V)의 '전체 자동주입' 버전.\n"
+            "한 번 눌러 큐에 남은 항목 전체를 짧은 간격을 두고 순서대로 자동 붙여넣습니다.\n"
+            "10개를 반복해 누르지 않고 한 번에 붙이고 싶을 때 사용합니다."
+        )
+        hotkey_form.addRow("•  순차 붙여넣기 전체:", self._bulk_paste_hotkey)
+
+        self._bulk_path_paste_hotkey = HotkeyEdit()
+        self._bulk_path_paste_hotkey.setToolTip(
+            "순차 경로 붙여넣기(Ctrl+Shift+[)의 '전체 자동주입' 버전.\n"
+            "큐에 남은 항목 전체를 순서대로 자동 붙여넣되, 이미지는 임시 PNG 경로 텍스트로 바꿔 붙입니다."
+        )
+        hotkey_form.addRow("•  순차 경로 붙여넣기 전체:", self._bulk_path_paste_hotkey)
+        hotkey_form.addRow(_hk_sep())
+
+        # ④ 영역 캡처(Alt+F2) / 영역 캡처 핀(Alt+F3) — 이름을 '영역 캡처' 계열로 통일
         self._capture_hotkey = HotkeyEdit()
         self._capture_hotkey.setToolTip(
             "화면 영역을 드래그로 선택해 캡처합니다(Snipaste의 영역 캡처).\n"
@@ -1630,6 +1652,12 @@ class SettingsDialog(QDialog):
         self._seq_image_to_path_hotkey.set_value(
             self._settings.get(self.KEY_SEQ_IMAGE_TO_PATH_HOTKEY, "ctrl+shift+[")
         )
+        self._bulk_paste_hotkey.set_value(
+            self._settings.get(self.KEY_BULK_PASTE_HOTKEY, "ctrl+shift+a")
+        )
+        self._bulk_path_paste_hotkey.set_value(
+            self._settings.get(self.KEY_BULK_PATH_PASTE_HOTKEY, "ctrl+shift+]")
+        )
         self._pin_image_hotkey.set_value(
             self._settings.get(self.KEY_PIN_IMAGE_HOTKEY, "alt+f3")
         )
@@ -2205,6 +2233,8 @@ class SettingsDialog(QDialog):
             self.KEY_OCR_HOTKEY: self._ocr_hotkey.value() or "ctrl+shift+s",
             self.KEY_IMAGE_TO_PATH_HOTKEY: self._image_to_path_hotkey.value() or "ctrl+shift+p",
             self.KEY_SEQ_IMAGE_TO_PATH_HOTKEY: self._seq_image_to_path_hotkey.value() or "ctrl+shift+[",
+            self.KEY_BULK_PASTE_HOTKEY: self._bulk_paste_hotkey.value() or "ctrl+shift+a",
+            self.KEY_BULK_PATH_PASTE_HOTKEY: self._bulk_path_paste_hotkey.value() or "ctrl+shift+]",
             self.KEY_PIN_IMAGE_HOTKEY: self._pin_image_hotkey.value() or "alt+f3",
             self.KEY_SEQ_PIN_HOTKEY: self._seq_pin_hotkey.value() or "alt+shift+f3",
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
