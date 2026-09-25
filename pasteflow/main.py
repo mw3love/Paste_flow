@@ -748,6 +748,10 @@ _ORPHAN_KEYS = (
     "annot_last_width",
     "annot_last_font_size",
     "annot_last_badge_size",
+    # 2026-09-25 제거된 Gemini 호출(Alt+1)·Gemini(캡처)(Alt+2) 단축키와 빠른 검색 타겟 목록
+    "hotkey_ask_ai",
+    "hotkey_capture_ask",
+    "ai_palette_sites",
 )
 
 
@@ -893,8 +897,6 @@ class _SignalBridge(QObject):
     pin_image          = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 화면에 핀(떠 있는 창)으로 띄우기
     seq_pin            = pyqtSignal()        # 훅 스레드 → 메인: 큐에서 다음 항목을 꺼내 화면에 순차 핀
     capture_requested  = pyqtSignal()        # 훅 스레드 → 메인: 영역 캡처 오버레이 띄우기
-    capture_ask_requested = pyqtSignal()     # 훅 스레드 → 메인: 영역 캡처 + Gemini 질문창 첨부
-    ask_ai             = pyqtSignal()        # 훅 스레드 → 메인: AI 자유질문 입력창 띄우기
     record_gif         = pyqtSignal()        # 훅 스레드 → 메인: GIF 녹화(영역 선택 오버레이) 띄우기
     record_video       = pyqtSignal()        # 훅 스레드 → 메인: 영상(MP4) 녹화(영역 선택 오버레이) 띄우기
     gif_saved          = pyqtSignal(str)     # 인코딩 워커 → 메인: 저장된 GIF 경로
@@ -941,8 +943,6 @@ class PasteFlowApp:
         self._bridge.pin_image.connect(self._on_pin_hotkey)
         self._bridge.seq_pin.connect(self._on_seq_pin_hotkey)
         self._bridge.capture_requested.connect(self._on_capture_requested)
-        self._bridge.capture_ask_requested.connect(self._on_capture_ask_hotkey)
-        self._bridge.ask_ai.connect(self._on_ask_ai_hotkey)
         self._bridge.record_gif.connect(self._on_record_gif_hotkey)
         self._bridge.record_video.connect(self._on_record_video_hotkey)
         self._bridge.gif_saved.connect(self._on_gif_saved)
@@ -995,8 +995,6 @@ class PasteFlowApp:
             on_pin_image=self._bridge.pin_image.emit,
             on_seq_pin=self._bridge.seq_pin.emit,
             on_capture=self._bridge.capture_requested.emit,
-            on_capture_ask=self._bridge.capture_ask_requested.emit,
-            on_ask_ai=self._bridge.ask_ai.emit,
             on_record_gif=self._bridge.record_gif.emit,
             on_record_video=self._bridge.record_video.emit,
             on_stt_start=self._bridge.stt_start.emit,
@@ -1027,9 +1025,6 @@ class PasteFlowApp:
         self._capture_overlay.region_captured.connect(self._on_capture_region)
         # GIF 녹화: 같은 오버레이의 select_only 모드로 사각형만 받아 라이브 녹화 시작
         self._capture_overlay.region_selected.connect(self._on_record_region_selected)
-        # 취소(ESC·우클릭) 시에도 _capture_then_ask를 반드시 정리한다 — 안 그러면 Win+`로
-        # 캡처를 취소한 뒤 이어서 누른 일반 Alt+F2 캡처가 엉뚱하게 Gemini 질문창을 연다.
-        self._capture_overlay.cancelled.connect(self._on_capture_cancelled)
 
         # GIF 녹화기 — 녹화 중 참조 유지(GC 방지), 인코딩은 전용 워커에서 UI 블로킹 방지
         from concurrent.futures import ThreadPoolExecutor
@@ -1044,9 +1039,6 @@ class PasteFlowApp:
         # 마지막 캡처 위치(논리 전역) — 그 직후 핀(Alt+F3)이 캡처 자리에 그대로 덮게 함.
         # 외부 복사가 들어오면 무효화(_on_new_clipboard_item)해 "방금 캡처한 그 이미지"일 때만 적용.
         self._pin_place_rect: QRect | None = None
-        # Win+` 로 트리거된 캡처인지 — True면 _on_capture_region이 저장 뒤 그 이미지를
-        # 곧장 Gemini 질문창에 첨부한다(영역캡처 + AI 질문을 한 동작으로).
-        self._capture_then_ask = False
 
         # OCR은 호출마다 새 스레드 — asyncio.run()을 재사용 스레드에서 반복 호출 시
         # WinRT 콜백 상태가 누적돼 두 번째 호출부터 빈 결과를 반환하는 문제 방지
@@ -1138,17 +1130,6 @@ class PasteFlowApp:
 
         capture_use_printscreen = self.db.get_setting("capture_use_printscreen", "1") == "1"
         self.interceptor.set_capture_via_printscreen(capture_use_printscreen)
-
-        # 기본값을 win+`/alt+`에서 alt+2/alt+1로 변경(2026-08-03) — Windows Terminal이
-        # win+`를 '퀘이크 모드' 전용 전역 단축키로 기본 등록해 두므로(마이크로소프트 공식
-        # 이슈에도 등재된 잘 알려진 기본 동작), 설정창에서 그 조합을 녹화하려 하면
-        # 터미널이 먼저 반응해 캡처가 아예 안 되는 충돌이 있었다. Windows Terminal이
-        # 깔린 PC라면 전부 겪을 문제라 앱 기본값 자체를 바꿨다.
-        capture_ask_hotkey = self.db.get_setting("hotkey_capture_ask", "alt+2")
-        self.interceptor.set_capture_ask_hotkey(capture_ask_hotkey)
-
-        ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+1")
-        self.interceptor.set_ask_ai_hotkey(ask_ai_hotkey)
 
         record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
         self.interceptor.set_record_gif_hotkey(record_hotkey)
@@ -1260,21 +1241,6 @@ class PasteFlowApp:
         """메인 스레드: 영역 캡처 오버레이 시작 (마그네틱 CaptureOverlay)"""
         self._capture_overlay.start()
 
-    def _on_capture_ask_hotkey(self):
-        """메인 스레드: 영역 캡처 + Gemini 질문창 첨부 단축키(기본 Alt+2).
-
-        영역 캡처(Alt+F2)와 완전히 같은 오버레이를 그대로 띄우되, 이번 캡처는
-        저장이 끝난 뒤 곧장 Gemini 질문창에 이미지를 첨부해 열도록 플래그만 세운다
-        — 실제 분기는 _on_capture_region이 담당(같은 캡처 흐름을 두 벌 만들지 않기 위함).
-        """
-        self._capture_then_ask = True
-        self._capture_overlay.start()
-
-    def _on_capture_cancelled(self):
-        """캡처 취소(ESC·우클릭) — Win+`로 세운 _capture_then_ask 플래그를 정리한다.
-        정리하지 않으면 다음번 일반 Alt+F2 캡처가 잘못 Gemini 질문창을 열게 된다."""
-        self._capture_then_ask = False
-
     def _on_capture_region(self, pixmap, rect):
         """메인 스레드: 선택 영역 픽맵 → 클립보드(DIB) + 히스토리·큐 + 파일 저장 + 토스트.
 
@@ -1318,17 +1284,6 @@ class PasteFlowApp:
         # 노출 없이 텍스트/이미지 복사와 같은 UX로 몇 번째 큐에 걸렸는지 바로 보여준다.
         _, total = self.queue.get_status()
         show_copy_toast(saved_item, total)
-
-        # Win+`(캡처+질문)로 트리거된 캡처면, 저장까지 끝난 이 이미지를 곧장
-        # Gemini 질문창에 첨부해 연다 — 사용자는 질문만 타이핑하면 된다.
-        if self._capture_then_ask:
-            self._capture_then_ask = False
-            try:
-                png_bytes = _image_data_to_png_bytes(dib)
-            except Exception:
-                png_bytes = None
-            if png_bytes:
-                self._open_ai_dialog(initial_image_png=png_bytes)
 
     # ── GIF 녹화 (Ctrl+Shift+G) ──
 
@@ -1957,16 +1912,6 @@ class PasteFlowApp:
             self._on_paste_queue_done()
         else:
             QTimer.singleShot(self._BULK_PASTE_STEP_MS, lambda: self._bulk_paste_step(mode))
-
-    def _on_ask_ai_hotkey(self):
-        """AI 자유질문 단축키(기본 Alt+`) — 컨텍스트 없이 즉석에서 AI 팔레트를 연다.
-
-        상시 켜져 있는 PasteFlow에서 한 키로 질문 입력창을 띄워 여러 목적지(구글 AI 모드·
-        구글 드라이브·PasteFlow 답변·사용자가 설정에서 추가한 웹사이트) 중 하나로 질문을
-        보낸다. 목적지 목록은 `_open_ai_dialog`가 매번 DB에서 읽어 넘긴다(설정창에서
-        바꾼 뒤 앱 재시작 없이 바로 반영).
-        """
-        self._open_ai_dialog()
 
     def _on_pin_hotkey(self):
         """화면에 핀 단축키(기본 Alt+F3) — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다.
@@ -2603,20 +2548,17 @@ class PasteFlowApp:
                 self._on_edit_item(item_id, new_text)
 
     def _open_ai_dialog(self, initial_image_png: bytes | None = None):
-        """AI 자유질문 단축키(Alt+`) — 질문 입력창을 **비모달로** 띄우고, 고른 타겟에 따라
-        질문을 라우팅한다.
+        """이미지 우클릭 "Gemini에게 질문" — 질문 입력창을 **비모달로** 띄우고, 질문을
+        브라우저의 Google AI 모드로 보낸다.
 
         initial_image_png: 주어지면 창을 열 때 이미지를 미리 첨부한다(핀 이미지 우클릭
         "Gemini에게 질문" — 2026-08-02, `AiQueryDialog.attach_image_bytes`가 이미
         패널 드래그앤드롭용으로 있던 공개 메서드라 재사용). Ctrl+V로 나중에 다른 이미지를
         첨부하면 그걸로 교체된다(1장 제한은 기존 동작 그대로).
 
-        **타겟 팔레트** — 질문을 API 워커로 보내지 않고, DB에 저장된 `ai_palette_sites`
-        (설정창 "AI 팔레트 타겟" — `pasteflow/ai_palette.py`가 데이터 모양·기본값을 소유)
-        중 사용자가 고른 목적지로 라우팅한다. 매번 다시 읽어 설정 변경이 앱 재시작 없이 바로
-        반영된다. v1.6x에서 API 답변·비교·기록·드라이브 연동을 통째로 제거해, 이제 기본
-        타겟은 **Google AI 모드 하나뿐**이다(실사용 결과 가장 견고했다 — web_open.py 참고).
-        사용자가 설정에서 추가한 웹사이트(`url` 타겟)는 그대로 지원한다.
+        **목적지는 Google AI 모드 하나뿐이다** — 설정창 "빠른 검색"(사용자 URL 타겟 편집)과
+        자유질문 단축키(Alt+1)·캡처 후 질문 단축키(Alt+2)는 실사용이 없어 2026-09-25에
+        제거했다. 질문창은 `ai_palette.DEFAULT_SITES`(Google AI 하나)로만 연다.
 
         ⚠ **`exec()`를 쓰지 않는다.** `QDialog.exec()`는 내부적으로 창을 모달로 표시하는데,
         모달리티가 `NonModal`이고 부모도 없으면 Qt가 이를 **ApplicationModal로 승격**시킨다
@@ -2638,7 +2580,7 @@ class PasteFlowApp:
             existing.activateWindow()
             return
 
-        sites = ai_palette.load_sites(self.db.get_setting("ai_palette_sites", ""))
+        sites = ai_palette.load_sites("")  # 빈 값 → DEFAULT_SITES 사본(Google AI 하나)
         # parent=None — self.panel을 부모로 주면 Windows가 이 창을 패널의 "소유 창"으로 취급해
         # 패널 위에 항상 떠 있게 고정한다(모달과 무관한 별개의 Z-order 규칙) — 미리보기 팝업과
         # 같은 독립 최상위 창 패턴으로 통일한다.
@@ -2653,38 +2595,14 @@ class PasteFlowApp:
             if result is None:  # 취소(Esc·취소 버튼)
                 dialog.deleteLater()
                 return
-            site, question = result
-            kind = site.get("kind")
-
-            if kind == ai_palette.KIND_GOOGLE_AI:
-                self._open_in_browser(question, dialog.get_images())
-            elif kind == ai_palette.KIND_URL:
-                self._open_palette_url(site, question)
-            else:
-                # 옛 설정에 남은 미지원 kind(드라이브·ChatGPT 등, v1.6x에서 제거) — 설정에서
-                # 타겟을 다시 확인해 달라고 안내한다(조용한 무반응 대신).
-                from pasteflow.ui.toast import ToastNotification
-                ToastNotification("더 이상 지원하지 않는 타겟입니다 — 설정에서 확인해 주세요",
-                                  icon="🌐")
+            _site, question = result
+            self._open_in_browser(question, dialog.get_images())
             dialog.deleteLater()
 
         dialog.finished.connect(_finished)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
-
-    def _open_palette_url(self, site: dict, question: str):
-        """AI 팔레트의 `url` 타겟 — {q} 자리에 질의를 넣어 기본 브라우저로 연다."""
-        from pasteflow import ai_palette
-        from pasteflow import web_open
-        from pasteflow.ui.toast import ToastNotification
-
-        url = ai_palette.build_url(site.get("url", ""), question)
-        label = site.get("label") or "웹사이트"
-        if web_open.open_url(url):
-            ToastNotification(f"{label} 검색 — 브라우저에서 여는 중", icon="🌐")
-        else:
-            ToastNotification("브라우저를 열지 못했습니다", icon="🌐")
 
     # 페이지가 뜨고 입력칸에 포커스가 갈 때까지 기다리는 시간. 프로그램은 로드 완료 시점을
     # 알 수 없어(브라우저 밖에서 DOM을 못 본다) 고정 지연에 기댈 수밖에 없다 — 주입 경로가
@@ -2995,9 +2913,6 @@ class PasteFlowApp:
             "hotkey_pin_image": self.db.get_setting("hotkey_pin_image", "alt+f3"),
             "hotkey_seq_pin": self.db.get_setting("hotkey_seq_pin", "alt+shift+f3"),
             "hotkey_capture": self.db.get_setting("hotkey_capture", "alt+f2"),
-            "hotkey_capture_ask": self.db.get_setting("hotkey_capture_ask", "alt+2"),
-            "hotkey_ask_ai": self.db.get_setting("hotkey_ask_ai", "alt+1"),
-            "ai_palette_sites": self.db.get_setting("ai_palette_sites", ""),
             "hotkey_record_gif": self.db.get_setting("hotkey_record_gif", "ctrl+shift+g"),
             "hotkey_record_video": self.db.get_setting("hotkey_record_video", "ctrl+shift+r"),
             "gif_show_cursor": self.db.get_setting("gif_show_cursor", "1"),
@@ -3062,8 +2977,6 @@ class PasteFlowApp:
         old_seq_pin_hotkey = self.db.get_setting("hotkey_seq_pin", "alt+shift+f3")
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         old_capture_use_printscreen = self.db.get_setting("capture_use_printscreen", "1")
-        old_capture_ask_hotkey = self.db.get_setting("hotkey_capture_ask", "alt+2")
-        old_ask_ai_hotkey = self.db.get_setting("hotkey_ask_ai", "alt+1")
         old_record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
         old_record_video_hotkey = self.db.get_setting("hotkey_record_video", "ctrl+shift+r")
         old_stt_hotkey = self.db.get_setting("hotkey_stt", "ctrl+win")
@@ -3123,16 +3036,6 @@ class PasteFlowApp:
         new_capture_use_printscreen = new_settings.get("capture_use_printscreen", "1")
         if old_capture_use_printscreen != new_capture_use_printscreen:
             self.interceptor.set_capture_via_printscreen(new_capture_use_printscreen == "1")
-
-        # 영역 캡처 + Gemini 질문창 첨부 단축키 재설정
-        new_capture_ask_hotkey = new_settings.get("hotkey_capture_ask", "alt+2")
-        if old_capture_ask_hotkey != new_capture_ask_hotkey:
-            self.interceptor.set_capture_ask_hotkey(new_capture_ask_hotkey)
-
-        # AI 자유질문 단축키 재설정
-        new_ask_ai_hotkey = new_settings.get("hotkey_ask_ai", "alt+1")
-        if old_ask_ai_hotkey != new_ask_ai_hotkey:
-            self.interceptor.set_ask_ai_hotkey(new_ask_ai_hotkey)
 
         # GIF 녹화 단축키 재설정
         new_record_hotkey = new_settings.get("hotkey_record_gif", "ctrl+shift+g")

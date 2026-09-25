@@ -8,10 +8,9 @@ from PyQt6.QtWidgets import (
     QStyle, QStyledItemDelegate, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
     QInputDialog, QTabWidget,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize, QPoint, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize, QTimer
 from PyQt6.QtGui import QColor, QFontMetrics
 
-from pasteflow import ai_palette
 from pasteflow.ui.theme import COLORS, PEACH_HOVER, check_icon_url, chevron_icon_url
 
 
@@ -37,174 +36,6 @@ class _ModelIndentDelegate(QStyledItemDelegate):
         super().initStyleOption(option, index)
         if not index.data(_HEADER_ROLE):
             option.rect.setLeft(option.rect.left() + _MODEL_INDENT_PX)
-
-
-class _DragHandle(QLabel):
-    """행 순서를 바꾸는 손잡이 — 누른 채 위아래로 끌면 소유 행이 드래그 신호를 낸다.
-
-    QDrag(OLE D&D)는 쓰지 않는다(패널 드래그와 같은 이유 회피 — 이 앱은 창 안 재배치에
-    항상 수동 마우스 추적 방식을 쓴다, panel.py의 fake drag와 동일 계열). 눌린 동안의
-    후속 mouseMove/mouseRelease는 Qt의 암묵적 그랩으로 이 위젯이 계속 받는다.
-    """
-
-    def __init__(self, row: "_PaletteSiteRow"):
-        super().__init__("⠿")
-        self._row = row
-        self.setFixedWidth(20)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.setStyleSheet(f"color: {_TXT}; font-size: 14px;")
-        self.setToolTip("드래그해서 순서 바꾸기")
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            self._row.drag_started.emit(self._row)
-        super().mousePressEvent(e)
-
-    def mouseMoveEvent(self, e):
-        if e.buttons() & Qt.MouseButton.LeftButton:
-            self._row.drag_moved.emit(self._row, int(e.globalPosition().y()))
-        super().mouseMoveEvent(e)
-
-    def mouseReleaseEvent(self, e):
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self._row.drag_ended.emit(self._row)
-        super().mouseReleaseEvent(e)
-
-
-class _PaletteSiteRow(QWidget):
-    """Gemini 팔레트(Alt+` 자유질문창) 타겟 한 줄 — 번호·드래그손잡이·라벨·키워드·URL·삭제.
-
-    번호는 질문창에서 Tab으로 순환하는 순서를 보여준다(드래그 손잡이로 순서를 바꿀 수
-    있고, 번호는 그 순서를 즉시 반영해 표시 — `set_number`). 예전엔 이 번호가 질문창의
-    `Alt+숫자` 즉시전송 단축키와도 대응했으나, 그 단축키는 2026-08-03에 제거했다(타겟이
-    사실상 Gemini 하나뿐이라 Tab 순환만으로 충분했다 — `ai_query.py` 참고). **종류 선택
-    드롭다운은 없다**(2026-07-29
-    개편) — Google AI 타겟은 `ensure_google_ai()`가 항상 정확히 1개로 보장하는 **고정
-    타겟**(`fixed=True`: 삭제 불가·URL 칸 없음·main.py의 기존 배관을 그대로 탐)이고,
-    사용자가 추가하는 나머지 타겟은 전부 URL 종류 하나뿐이라 고를 게 없다(추가 버튼이
-    항상 URL 타겟을 만든다 — `_on_add_palette_site`). 두 종류 다 위치(번호)는 드래그로
-    자유롭게 바꿀 수 있다.
-    """
-
-    remove_requested = pyqtSignal(object)   # self
-    drag_started = pyqtSignal(object)       # self
-    drag_moved = pyqtSignal(object, int)    # self, global_y
-    drag_ended = pyqtSignal(object)         # self
-
-    def __init__(self, site: dict, parent=None):
-        super().__init__(parent)
-        self._fixed = site.get("kind") == ai_palette.KIND_GOOGLE_AI
-
-        # 행마다 테두리로 시각적으로 구분(2026-07-29 사용자 요청 — "각 항목을 테두리로
-        # 구분하는게 시인성에 좋을듯"). 배경은 투명 유지(카드색이 그대로 비침) — 테두리만
-        # 더해 목록 항목 사이 경계를 준다.
-        # ⚠ WA_StyledBackground 필수(오프스크린 렌더로 실측·확인 — 2026-07-29): Qt는
-        # 서브클래싱된 QWidget에 한해 setStyleSheet의 배경/테두리를 자동 적용하지 않는다
-        # (순수 QWidget() 인스턴스는 예외적으로 자동 적용됨). 이 속성 없이는 border 자체가
-        # 그려지지 않아 이 기능 추가가 조용히 무효화된다.
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setObjectName("paletteRow")
-        self.setStyleSheet(
-            f"QWidget#paletteRow {{ background: transparent; "
-            f"border: 1px solid {_LINE}; border-radius: 6px; }}"
-        )
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(8, 6, 8, 6)
-        outer.setSpacing(4)
-
-        # 위 줄: 손잡이(맨 왼쪽 — 재정렬 그립의 통상 위치)·번호·라벨·키워드·(고정 배지)·삭제.
-        top = QHBoxLayout()
-        top.setContentsMargins(0, 0, 0, 0)
-        top.setSpacing(4)
-
-        self.drag_handle = _DragHandle(self)
-
-        self.number_label = QLabel("")
-        self.number_label.setFixedWidth(20)
-        self.number_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.number_label.setStyleSheet(f"color: {_TITLE}; font-size: 11px;")
-        self.number_label.setToolTip("질문창에서 Tab으로 순환하는 순서")
-
-        self.label_edit = QLineEdit(site.get("label", ""))
-        self.label_edit.setPlaceholderText("표시 이름")
-        self.label_edit.setFixedWidth(90)
-
-        self.keyword_edit = QLineEdit(site.get("keyword", ""))
-        self.keyword_edit.setPlaceholderText("키워드")
-        self.keyword_edit.setToolTip(
-            "이 글자 뒤에 공백을 붙여 입력하면 자동으로 이 타겟이 선택됩니다\n"
-            "(예: \"yt 고양이\" → 유튜브로 \"고양이\" 검색). 비워 두면 접두어 없음.")
-        self.keyword_edit.setFixedWidth(48)
-
-        top.addWidget(self.drag_handle)
-        top.addWidget(self.number_label)
-        top.addWidget(self.label_edit)
-        top.addWidget(self.keyword_edit)
-
-        if self._fixed:
-            # 종류 드롭다운이 있던 자리를 대신하는 고정 배지 — "이건 항상 Google AI"임을 알림.
-            badge = QLabel("Google AI · 고정")
-            badge.setStyleSheet(
-                f"color: {COLORS['peach']}; font-size: 10px; font-weight: 600;")
-            badge.setToolTip(
-                "항상 정확히 1개 있어야 하는 내장 타겟이라 삭제할 수 없습니다.\n"
-                "드래그 손잡이로 순서(번호)는 자유롭게 바꿀 수 있습니다.")
-            top.addWidget(badge)
-
-        top.addStretch(1)
-
-        # ✕ 삭제 버튼 — 고정 타겟(Google AI)은 항상 정확히 1개여야 하므로 만들지 않는다.
-        # 전역 QPushButton 기본 스타일의 padding(6px 16px = 가로 32px)이 setFixedWidth(28)
-        # 보다 커서 글자가 그려질 내부 폭이 음수가 돼 "✕"가 전혀 안 보였다(2026-07-29
-        # 사용자 보고). 이 버튼만 패딩을 좁힌 전용 스타일로 덮는다.
-        self.remove_btn = None
-        if not self._fixed:
-            self.remove_btn = QPushButton("✕")
-            self.remove_btn.setFixedWidth(28)
-            self.remove_btn.setToolTip("이 타겟 삭제")
-            self.remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.remove_btn.setStyleSheet(
-                f"QPushButton {{ background-color: {_BTN}; color: {_TXT}; border: none; "
-                f"border-radius: 6px; padding: 4px 2px; }}"
-                f"QPushButton:hover {{ background-color: {_BTN_HOVER}; }}"
-            )
-            self.remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
-            top.addWidget(self.remove_btn)
-
-        outer.addLayout(top)
-
-        # 아래 줄: URL — Google AI 고정 타겟은 URL이 의미 없어(main.py의 기존 배관을
-        # 그대로 탐) 아예 표시하지 않는다. 한 줄에 다 욱여넣으면 너무 잘려서 URL만 따로
-        # 한 줄 전체 폭을 준다.
-        self.url_edit = None
-        if not self._fixed:
-            url_row = QHBoxLayout()
-            url_row.setContentsMargins(20 + 4 + 20 + 4, 0, 0, 0)  # 손잡이+번호 폭만큼 들여써 위 라벨과 시작점을 맞춤
-            url_row.setSpacing(4)
-            self.url_edit = QLineEdit(site.get("url", ""))
-            self.url_edit.setPlaceholderText("URL 입력 (예: https://example.com/search?q={q})")
-            self.url_edit.setStyleSheet(
-                f"QLineEdit {{ background-color: {_INSET}; color: {_TXT}; "
-                f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
-                f"QLineEdit:focus {{ border-color: {COLORS['peach']}; }}"
-            )
-            url_row.addWidget(self.url_edit, 1)
-            outer.addLayout(url_row)
-
-    def set_number(self, n: int):
-        """드래그·추가·삭제로 순서가 바뀔 때마다 표시 번호(=Tab 순환 순서)를 갱신."""
-        self.number_label.setText(str(n))
-
-    def to_dict(self) -> dict:
-        return {
-            "label": self.label_edit.text().strip() or "이름 없음",
-            "keyword": self.keyword_edit.text().strip(),
-            "kind": ai_palette.KIND_GOOGLE_AI if self._fixed else ai_palette.KIND_URL,
-            "url": self.url_edit.text().strip() if self.url_edit is not None else "",
-        }
 
 
 # 프로브 상태 → 상태 줄에 쓸 (말머리, 색). `retry`(429·503)는 판정 불가라 경고색이며,
@@ -641,7 +472,6 @@ class SettingsDialog(QDialog):
     KEY_SEQ_PIN_HOTKEY = "hotkey_seq_pin"
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
     KEY_CAPTURE_USE_PRINTSCREEN = "capture_use_printscreen"
-    KEY_CAPTURE_ASK_HOTKEY = "hotkey_capture_ask"
     KEY_RECORD_GIF_HOTKEY = "hotkey_record_gif"
     KEY_RECORD_VIDEO_HOTKEY = "hotkey_record_video"
     KEY_GIF_SHOW_CURSOR = "gif_show_cursor"
@@ -649,12 +479,8 @@ class SettingsDialog(QDialog):
     KEY_GIF_MAX_SECONDS = "gif_max_seconds"
     KEY_VIDEO_FPS = "video_fps"
     KEY_VIDEO_MAX_SECONDS = "video_max_seconds"
-    KEY_ASK_AI_HOTKEY = "hotkey_ask_ai"
     KEY_STT_HOTKEY = "hotkey_stt"
     KEY_STT_MIC_DEVICE = "stt_mic_device"  # 빈 문자열=시스템 기본, 아니면 특정 장치 이름
-    # AI 팔레트 타겟 — 자유질문창(Alt+`)의 질문을 보낼 목적지 목록(JSON list).
-    # 데이터 모양·기본값·URL 빌더는 pasteflow/ai_palette.py가 소유(main도 이걸 공유).
-    KEY_AI_PALETTE_SITES = "ai_palette_sites"
     KEY_CAPTURE_FOLDER = "capture_save_folder"
     KEY_OCR_ENGINE = "ocr_engine"
     # AI 크리덴셜 — Mindlogic 게이트웨이 한 벌(키 + Base URL)뿐이다.
@@ -965,33 +791,6 @@ class SettingsDialog(QDialog):
         ai_hotkey_form.setVerticalSpacing(4)
         ai_hotkey_form.setContentsMargins(10, 8, 10, 8)
 
-        # Gemini 호출(alt+1) / Gemini(캡처, alt+2) / OCR
-        self._ask_ai_hotkey = HotkeyEdit()
-        self._ask_ai_hotkey.setToolTip(
-            "컨텍스트 없이 즉석에서 Gemini에게 질문하는 입력창을 띄웁니다.\n"
-            "클립보드 항목과 무관하게 아무 때나 한 키로 Gemini를 호출해 자유 질문하고 답변을 받습니다."
-        )
-        ai_hotkey_form.addRow("•  Gemini 호출:", self._ask_ai_hotkey)
-
-        # 영역 캡처 + Gemini 질문창 첨부 — 영역 캡처(Alt+F2)와 같은 오버레이로 캡처하되
-        # 저장까지 끝낸 뒤 그 이미지를 곧장 Gemini 질문창에 첨부해 연다(2026-08-02, 사용자
-        # 요청 — 캡처→질문이 잦은 흐름이라 한 키로 묶음).
-        # "Gemini 호출" 바로 아래 배치 + "Gemini(캡처)"로 개명(2026-08-03, 사용자 요청) —
-        # 둘 다 Gemini를 호출하는 기능이라 나란히 둬야 관련성이 보이고, 옛 이름 "캡처 후
-        # 질문"은 아래 OCR(옛 "AI OCR")과 이름이 비슷해 헷갈렸다.
-        # 기본값을 win+`에서 alt+2로 변경(2026-08-03) — Windows Terminal이 win+`를
-        # '퀘이크 모드' 전역 단축키로 기본 등록해 둬서, 이 필드를 녹화하려 하면 터미널이
-        # 먼저 반응해 캡처 자체가 안 되는 충돌이 있었다(마이크로소프트 공식 이슈에도
-        # 등재된 잘 알려진 기본 동작). Gemini 호출도 같은 이유로 alt+`에서 alt+1로
-        # 함께 옮겨 "Alt+숫자로 나란히"라는 통일감을 유지했다. allow_mod_only는 사용자가
-        # 원하면 여전히 Win 조합도 고를 수 있게 남겨둔다(강제하지 않을 뿐 막지도 않음).
-        self._capture_ask_hotkey = HotkeyEdit(allow_mod_only=True)
-        self._capture_ask_hotkey.setToolTip(
-            "화면 영역을 드래그로 선택해 캡처하고(영역 캡처와 동일), 저장까지 끝낸 그 이미지를\n"
-            "곧장 Gemini 질문창에 첨부해 엽니다 — 질문만 타이핑하면 됩니다."
-        )
-        ai_hotkey_form.addRow("•  Gemini(캡처):", self._capture_ask_hotkey)
-
         # OCR(옛 이름 "AI OCR") — 화면 영역을 AI(설정된 API)로 텍스트 인식. 별도 엔진 없음.
         # 음성 입력(STT) 바로 위로 이동(2026-08-03, 사용자 요청) — 텍스트 인식·음성 인식이
         # 나란히 있는 편이 자연스럽다.
@@ -1015,9 +814,8 @@ class SettingsDialog(QDialog):
             "게이트웨이 오디오 입력은 Gemini 계열 모델만 지원합니다 — 아래 STT 모델에서 선택하세요."
         )
         ai_hotkey_form.addRow("•  음성 입력(STT):", self._stt_hotkey)
-        # tab_ai.addWidget(ai_hotkey_group)는 AI 탭 맨 아래(빠른 검색 다음)에 배치하려고
-        # 여기서 바로 호출하지 않고 뒤로 미룬다(2026-08-04, 사용자 요청) — 그 자리에서
-        # 그대로 호출.
+        # tab_ai.addWidget(ai_hotkey_group)는 AI 탭 맨 아래(API 연동 그룹 다음)에 배치하려고
+        # 여기서 바로 호출하지 않고 뒤로 미룬다(2026-08-04, 사용자 요청).
 
         # 녹화 시작/종료를 하나의 다이얼로그 시그널로 모은다 — main이 이걸로 전역 훅을
         # suspend/resume한다(어느 HotkeyEdit이든 녹화를 시작하면 suspend, 끝나면 resume).
@@ -1026,7 +824,7 @@ class SettingsDialog(QDialog):
             self._seq_image_to_path_hotkey, self._capture_hotkey,
             self._pin_image_hotkey, self._seq_pin_hotkey, self._record_gif_hotkey,
             self._record_video_hotkey,
-            self._ask_ai_hotkey, self._ocr_hotkey, self._capture_ask_hotkey,
+            self._ocr_hotkey,
             self._stt_hotkey,
         ):
             _hk.listening_changed.connect(self.recording_active.emit)
@@ -1275,73 +1073,7 @@ class SettingsDialog(QDialog):
 
         tab_ai.addWidget(ai_group)
 
-        # ── 빠른 검색 (Alt+` 자유질문창의 목적지 목록) ──
-        # 질문을 어디로 보낼지 사용자가 직접 관리하는 목록 — 순서가 팔레트 번호(질문창
-        # Tab 순환 순서).
-        # Google AI는 항상 정확히 1개인 고정 타겟, 나머지는 전부 URL 타겟이라 {q} 자리에
-        # 질의가 채워진다(pasteflow/ai_palette.py 참고). "Gemini 팔레트"였던 그룹명을
-        # "빠른 검색"으로 단순화했다(2026-07-29 사용자 요청) — Google AI뿐 아니라 네이버
-        # 사전 같은 일반 URL 타겟도 담는 목록이라 더 정확한 이름이기도 하다.
-        palette_group = QGroupBox("빠른 검색")
-        palette_layout = QVBoxLayout(palette_group)
-        palette_layout.setSpacing(4)
-        palette_layout.setContentsMargins(10, 8, 10, 8)
-
-        # 설명 문구 없음(2026-07-29 사용자 요청) — 여기 있던 사용법(Tab/키워드)과
-        # 예시는 실제로 그걸 쓰는 자리인 Alt+` 질문창의 입력란 placeholder로 옮겼다
-        # (`ui/ai_query.py`의 `_editor.setPlaceholderText` 참고). 설정창은 목록 편집만.
-
-        # 열 제목 — 각 행이 테두리+8px 좌측 패딩을 갖게 됐으므로(_PaletteSiteRow) 헤더도
-        # 같은 8px만큼 오른쪽으로 밀어야 아래 입력칸과 열이 맞는다(2026-07-29 사용자 보고:
-        # "제목란에 표시이름 키워드가 아래쪽 입력칸과 세로줄 안맞음"). URL은 이제 행마다
-        # 빈 칸일 때 placeholder로 안내하므로 별도 헤더 줄이 필요 없어 제거했다.
-        _hdr_style = f"color: {_TITLE}; font-size: 10px; font-weight: 600;"
-
-        palette_header_top = QHBoxLayout()
-        palette_header_top.setContentsMargins(8, 0, 8, 0)
-        palette_header_top.setSpacing(4)
-
-        hdr_drag = QLabel("")
-        hdr_drag.setFixedWidth(20)
-        palette_header_top.addWidget(hdr_drag)
-
-        hdr_num = QLabel("#")
-        hdr_num.setFixedWidth(20)
-        hdr_num.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hdr_num.setStyleSheet(_hdr_style)
-        palette_header_top.addWidget(hdr_num)
-
-        hdr_label = QLabel("표시 이름")
-        hdr_label.setFixedWidth(90)
-        hdr_label.setStyleSheet(_hdr_style)
-        palette_header_top.addWidget(hdr_label)
-
-        hdr_keyword = QLabel("키워드")
-        hdr_keyword.setFixedWidth(48)
-        hdr_keyword.setStyleSheet(_hdr_style)
-        palette_header_top.addWidget(hdr_keyword)
-
-        palette_header_top.addStretch(1)
-
-        hdr_del = QLabel("")
-        hdr_del.setFixedWidth(28)
-        palette_header_top.addWidget(hdr_del)
-
-        palette_layout.addLayout(palette_header_top)
-
-        self._palette_rows_layout = QVBoxLayout()
-        self._palette_rows_layout.setSpacing(4)
-        palette_layout.addLayout(self._palette_rows_layout)
-        self._palette_rows: list[_PaletteSiteRow] = []
-
-        add_site_btn = QPushButton("+ 타겟 추가")
-        add_site_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_site_btn.clicked.connect(self._on_add_palette_site)
-        palette_layout.addWidget(add_site_btn, 0, Qt.AlignmentFlag.AlignLeft)
-
-        tab_ai.addWidget(palette_group)
-
-        # AI 단축키 그룹은 AI 탭 맨 아래에 배치(2026-08-04, 사용자 요청 — 크리덴셜·팔레트가
+        # AI 단축키 그룹은 AI 탭 맨 아래에 배치(2026-08-04, 사용자 요청 — 크리덴셜이
         # 우선이고 단축키는 참고용으로 하단에).
         tab_ai.addWidget(ai_hotkey_group)
 
@@ -1676,12 +1408,6 @@ class SettingsDialog(QDialog):
         self._record_video_hotkey.set_value(
             self._settings.get(self.KEY_RECORD_VIDEO_HOTKEY, "ctrl+shift+r")
         )
-        self._ask_ai_hotkey.set_value(
-            self._settings.get(self.KEY_ASK_AI_HOTKEY, "alt+1")
-        )
-        self._capture_ask_hotkey.set_value(
-            self._settings.get(self.KEY_CAPTURE_ASK_HOTKEY, "alt+2")
-        )
         self._stt_hotkey.set_value(
             self._settings.get(self.KEY_STT_HOTKEY, "ctrl+win")
         )
@@ -1696,9 +1422,6 @@ class SettingsDialog(QDialog):
         self._init_model_slots()
         # API 프로필 — 크리덴셜·모델 칸을 채운 뒤 호출(자동 이관이 그 값을 읽는다).
         self._init_profiles()
-
-        # AI 팔레트 타겟(Alt+` 자유질문 목적지) — 저장된 목록(없으면 기본값)으로 행 구성.
-        self._load_palette_sites()
 
         try:
             history_max = int(self._settings.get(self.KEY_HISTORY_MAX, "50"))
@@ -1900,72 +1623,6 @@ class SettingsDialog(QDialog):
         del self._profiles[idx]
         self._populate_profile_combo()
         self._set_status(f"프로필 '{label}' 삭제 — 하단 [저장] 시 반영됩니다.")
-
-    # ── Gemini 팔레트 타겟(Alt+` 자유질문 목적지) ────────────────────────────────
-    def _load_palette_sites(self):
-        """저장된 목록(없으면 기본값)으로 행들을 채운다.
-
-        `ensure_google_ai`로 정규화 — 종류 드롭다운이 있던 옛 설정에 Google AI가 0개나
-        여러 개 저장돼 있어도 여기서 정확히 1개로 맞춘다(멱등, ai_palette.py 참고).
-        """
-        sites = ai_palette.ensure_google_ai(
-            ai_palette.load_sites(self._settings.get(self.KEY_AI_PALETTE_SITES, "")))
-        for site in sites:
-            self._add_palette_row(site)
-        self._renumber_palette_rows()
-
-    def _add_palette_row(self, site: dict):
-        row = _PaletteSiteRow(site)
-        row.remove_requested.connect(self._on_remove_palette_row)
-        row.drag_started.connect(self._on_palette_drag_started)
-        row.drag_moved.connect(self._on_palette_drag_moved)
-        row.drag_ended.connect(self._on_palette_drag_ended)
-        self._palette_rows.append(row)
-        self._palette_rows_layout.addWidget(row)
-
-    def _on_add_palette_site(self):
-        self._add_palette_row({"label": "", "keyword": "", "kind": ai_palette.KIND_URL, "url": ""})
-        self._renumber_palette_rows()
-
-    def _on_remove_palette_row(self, row: "_PaletteSiteRow"):
-        if row in self._palette_rows:
-            self._palette_rows.remove(row)
-        self._palette_rows_layout.removeWidget(row)
-        row.deleteLater()
-        self._renumber_palette_rows()
-
-    def _on_palette_drag_started(self, row: "_PaletteSiteRow"):
-        self._palette_drag_row = row
-
-    def _on_palette_drag_moved(self, row: "_PaletteSiteRow", global_y: int):
-        """드래그 중인 행이 이웃 행의 세로 중심을 넘으면 그 자리로 옮긴다(Sortable류 임계 교차 방식)."""
-        if getattr(self, "_palette_drag_row", None) is not row:
-            return
-        cur_index = self._palette_rows.index(row)
-        for i, other in enumerate(self._palette_rows):
-            if other is row:
-                continue
-            mid_y = other.mapToGlobal(QPoint(0, 0)).y() + other.height() // 2
-            if (i < cur_index and global_y < mid_y) or (i > cur_index and global_y > mid_y):
-                self._move_palette_row(cur_index, i)
-                return
-
-    def _on_palette_drag_ended(self, row: "_PaletteSiteRow"):
-        self._palette_drag_row = None
-
-    def _move_palette_row(self, from_i: int, to_i: int):
-        """행 위젯을 물리적으로 새 위치로 옮긴다(값 스왑이 아니라 위젯 자체 이동 —
-        드래그는 커서를 따라 실제로 자리를 옮겨야 자연스럽다)."""
-        row = self._palette_rows.pop(from_i)
-        self._palette_rows.insert(to_i, row)
-        self._palette_rows_layout.removeWidget(row)
-        self._palette_rows_layout.insertWidget(to_i, row)
-        self._renumber_palette_rows()
-
-    def _renumber_palette_rows(self):
-        """표시 번호(=질문창 Tab 순환 순서)를 화면 순서에 맞게 갱신한다."""
-        for i, row in enumerate(self._palette_rows):
-            row.set_number(i + 1)
 
     def _cached_models(self) -> list[str]:
         """모델 캐시(JSON list)를 파싱해 모델명 목록 반환. 없으면 빈 목록."""
@@ -2241,8 +1898,6 @@ class SettingsDialog(QDialog):
             self.KEY_CAPTURE_USE_PRINTSCREEN: "1" if self._capture_printscreen_check.isChecked() else "0",
             self.KEY_RECORD_GIF_HOTKEY: self._record_gif_hotkey.value() or "ctrl+shift+g",
             self.KEY_RECORD_VIDEO_HOTKEY: self._record_video_hotkey.value() or "ctrl+shift+r",
-            self.KEY_ASK_AI_HOTKEY: self._ask_ai_hotkey.value() or "alt+1",
-            self.KEY_CAPTURE_ASK_HOTKEY: self._capture_ask_hotkey.value() or "alt+2",
             self.KEY_STT_HOTKEY: self._stt_hotkey.value() or "ctrl+win",
             self.KEY_CAPTURE_FOLDER: self._capture_folder_edit.text(),
             # OCR은 별도 엔진 선택 없이 항상 AI(Gemini/Mindlogic) API로 처리 → kind 고정.
@@ -2273,10 +1928,6 @@ class SettingsDialog(QDialog):
         # main._SECRET_KEYS가 JSON 통째로 DPAPI 암호화한다.
         new_settings[self.KEY_AI_PROFILES] = json.dumps(self._profiles, ensure_ascii=False)
         new_settings[self.KEY_AI_ACTIVE_PROFILE] = self._profile_combo.currentText()
-
-        # AI 팔레트 타겟 — 화면의 각 행을 순서 그대로 직렬화(순서=질문창 Tab 순환 순서).
-        new_settings[self.KEY_AI_PALETTE_SITES] = ai_palette.dump_sites(
-            [row.to_dict() for row in self._palette_rows])
 
         self.settings_changed.emit(new_settings)
         self.accept()
