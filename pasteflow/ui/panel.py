@@ -199,12 +199,8 @@ class PanelItemWidget(QWidget):
     def enterEvent(self, event):
         self._is_hovered = True
         self._apply_bg_style()
-        # hover된 항목을 키보드 포커스 타겟으로 — Space로 즉시 이 항목 미리보기가 열리도록
-        panel = self.parent()
-        while panel and not isinstance(panel, ClipboardPanel):
-            panel = panel.parent()
-        if panel is not None:
-            panel._kbd_focus_id = self.item_id
+        # hover는 시각 효과만 — 키보드 대상(_kbd_focus_id)은 클릭·방향키로만 정한다.
+        # hover로 대상을 바꾸면 선택(코랄)과 다른 항목에 Ctrl+C·Del 등이 먹는다.
         super().enterEvent(event)
 
     def leaveEvent(self, event):
