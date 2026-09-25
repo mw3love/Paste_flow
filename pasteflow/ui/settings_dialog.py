@@ -5,7 +5,7 @@
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,
-    QStyle, QStyledItemDelegate, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
+    QStyledItemDelegate, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
     QTabWidget,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize, QTimer
@@ -632,6 +632,10 @@ class SettingsDialog(QDialog):
 
         def _make_tab(title: str) -> QVBoxLayout:
             page = QWidget()
+            # 스크롤 영역 안 페이지는 스타일을 안 주면 Qt 기본(밝은 회색)으로 칠해져, 어두운
+            # 카드 뒤 빈 공간이 밝게 떴다(2026-09-25 베이크오프 0-b 점검에서 발견).
+            page.setObjectName("tabpage")
+            page.setStyleSheet(f"QWidget#tabpage {{ background: {_PAGE}; }}")
             pl = QVBoxLayout(page)
             pl.setSpacing(6)
             pl.setContentsMargins(16, 12, 16, 12)
@@ -653,11 +657,16 @@ class SettingsDialog(QDialog):
         tab_capture = _make_tab("캡처·녹화")
         tab_ai = _make_tab("AI")
 
-        def _group(title: str) -> tuple[QGroupBox, QFormLayout]:
+        # 탭별 폼 목록 — 같은 탭의 카드들은 라벨 열 폭을 맞춰 입력칸 시작선을 일치시킨다
+        # (카드마다 가장 긴 라벨이 달라 입력칸이 들쭉날쭉 시작하던 문제, 0-b 점검).
+        tab_forms: dict[int, list[QFormLayout]] = {}
+
+        def _group(title: str, tab: QVBoxLayout) -> tuple[QGroupBox, QFormLayout]:
             box = QGroupBox(title)
             form = QFormLayout(box)
             form.setVerticalSpacing(4)
             form.setContentsMargins(10, 8, 10, 8)
+            tab_forms.setdefault(id(tab), []).append(form)
             return box, form
 
         def _sep() -> QFrame:
@@ -671,7 +680,7 @@ class SettingsDialog(QDialog):
         def _subhead(text: str) -> QLabel:
             """카드 안 소제목 — 한 카드에 성격이 다른 줄(단축키/설정)이 섞일 때 구분용."""
             lbl = QLabel(text)
-            lbl.setStyleSheet(f"color:{_TITLE}; font-size:11px; font-weight:600; padding-top:2px;")
+            lbl.setStyleSheet(f"color:{_TITLE}; font-size:12px; font-weight:600; padding-top:2px;")
             return lbl
 
         def _fixed_key(text: str) -> QLabel:
@@ -679,8 +688,8 @@ class SettingsDialog(QDialog):
             lbl = QLabel(text)
             lbl.setToolTip("고정 단축키 — 변경할 수 없습니다")
             lbl.setStyleSheet(
-                f"color:{COLORS['peach']}; font-size:12px; font-family:'Consolas', monospace;"
-                f" padding:5px 8px;")
+                f"color:{_TITLE}; background:{_INSET}; border:1px solid {_LINE};"
+                f" border-radius:5px; padding:5px 8px;")
             return lbl
 
         _combo_style = (
@@ -691,7 +700,7 @@ class SettingsDialog(QDialog):
         )
 
         # ════════════════════════ 「일반」 탭 ════════════════════════
-        general_group, general_form = _group("일반")
+        general_group, general_form = _group("일반", tab_general)
         self._auto_start_check = QCheckBox("Windows 시작 시 자동 실행")
         general_form.addRow(_bullet_checkbox_row(self._auto_start_check))
         self._notify_copy_check = QCheckBox("복사 시 우하단 알림 표시")
@@ -699,7 +708,7 @@ class SettingsDialog(QDialog):
         tab_general.addWidget(general_group)
 
         # 패널·히스토리 — 패널 단축키와 히스토리 개수는 같은 '패널' 기능이다.
-        panel_group, panel_form = _group("패널·히스토리")
+        panel_group, panel_form = _group("패널·히스토리", tab_general)
         self._panel_toggle_hotkey = HotkeyEdit()
         panel_form.addRow("•  패널 불러오기:", self._panel_toggle_hotkey)
         self._history_max_spin = QSpinBox()
@@ -732,7 +741,7 @@ class SettingsDialog(QDialog):
         # 순차 붙여넣기 4키를 2×2 표로 — 네 키가 "하나씩/전체" × "원본/경로" 두 기준으로
         # 정확히 나뉘어, 목록으로 늘어놓으면 안 보이던 짝 관계([ ↔ ])가 한눈에 보인다
         # (2026-09-25 사용자 선택).
-        seq_group, seq_form = _group("순차 붙여넣기")
+        seq_group, seq_form = _group("순차 붙여넣기", tab_paste)
         self._seq_image_to_path_hotkey = HotkeyEdit()
         self._seq_image_to_path_hotkey.setToolTip(
             "순차 붙여넣기(Ctrl+Shift+V)의 '경로 버전'. 순차 큐에서 다음 항목을 꺼내되\n"
@@ -780,7 +789,7 @@ class SettingsDialog(QDialog):
         tab_paste.addWidget(seq_group)
 
         # 경로 붙여넣기(단발) — 큐와 무관하게 최신 이미지 하나를 경로로.
-        path_group, path_form = _group("경로 붙여넣기")
+        path_group, path_form = _group("경로 붙여넣기", tab_paste)
         self._image_to_path_hotkey = HotkeyEdit()
         self._image_to_path_hotkey.setToolTip(
             "현재 클립보드 이미지를 임시 PNG로 저장하고 절대경로를 클립보드 텍스트로 교체합니다.\n"
@@ -792,7 +801,7 @@ class SettingsDialog(QDialog):
         tab_paste.addWidget(path_group)
 
         # ════════════════════════ 「캡처·녹화」 탭 ════════════════════════
-        capture_group, capture_form = _group("영역 캡처·핀")
+        capture_group, capture_form = _group("영역 캡처·핀", tab_capture)
         self._capture_hotkey = HotkeyEdit()
         self._capture_hotkey.setToolTip(
             "화면 영역을 드래그로 선택해 캡처합니다(Snipaste의 영역 캡처).\n"
@@ -834,7 +843,7 @@ class SettingsDialog(QDialog):
         capture_form.addRow("•  저장 폴더:", folder_row)
         tab_capture.addWidget(capture_group)
 
-        recording_group, recording_form = _group("녹화")
+        recording_group, recording_form = _group("녹화", tab_capture)
         self._record_hotkey = HotkeyEdit()
         self._record_hotkey.setToolTip(
             "화면 영역을 드래그로 선택한 뒤, 뜨는 버튼에서 GIF 또는 영상(MP4)을 골라 녹화합니다.\n"
@@ -889,7 +898,7 @@ class SettingsDialog(QDialog):
         # 이 API 키를 쓰는 경로는 OCR·STT뿐이다. 호출은 `openai` 패키지의 chat.completions
         # 라 프로토콜 이름(OpenAI 호환)으로 부른다 — Mindlogic은 그 프로토콜을 쓰는
         # 게이트웨이 회사명일 뿐이다(2026-09-25 사용자 요청으로 명칭 정리).
-        ai_group, ai_form = _group("AI 연결 (OpenAI 호환 API)")
+        ai_group, ai_form = _group("AI 연결 (OpenAI 호환 API)", tab_ai)
 
         # Base URL을 API 키보다 먼저 — 엔드포인트를 먼저 정하고 그다음 키를 입력하는 게
         # 자연스러운 순서. 게이트웨이든 구글 직결이든 base_url만 바꾸면 된다.
@@ -912,8 +921,6 @@ class SettingsDialog(QDialog):
         self._key_reveal_btn.toggled.connect(self._on_key_reveal_toggled)
         # 아이콘만으로는 뜻이 안 와닿는다는 사용자 피드백(2026-07-29)으로 "모델조회" 텍스트.
         self._refresh_btn = QPushButton("모델조회")
-        self._refresh_btn.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
         self._refresh_btn.setToolTip("사용 가능한 모델 목록 가져오기 (아래 OCR·음성 입력 모델 목록에 반영)")
         # NoFocus 필수: 클릭 시 setEnabled(False)로 꺼지는데, StrongFocus면 포커스가
         # editable 모델 콤보로 넘어가 텍스트가 전체 선택돼 조회 중 파랗게 반전돼 보인다.
@@ -941,7 +948,8 @@ class SettingsDialog(QDialog):
         self._test_btn.clicked.connect(self._on_test_api)
         self._test_status = QLabel("")
         self._test_status.setWordWrap(True)
-        self._test_status.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
+        self._test_status.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 12px;")
+        self._test_status.setVisible(False)  # 결과가 생기면 보인다(빈 줄이 자리 차지하지 않게)
         self._credit_status = self._make_probe_label()
         test_row = QHBoxLayout()
         test_row.setContentsMargins(0, 0, 0, 0)
@@ -952,7 +960,7 @@ class SettingsDialog(QDialog):
         tab_ai.addWidget(ai_group)
 
         # ── OCR — 단축키 + 모델 ──
-        ocr_group, ocr_form = _group("OCR (화면 글자 인식)")
+        ocr_group, ocr_form = _group("OCR (화면 글자 인식)", tab_ai)
         self._ocr_hotkey = HotkeyEdit()
         self._ocr_hotkey.setToolTip(
             "화면 영역을 드래그로 선택해 그 안의 텍스트를 AI(설정된 API)로 인식합니다.\n"
@@ -987,7 +995,7 @@ class SettingsDialog(QDialog):
         tab_ai.addWidget(ocr_group)
 
         # ── 음성 입력(STT) — 단축키 + 모델 + 마이크 ──
-        stt_group, stt_form = _group("음성 입력 (STT)")
+        stt_group, stt_form = _group("음성 입력 (STT)", tab_ai)
         # allow_mod_only=True — Ctrl+Win처럼 일반키 없이 수식키만으로 된 조합도 캡처
         # 가능(Wispr Flow와 동일 제스처, 2026-08-02). 기본값 자체가 ctrl+win(main.py).
         self._stt_hotkey = HotkeyEdit(allow_mod_only=True)
@@ -1046,6 +1054,19 @@ class SettingsDialog(QDialog):
         self._mic_test_status = self._make_probe_label()
         stt_form.addRow("", self._mic_test_status)
         tab_ai.addWidget(stt_group)
+
+        for forms in tab_forms.values():
+            labels = [
+                item.widget()
+                for form in forms
+                for row in range(form.rowCount())
+                if (item := form.itemAt(row, QFormLayout.ItemRole.LabelRole)) is not None
+                and item.widget() is not None
+            ]
+            if labels:
+                width = max(lbl.sizeHint().width() for lbl in labels)
+                for lbl in labels:
+                    lbl.setMinimumWidth(width)
 
         # 녹화 시작/종료를 하나의 다이얼로그 시그널로 모은다 — main이 이걸로 전역 훅을
         # suspend/resume한다(어느 HotkeyEdit이든 녹화를 시작하면 suspend, 끝나면 resume).
@@ -1516,7 +1537,7 @@ class SettingsDialog(QDialog):
         """
         color = COLORS['subtext0'] if ok is None else (
             COLORS['green'] if ok else COLORS['red'])
-        self._test_status.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self._test_status.setStyleSheet(f"color: {color}; font-size: 12px;")
         self._test_status.setText(message)
         self._test_status.setVisible(True)
 
@@ -1525,7 +1546,7 @@ class SettingsDialog(QDialog):
         label = QLabel("")
         label.setWordWrap(True)
         label.setVisible(False)
-        label.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
+        label.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 12px;")
         return label
 
     def _stack(self, *widgets) -> QVBoxLayout:
@@ -1544,7 +1565,7 @@ class SettingsDialog(QDialog):
             label.setVisible(False)
             return
         mark, color = _PROBE_STYLE.get(status, _PROBE_STYLE["run"])
-        label.setStyleSheet(f"color: {color}; font-size: 11px;")
+        label.setStyleSheet(f"color: {color}; font-size: 12px;")
         label.setText(f"{mark} {detail}".strip())
         label.setVisible(True)
 
@@ -1556,8 +1577,6 @@ class SettingsDialog(QDialog):
             return
 
         self._refresh_btn.setEnabled(False)
-        self._refresh_btn.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserStop))
         self._set_status("모델 목록 조회 중…")
 
         import threading
@@ -1573,8 +1592,6 @@ class SettingsDialog(QDialog):
     def _on_models_fetched(self, models: list, err: str):
         """워커 스레드 결과 반영 (Qt 메인 스레드) — 네 모델 행을 모두 갱신."""
         self._refresh_btn.setEnabled(True)
-        self._refresh_btn.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
 
         if err:
             self._set_status(f"✗ 모델 조회 실패 — {err}", ok=False)
