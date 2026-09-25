@@ -73,6 +73,13 @@ _CHEV_UP = chevron_icon_url("up")     # 스핀박스 상하 버튼 셰브론(중
 _CHEV_DN = chevron_icon_url("down")
 
 DIALOG_STYLE = f"""
+    /* 기본 위젯 배경 = 투명 — 설정창의 부모(패널)가 선택자 없는 background-color(거의 검정)를
+       걸어 두어 모든 자식에게 내려온다. 표·버튼 줄을 감싼 빈 QWidget 틀이 그 검정으로
+       칠해졌다(2026-09-25 실사용 리포트). 이 창 자신의 규칙이 부모보다 우선하므로 여기서
+       한 번에 막는다 — 아래 타입별 규칙(QDialog·QGroupBox·입력칸…)은 뒤에 있어 그대로 이긴다. */
+    QWidget {{
+        background-color: transparent;
+    }}
     QDialog {{
         background-color: {_PAGE};
         color: {_TXT};
