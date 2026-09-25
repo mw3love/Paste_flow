@@ -64,6 +64,9 @@ _BTN_HOVER = "#3a3a3a"
 _TXT = "#d4d4d4"        # 본문 글자
 _TITLE = "#9aa0b0"      # 그룹 제목(차분한 회청)
 
+# 소제목 아래 줄 들여쓰기 폭(px) — 라벨 앞 불릿이 소제목 글자 시작보다 이만큼 안쪽에 온다.
+_SUB_INDENT = 16
+
 _CHECK_ICON = check_icon_url()   # 켜진 체크박스에 그릴 코랄 ✓ (아웃라인 방식)
 _CHEV_UP = chevron_icon_url("up")     # 스핀박스 상하 버튼 셰브론(중립)
 _CHEV_DN = chevron_icon_url("down")
@@ -683,6 +686,14 @@ class SettingsDialog(QDialog):
             lbl.setStyleSheet(f"color:{_TITLE}; font-size:12px; font-weight:600; padding-top:2px;")
             return lbl
 
+        def _sub_label(text: str) -> QLabel:
+            """소제목 아래 줄의 라벨 — 한 단계 들여써 상하위를 보이게 한다(2026-09-25 베이크오프
+            라운드2: 「GIF가 더 상위인데 초당 프레임이 들여쓰기가 안 돼 있다」). 여백이
+            sizeHint에 포함되므로 아래 탭별 라벨 열 정렬도 이 폭을 기준으로 맞춰진다."""
+            lbl = QLabel(text)
+            lbl.setContentsMargins(_SUB_INDENT, 0, 0, 0)
+            return lbl
+
         def _fixed_key(text: str) -> QLabel:
             """바꿀 수 없는 단축키 표시(HotkeyEdit 자리에 놓이는 읽기 전용 칸)."""
             lbl = QLabel(text)
@@ -710,11 +721,11 @@ class SettingsDialog(QDialog):
         # 패널·히스토리 — 패널 단축키와 히스토리 개수는 같은 '패널' 기능이다.
         panel_group, panel_form = _group("패널·히스토리", tab_general)
         self._panel_toggle_hotkey = HotkeyEdit()
-        panel_form.addRow("•  패널 불러오기:", self._panel_toggle_hotkey)
+        panel_form.addRow("•  패널 불러오기", self._panel_toggle_hotkey)
         self._history_max_spin = QSpinBox()
         self._history_max_spin.setRange(10, 500)
         self._history_max_spin.setValue(50)
-        panel_form.addRow("•  히스토리 최대 개수:", self._history_max_spin)
+        panel_form.addRow("•  히스토리 최대 개수", self._history_max_spin)
         tab_general.addWidget(panel_group)
 
         # 고정 단축키 안내 — 순차 붙여넣기(Ctrl+Shift+V)는 「붙여넣기」 탭의 표 안에 있다.
@@ -785,7 +796,7 @@ class SettingsDialog(QDialog):
             "마지막 복사로부터 이 시간이 지나면 다음 복사는 큐의 첫 항목으로 시작합니다.\n"
             "(일반 Ctrl+V는 시간과 무관하게 즉시 큐를 비웁니다.)"
         )
-        seq_form.addRow("•  큐 자동 초기화:", self._queue_idle_spin)
+        seq_form.addRow("•  큐 자동 초기화", self._queue_idle_spin)
         tab_paste.addWidget(seq_group)
 
         # 경로 붙여넣기(단발) — 큐와 무관하게 최신 이미지 하나를 경로로.
@@ -797,7 +808,7 @@ class SettingsDialog(QDialog):
             "Claude Code CLI 등 '파일 경로 텍스트'를 첨부로 받는 앱에 한 키로 붙여넣기 위한 단축키.\n"
             "팁: 패널에서 이미지 항목을 Alt를 누른 채 그 앱으로 드래그해도 같은 방식(경로 붙여넣기)으로 동작합니다."
         )
-        path_form.addRow("•  최신 이미지 경로 붙여넣기:", self._image_to_path_hotkey)
+        path_form.addRow("•  최신 이미지 경로 붙여넣기", self._image_to_path_hotkey)
         tab_paste.addWidget(path_group)
 
         # ════════════════════════ 「캡처·녹화」 탭 ════════════════════════
@@ -808,7 +819,7 @@ class SettingsDialog(QDialog):
             "캡처 즉시 클립보드에 복사되고 지정 폴더에 PNG로 저장됩니다.\n"
             "ESC 또는 우클릭으로 취소합니다."
         )
-        capture_form.addRow("•  영역 캡처:", self._capture_hotkey)
+        capture_form.addRow("•  영역 캡처", self._capture_hotkey)
 
         self._capture_printscreen_check = QCheckBox("PrintScreen 키로도 실행")
         self._capture_printscreen_check.setToolTip(
@@ -826,7 +837,7 @@ class SettingsDialog(QDialog):
             "큐가 비어 있으면 현재 클립보드를 핀합니다. 순차 붙여넣기와 같은 큐를 씁니다.\n"
             "같은 걸 또 띄우려면 핀 창 우클릭 → 복제. ESC로 닫고, Space로 주석 편집합니다."
         )
-        capture_form.addRow("•  핀:", self._pin_image_hotkey)
+        capture_form.addRow("•  핀", self._pin_image_hotkey)
         capture_form.addRow(_sep())
 
         # 캡처 저장 폴더 — 경로 표시 + 찾아보기 (녹화 파일도 같은 폴더에 저장된다)
@@ -840,7 +851,7 @@ class SettingsDialog(QDialog):
         folder_row.setContentsMargins(0, 0, 0, 0)
         folder_row.addWidget(self._capture_folder_edit, 1)
         folder_row.addWidget(browse_btn)
-        capture_form.addRow("•  저장 폴더:", folder_row)
+        capture_form.addRow("•  저장 폴더", folder_row)
         tab_capture.addWidget(capture_group)
 
         recording_group, recording_form = _group("녹화", tab_capture)
@@ -850,7 +861,7 @@ class SettingsDialog(QDialog):
             "G=GIF, V=영상, Enter=지난번 선택, ESC=취소. 녹화 중 ■ 정지 또는 ESC로 끝냅니다.\n"
             "저장된 파일 경로가 클립보드에 복사됩니다."
         )
-        recording_form.addRow("•  녹화:", self._record_hotkey)
+        recording_form.addRow("•  녹화", self._record_hotkey)
         self._gif_cursor_check = QCheckBox("녹화에 마우스 커서 표시")
         recording_form.addRow(_bullet_checkbox_row(self._gif_cursor_check))
 
@@ -862,7 +873,7 @@ class SettingsDialog(QDialog):
         self._gif_fps_spin.setToolTip(
             "GIF 녹화 초당 프레임 수. 높을수록 부드럽지만 파일 용량이 커집니다."
         )
-        recording_form.addRow("•  초당 프레임:", self._gif_fps_spin)
+        recording_form.addRow(_sub_label("•  초당 프레임"), self._gif_fps_spin)
         self._gif_max_sec_spin = QSpinBox()
         self._gif_max_sec_spin.setRange(5, 60)
         self._gif_max_sec_spin.setSuffix(" 초")
@@ -871,7 +882,7 @@ class SettingsDialog(QDialog):
             "GIF 녹화 최대 길이. 프레임을 전부 메모리에 모았다가 인코딩하므로,\n"
             "fps·녹화 영역이 클수록 메모리 사용량이 커집니다(영상(MP4) 녹화는 이 제약이 없습니다)."
         )
-        recording_form.addRow("•  최대 길이:", self._gif_max_sec_spin)
+        recording_form.addRow(_sub_label("•  최대 길이"), self._gif_max_sec_spin)
 
         recording_form.addRow(_subhead("영상 (MP4)"))
         self._video_fps_spin = QSpinBox()
@@ -881,7 +892,7 @@ class SettingsDialog(QDialog):
         self._video_fps_spin.setToolTip(
             "영상(MP4) 녹화 초당 프레임 수. 높을수록 부드럽지만 파일 용량이 커집니다."
         )
-        recording_form.addRow("•  초당 프레임:", self._video_fps_spin)
+        recording_form.addRow(_sub_label("•  초당 프레임"), self._video_fps_spin)
         self._video_max_sec_spin = QSpinBox()
         self._video_max_sec_spin.setRange(10, 3600)
         self._video_max_sec_spin.setSuffix(" 초")
@@ -890,7 +901,7 @@ class SettingsDialog(QDialog):
             "영상 녹화 최대 길이. 프레임을 디스크에 즉시 흘려쓰므로 메모리 제약이 없어\n"
             "GIF보다 훨씬 길게 잡아도 안전합니다(디스크 용량만 소비)."
         )
-        recording_form.addRow("•  최대 길이:", self._video_max_sec_spin)
+        recording_form.addRow(_sub_label("•  최대 길이"), self._video_max_sec_spin)
         tab_capture.addWidget(recording_group)
 
         # ════════════════════════ 「AI」 탭 ════════════════════════
@@ -906,7 +917,7 @@ class SettingsDialog(QDialog):
         self._base_url_edit.setPlaceholderText(
             "OpenAI 호환 주소 — 예: https://…mindlogic.ai/v1/gateway"
             "  /  https://generativelanguage.googleapis.com/v1beta/openai")
-        ai_form.addRow(QLabel("•  Base URL:"), self._base_url_edit)
+        ai_form.addRow(QLabel("•  Base URL"), self._base_url_edit)
 
         self._gateway_key_edit = QLineEdit()
         self._gateway_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
@@ -932,7 +943,7 @@ class SettingsDialog(QDialog):
         gw_row.addWidget(self._gateway_key_edit, 1)
         gw_row.addWidget(self._key_reveal_btn)
         gw_row.addWidget(self._refresh_btn)
-        ai_form.addRow(QLabel("•  API 키:"), gw_row)
+        ai_form.addRow(QLabel("•  API 키"), gw_row)
 
         # 연결 테스트 — 키·연결 + OCR 모델 + 크레딧을 한 번에 실호출한다(크레딧 확인은
         # 2026-08-12에 이 버튼으로 흡수). 연결·크레딧 결과는 여기, OCR 모델 결과는 OCR
@@ -966,10 +977,10 @@ class SettingsDialog(QDialog):
             "화면 영역을 드래그로 선택해 그 안의 텍스트를 AI(설정된 API)로 인식합니다.\n"
             "결과 텍스트가 클립보드·히스토리에 들어갑니다."
         )
-        ocr_form.addRow("•  OCR:", self._ocr_hotkey)
+        ocr_form.addRow("•  OCR", self._ocr_hotkey)
 
         # OCR 모델 — 이미지 입력을 받는 모델이어야 한다.
-        self._ocr_model_label = QLabel("•  모델:")
+        self._ocr_model_label = QLabel("•  모델")
         self._ocr_model_combo = QComboBox()
         self._ocr_model_combo.setEditable(True)
         self._ocr_model_combo.setStyleSheet(_combo_style)
@@ -1004,12 +1015,12 @@ class SettingsDialog(QDialog):
             "변환한 뒤 포커스된 입력창에 자동으로 붙여넣습니다(최대 30초).\n"
             "Ctrl+Win처럼 일반키 없이 수식키만으로 된 조합도 가능합니다(Wispr Flow와 동일 제스처)."
         )
-        stt_form.addRow("•  음성 입력:", self._stt_hotkey)
+        stt_form.addRow("•  음성 입력", self._stt_hotkey)
 
         # STT 모델 — 게이트웨이 오디오 입력은 Gemini 계열만 지원해(2026-08-02 실측: 18개
         # 모델 실호출, Gemini 8/8·GPT/Claude/Grok/Perplexity 0/10) 목록 자체를 Gemini로
         # 필터링한다 — GPT/Claude를 골라 400을 겪을 일이 없다.
-        self._stt_model_label = QLabel("•  모델:")
+        self._stt_model_label = QLabel("•  모델")
         self._stt_model_combo = QComboBox()
         self._stt_model_combo.setEditable(True)
         self._stt_model_combo.setStyleSheet(_combo_style)
@@ -1050,7 +1061,7 @@ class SettingsDialog(QDialog):
         mic_row.addWidget(self._mic_combo, 1)
         mic_row.addWidget(self._refresh_mic_btn)
         mic_row.addWidget(self._mic_test_btn)
-        stt_form.addRow(QLabel("•  마이크:"), mic_row)
+        stt_form.addRow(QLabel("•  마이크"), mic_row)
         self._mic_test_status = self._make_probe_label()
         stt_form.addRow("", self._mic_test_status)
         tab_ai.addWidget(stt_group)
