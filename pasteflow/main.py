@@ -752,6 +752,8 @@ _ORPHAN_KEYS = (
     # api_key를 품은 DPAPI 암호문이라, 기능이 사라진 지금 남겨둘 이유가 없다.
     "ai_profiles",
     "ai_active_profile",
+    # 2026-09-25 순차 핀(Alt+Shift+F3)을 핀(Alt+F3) 하나로 합치며 제거된 단축키
+    "hotkey_seq_pin",
 )
 
 
@@ -895,7 +897,6 @@ class _SignalBridge(QObject):
     bulk_paste         = pyqtSignal()        # 훅 스레드 → 메인: 큐 전체를 간격 두고 순차 자동주입(Ctrl+Shift+V 벌크 버전)
     bulk_path_paste    = pyqtSignal()        # 훅 스레드 → 메인: 큐 전체를 경로 텍스트로 간격 두고 순차 자동주입(Ctrl+Shift+[ 벌크 버전)
     pin_image          = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 화면에 핀(떠 있는 창)으로 띄우기
-    seq_pin            = pyqtSignal()        # 훅 스레드 → 메인: 큐에서 다음 항목을 꺼내 화면에 순차 핀
     capture_requested  = pyqtSignal()        # 훅 스레드 → 메인: 영역 캡처 오버레이 띄우기
     record_gif         = pyqtSignal()        # 훅 스레드 → 메인: GIF 녹화(영역 선택 오버레이) 띄우기
     record_video       = pyqtSignal()        # 훅 스레드 → 메인: 영상(MP4) 녹화(영역 선택 오버레이) 띄우기
@@ -941,7 +942,6 @@ class PasteFlowApp:
         self._bridge.bulk_paste.connect(self._on_bulk_paste_hotkey)
         self._bridge.bulk_path_paste.connect(self._on_bulk_path_paste_hotkey)
         self._bridge.pin_image.connect(self._on_pin_hotkey)
-        self._bridge.seq_pin.connect(self._on_seq_pin_hotkey)
         self._bridge.capture_requested.connect(self._on_capture_requested)
         self._bridge.record_gif.connect(self._on_record_gif_hotkey)
         self._bridge.record_video.connect(self._on_record_video_hotkey)
@@ -993,7 +993,6 @@ class PasteFlowApp:
             on_bulk_paste=self._bridge.bulk_paste.emit,
             on_bulk_path_paste=self._bridge.bulk_path_paste.emit,
             on_pin_image=self._bridge.pin_image.emit,
-            on_seq_pin=self._bridge.seq_pin.emit,
             on_capture=self._bridge.capture_requested.emit,
             on_record_gif=self._bridge.record_gif.emit,
             on_record_video=self._bridge.record_video.emit,
@@ -1039,6 +1038,8 @@ class PasteFlowApp:
         # 마지막 캡처 위치(논리 전역) — 그 직후 핀(Alt+F3)이 캡처 자리에 그대로 덮게 함.
         # 외부 복사가 들어오면 무효화(_on_new_clipboard_item)해 "방금 캡처한 그 이미지"일 때만 적용.
         self._pin_place_rect: QRect | None = None
+        # 그 캡처가 저장된 히스토리 항목 id — 핀이 큐에서 이 항목을 꺼낼 때만 제자리 덮기.
+        self._pin_place_item_id: int | None = None
 
         # OCR은 호출마다 새 스레드 — asyncio.run()을 재사용 스레드에서 반복 호출 시
         # WinRT 콜백 상태가 누적돼 두 번째 호출부터 빈 결과를 반환하는 문제 방지
@@ -1121,9 +1122,6 @@ class PasteFlowApp:
 
         pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
         self.interceptor.set_pin_hotkey(pin_hotkey)
-
-        seq_pin_hotkey = self.db.get_setting("hotkey_seq_pin", "alt+shift+f3")
-        self.interceptor.set_seq_pin_hotkey(seq_pin_hotkey)
 
         capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         self.interceptor.set_capture_hotkey(capture_hotkey)
@@ -1273,6 +1271,7 @@ class PasteFlowApp:
             ToastNotification(f"캡처 파일 저장 실패 — {e}", icon="📷")
 
         saved_item = self._persist_clipboard_item(item)
+        self._pin_place_item_id = saved_item.id
 
         if saved_path:
             # 캡처 직후 Ctrl+Shift+P를 누르는 것이 흔한 흐름(캡처→경로 붙여넣기)이라,
@@ -1914,12 +1913,45 @@ class PasteFlowApp:
             QTimer.singleShot(self._BULK_PASTE_STEP_MS, lambda: self._bulk_paste_step(mode))
 
     def _on_pin_hotkey(self):
-        """화면에 핀 단축키(기본 Alt+F3) — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다.
+        """핀 단축키(기본 Alt+F3) — 순차 큐에 다음 항목이 있으면 그걸, 없으면 클립보드를
+        화면에 떠 있는 창으로 띄운다(Snipaste의 'paste to screen').
 
-        Snipaste의 'paste to screen'에 해당. 패널과 무관한 독립 창이라
-        커서 근처에 띄우고, Space로 주석 편집·ESC로 닫기는 ImagePreviewPopup이 처리한다.
+        2026-09-25에 옛 '화면 핀'(Alt+F3, 클립보드만)과 '순차 핀'(Alt+Shift+F3, 큐만)을
+        이 키 하나로 합쳤다 — 같은 걸 두 번 핀할 일이 거의 없고(사용자 판단), 필요하면
+        핀 우클릭 "복제"로 한다. 큐는 순차 붙여넣기(Ctrl+Shift+V)와 **같은 포인터를
+        공유**하므로 핀한 항목은 붙여넣기 큐에서도 소진된다(사용자가 고른 트레이드오프).
+        """
+        pointer, total = self.queue.get_status()
+        if pointer < total and self._pin_next_from_queue():
+            return
+        self._pin_from_clipboard()
+
+    def _open_pin(self, item: ClipboardItem, place_rect: QRect | None = None):
+        """핀 창을 띄우고 우클릭 메뉴·주석 편집 시그널을 연결한다(핀·복제 공용).
+
+        place_rect가 있으면 그 사각형에 1:1로 정확히 덮고, 없으면 커서 옆에 1:1로 띄운다.
         """
         from PyQt6.QtGui import QCursor
+
+        # 커서 위치에 1px 앵커를 만들어 그 우측에 핀 창을 띄운다(compute_preview_pos 재사용).
+        cursor_pos = QCursor.pos()
+        anchor = QRect(cursor_pos.x(), cursor_pos.y(), 1, 1)
+        popup = ImagePreviewPopup.open_new(item, anchor, native=True, place_rect=place_rect)
+        self._connect_preview_popup(popup)
+        return popup
+
+    def _connect_preview_popup(self, popup):
+        """미리보기·핀 창의 우클릭 메뉴와 주석 편집 완료 시그널을 main 핸들러에 연결."""
+        popup.copy_requested.connect(self._on_copy_item)
+        popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
+        popup.ask_ai_requested.connect(self._on_ask_ai_for_image)
+        popup.annotated_copy_requested.connect(self._on_annotation_copy)
+        popup.export_file_requested.connect(self._on_annotation_export)
+        # 복제 — 원본 창 옆(같은 크기)에 새 핀을 띄운다.
+        popup.duplicate_requested.connect(self._open_pin)
+
+    def _pin_from_clipboard(self):
+        """클립보드 이미지(없으면 텍스트를 이미지로 렌더)를 핀한다. 큐가 빈 경우의 폴백."""
         from pasteflow.ui.toast import ToastNotification
 
         image_bytes = _read_image_from_clipboard()
@@ -1937,7 +1969,7 @@ class PasteFlowApp:
         # 방금 캡처한 이미지면(외부 복사로 무효화 안 됨) 캡처 자리에 그대로 덮는다.
         place_rect = self._pin_place_rect if image_bytes else None
         if not image_bytes:
-            # 이미지가 없으면 클립보드 텍스트를 흰 배경 이미지로 렌더링해 핀(Snipaste 동작)
+            # 이미지가 없으면 클립보드 텍스트를 이미지로 렌더링해 핀(Snipaste 동작)
             if text.strip():
                 try:
                     image_bytes = _render_text_to_png(text)
@@ -1948,40 +1980,20 @@ class PasteFlowApp:
                 ToastNotification("클립보드에 이미지·텍스트가 없습니다", icon="📌")
                 return
 
-        item = ClipboardItem(content_type="image", image_data=image_bytes)
+        self._open_pin(ClipboardItem(content_type="image", image_data=image_bytes), place_rect)
 
-        # 커서 위치에 1px 앵커를 만들어 그 우측에 핀 창을 띄운다(compute_preview_pos 재사용).
-        cursor_pos = QCursor.pos()
-        anchor = QRect(cursor_pos.x(), cursor_pos.y(), 1, 1)
-        # place_rect가 있으면 캡처 자리에 1:1로 정확히 덮고, 없으면 커서 옆에 1:1로 띄운다.
-        popup = ImagePreviewPopup.open_new(item, anchor, native=True, place_rect=place_rect)
-        # 핀 창에서도 복사·AI 질문·경로 복사·Space 주석 편집 후 복사/저장이 동작하도록 연결
-        popup.copy_requested.connect(self._on_copy_item)
-        popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
-        popup.ask_ai_requested.connect(self._on_ask_ai_for_image)
-        popup.annotated_copy_requested.connect(self._on_annotation_copy)
-        popup.export_file_requested.connect(self._on_annotation_export)
+    def _pin_next_from_queue(self) -> bool:
+        """큐에서 다음 항목을 꺼내 핀한다. 꺼낼 항목이 없었으면 False(호출자가 클립보드 폴백).
 
-    def _on_seq_pin_hotkey(self):
-        """순차 핀 단축키(기본 Alt+Shift+F3) — 큐에서 다음 항목을 꺼내 화면에 핀한다.
-
-        화면 핀(Alt+F3)의 '큐 버전'으로, 순차 붙여넣기(Ctrl+Shift+V)·순차 경로
-        붙여넣기(Ctrl+Shift+[)와 **같은 큐·포인터를 공유**한다. 캡처(Alt+F2)를 여러 장
-        찍어 두면 이 키를 누를 때마다 캡처1·2·3을 차례로 화면에 핀할 수 있다. 이미지가
-        아닌 항목은 _render_text_to_png로 이미지화해 핀한다(텍스트도 핀·주석 가능 —
-        Alt+F3와 동일). 큐가 소진되면 토스트만 표시(현재 클립보드 폴백은 Alt+F3가 담당 —
-        '순차/일반'을 키로 구분하는 원칙 유지).
-
-        핀은 '보기'라 캡처 자리 1:1 덮기(place_rect)를 쓰지 않고 커서 옆에 띄운다 —
-        큐 항목마다 커서를 옮겨 배치를 손으로 정할 수 있다(공간 배치의 이점).
+        이미지는 그대로, 텍스트는 _render_text_to_png로 이미지화해 핀한다. 방금 캡처한
+        항목이면(Alt+F2 → Alt+F3) 캡처 자리에 1:1로 덮고, 나머지는 커서 옆에 띄운다 —
+        여러 장을 커서를 옮겨 가며 나란히 펼쳐 볼 수 있게(제자리에 겹쳐 쌓지 않게).
         """
-        from PyQt6.QtGui import QCursor
         from pasteflow.ui.toast import ToastNotification
 
         next_item = self.queue.get_next()
         if next_item is None:
-            ToastNotification("순차 큐가 비었습니다", icon="📌")
-            return
+            return False
 
         # summary 항목이면 전체 로드 (이미지 항목은 image_data가 인라인이라 대개 불필요)
         if not next_item.image_data and not next_item.extra_formats and next_item.id:
@@ -2001,21 +2013,18 @@ class PasteFlowApp:
             image_bytes = None
 
         if image_bytes:
-            item = ClipboardItem(content_type="image", image_data=image_bytes)
-            cursor_pos = QCursor.pos()
-            anchor = QRect(cursor_pos.x(), cursor_pos.y(), 1, 1)
-            popup = ImagePreviewPopup.open_new(item, anchor, native=True)
-            popup.copy_requested.connect(self._on_copy_item)
-            popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
-            popup.ask_ai_requested.connect(self._on_ask_ai_for_image)
-            popup.annotated_copy_requested.connect(self._on_annotation_copy)
-            popup.export_file_requested.connect(self._on_annotation_export)
+            place_rect = None
+            if (next_item.content_type == "image" and next_item.id is not None
+                    and next_item.id == self._pin_place_item_id):
+                place_rect = self._pin_place_rect
+            self._open_pin(ClipboardItem(content_type="image", image_data=image_bytes), place_rect)
 
         # 진행 HUD 갱신 + 큐 소진 시 정리 (Ctrl+Shift+V 경로와 동일 표시)
         self._update_paste_ui()
         pointer, total = self.queue.get_status()
         if pointer >= total and total > 0:
             self._on_paste_queue_done()
+        return True
 
     def _on_ocr_done(self, text: str):
         """메인 스레드: OCR 결과 → 클립보드 + DB + 큐 + 정중앙 결과 칩(✓ 앞부분…)"""
@@ -2459,12 +2468,8 @@ class PasteFlowApp:
         item = self.db.get_item(item_id)
         if item and item.image_data:
             popup = ImagePreviewPopup.open_new(item, self.panel.geometry())
-            popup.copy_requested.connect(self._on_copy_item)
-            popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
-            popup.ask_ai_requested.connect(self._on_ask_ai_for_image)
-            # 인라인 주석 편집(Space) 완료 액션 — 같은 창에서 emit
-            popup.annotated_copy_requested.connect(self._on_annotation_copy)
-            popup.export_file_requested.connect(self._on_annotation_export)
+            # 우클릭 메뉴·인라인 주석 편집(Space) 완료 액션 — 핀과 같은 연결
+            self._connect_preview_popup(popup)
             self._image_preview_windows[item_id] = popup
             popup.destroyed.connect(lambda _=None, iid=item_id: self._image_preview_windows.pop(iid, None))
 
@@ -2911,7 +2916,6 @@ class PasteFlowApp:
             "hotkey_bulk_paste": self.db.get_setting("hotkey_bulk_paste", "ctrl+shift+a"),
             "hotkey_bulk_path_paste": self.db.get_setting("hotkey_bulk_path_paste", "ctrl+shift+]"),
             "hotkey_pin_image": self.db.get_setting("hotkey_pin_image", "alt+f3"),
-            "hotkey_seq_pin": self.db.get_setting("hotkey_seq_pin", "alt+shift+f3"),
             "hotkey_capture": self.db.get_setting("hotkey_capture", "alt+f2"),
             "hotkey_record_gif": self.db.get_setting("hotkey_record_gif", "ctrl+shift+g"),
             "hotkey_record_video": self.db.get_setting("hotkey_record_video", "ctrl+shift+r"),
@@ -2970,7 +2974,6 @@ class PasteFlowApp:
         old_bulk_paste_hotkey = self.db.get_setting("hotkey_bulk_paste", "ctrl+shift+a")
         old_bulk_path_paste_hotkey = self.db.get_setting("hotkey_bulk_path_paste", "ctrl+shift+]")
         old_pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
-        old_seq_pin_hotkey = self.db.get_setting("hotkey_seq_pin", "alt+shift+f3")
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         old_capture_use_printscreen = self.db.get_setting("capture_use_printscreen", "1")
         old_record_hotkey = self.db.get_setting("hotkey_record_gif", "ctrl+shift+g")
@@ -3013,15 +3016,10 @@ class PasteFlowApp:
         if old_bulk_path_paste_hotkey != new_bulk_path_paste_hotkey:
             self.interceptor.set_bulk_path_paste_hotkey(new_bulk_path_paste_hotkey)
 
-        # 화면에 핀 단축키 재설정
+        # 핀 단축키 재설정
         new_pin_hotkey = new_settings.get("hotkey_pin_image", "alt+f3")
         if old_pin_hotkey != new_pin_hotkey:
             self.interceptor.set_pin_hotkey(new_pin_hotkey)
-
-        # 순차 핀 단축키 재설정
-        new_seq_pin_hotkey = new_settings.get("hotkey_seq_pin", "alt+shift+f3")
-        if old_seq_pin_hotkey != new_seq_pin_hotkey:
-            self.interceptor.set_seq_pin_hotkey(new_seq_pin_hotkey)
 
         # 영역 캡처 단축키 재설정
         new_capture_hotkey = new_settings.get("hotkey_capture", "alt+f2")

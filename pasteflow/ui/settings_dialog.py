@@ -469,7 +469,6 @@ class SettingsDialog(QDialog):
     KEY_BULK_PASTE_HOTKEY = "hotkey_bulk_paste"
     KEY_BULK_PATH_PASTE_HOTKEY = "hotkey_bulk_path_paste"
     KEY_PIN_IMAGE_HOTKEY = "hotkey_pin_image"
-    KEY_SEQ_PIN_HOTKEY = "hotkey_seq_pin"
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
     KEY_CAPTURE_USE_PRINTSCREEN = "capture_use_printscreen"
     KEY_RECORD_GIF_HOTKEY = "hotkey_record_gif"
@@ -712,7 +711,7 @@ class SettingsDialog(QDialog):
         hotkey_form.addRow("•  순차 경로 붙여넣기 전체:", self._bulk_path_paste_hotkey)
         hotkey_form.addRow(_hk_sep())
 
-        # ④ 영역 캡처(Alt+F2) / 영역 캡처 핀(Alt+F3) — 이름을 '영역 캡처' 계열로 통일
+        # ④ 영역 캡처(Alt+F2) / 핀(Alt+F3)
         self._capture_hotkey = HotkeyEdit()
         self._capture_hotkey.setToolTip(
             "화면 영역을 드래그로 선택해 캡처합니다(Snipaste의 영역 캡처).\n"
@@ -732,20 +731,12 @@ class SettingsDialog(QDialog):
 
         self._pin_image_hotkey = HotkeyEdit()
         self._pin_image_hotkey.setToolTip(
-            "현재 클립보드 이미지를 화면 위에 떠 있는 창으로 띄웁니다(Snipaste의 화면 핀).\n"
-            "여러 개를 동시에 띄울 수 있고, ESC로 닫습니다.\n"
-            "띄운 창에서 Space를 누르면 주석 편집 모드로 들어갑니다."
-        )
-        hotkey_form.addRow("•  영역 캡처 핀:", self._pin_image_hotkey)
-
-        self._seq_pin_hotkey = HotkeyEdit()
-        self._seq_pin_hotkey.setToolTip(
-            "화면 핀(영역 캡처 핀)의 '순차 버전'. 순차 붙여넣기(Ctrl+Shift+V)와 같은 큐를\n"
-            "공유하며, 큐에서 다음 항목을 꺼내 화면에 핀합니다.\n"
+            "순차 큐의 다음 항목을 화면 위에 떠 있는 창으로 띄웁니다(Snipaste의 화면 핀).\n"
             "예: 영역 캡처(Alt+F2)를 여러 장 찍은 뒤 이 키를 차례로 눌러 캡처1·캡처2… 순서대로 핀.\n"
-            "이미지가 아닌 항목은 이미지로 렌더해 핀합니다."
+            "큐가 비어 있으면 현재 클립보드를 핀합니다. 순차 붙여넣기와 같은 큐를 씁니다.\n"
+            "같은 걸 또 띄우려면 핀 창 우클릭 → 복제. ESC로 닫고, Space로 주석 편집합니다."
         )
-        hotkey_form.addRow("•  순차 핀:", self._seq_pin_hotkey)
+        hotkey_form.addRow("•  핀:", self._pin_image_hotkey)
 
         self._record_gif_hotkey = HotkeyEdit()
         self._record_gif_hotkey.setToolTip(
@@ -804,7 +795,7 @@ class SettingsDialog(QDialog):
         for _hk in (
             self._panel_toggle_hotkey, self._image_to_path_hotkey,
             self._seq_image_to_path_hotkey, self._capture_hotkey,
-            self._pin_image_hotkey, self._seq_pin_hotkey, self._record_gif_hotkey,
+            self._pin_image_hotkey, self._record_gif_hotkey,
             self._record_video_hotkey,
             self._ocr_hotkey,
             self._stt_hotkey,
@@ -1344,9 +1335,6 @@ class SettingsDialog(QDialog):
         self._pin_image_hotkey.set_value(
             self._settings.get(self.KEY_PIN_IMAGE_HOTKEY, "alt+f3")
         )
-        self._seq_pin_hotkey.set_value(
-            self._settings.get(self.KEY_SEQ_PIN_HOTKEY, "alt+shift+f3")
-        )
         self._capture_hotkey.set_value(
             self._settings.get(self.KEY_CAPTURE_HOTKEY, "alt+f2")
         )
@@ -1690,7 +1678,6 @@ class SettingsDialog(QDialog):
             self.KEY_BULK_PASTE_HOTKEY: self._bulk_paste_hotkey.value() or "ctrl+shift+a",
             self.KEY_BULK_PATH_PASTE_HOTKEY: self._bulk_path_paste_hotkey.value() or "ctrl+shift+]",
             self.KEY_PIN_IMAGE_HOTKEY: self._pin_image_hotkey.value() or "alt+f3",
-            self.KEY_SEQ_PIN_HOTKEY: self._seq_pin_hotkey.value() or "alt+shift+f3",
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
             self.KEY_CAPTURE_USE_PRINTSCREEN: "1" if self._capture_printscreen_check.isChecked() else "0",
             self.KEY_RECORD_GIF_HOTKEY: self._record_gif_hotkey.value() or "ctrl+shift+g",

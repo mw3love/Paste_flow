@@ -99,6 +99,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
     copy_requested = pyqtSignal(object)        # ClipboardItem
     copy_as_path_requested = pyqtSignal(object)  # ClipboardItem — 파일로 저장 후 경로 복사
     ask_ai_requested = pyqtSignal(object)      # ClipboardItem — Gemini에게 질문(이미지 첨부, 2026-08-02)
+    duplicate_requested = pyqtSignal(object, QRect)  # (ClipboardItem, 놓을 논리 전역 사각형) — 복제
     # 편집 완료 → main 핸들러 (PNG bytes)
     annotated_copy_requested = pyqtSignal(bytes)   # 클립보드 복사 + 히스토리 저장
     export_file_requested = pyqtSignal(bytes)      # 파일 저장
@@ -439,6 +440,14 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
             return ClipboardItem(content_type="image", image_data=png)  # id=None(임시)
         return self._item
 
+    def _duplicate_rect(self) -> QRect:
+        """복제본을 놓을 논리 전역 사각형 — 지금 이미지 크기 그대로, 우하단으로 cascade만큼 비켜."""
+        sr = self._scene.sceneRect()
+        w = max(1, round(sr.width() * self._zoom))
+        h = max(1, round(sr.height() * self._zoom))
+        # 이미지 좌상단 = 창 좌상단(투명 strip은 하단) — _show_in_place와 같은 전제.
+        return QRect(self.x() + _CASCADE_STEP, self.y() + _CASCADE_STEP, w, h)
+
     # ------------------------------------------------------------------
     # 우클릭 메뉴 (뷰어 모드) — 복사 / 경로 복사 / Gemini에게 질문 / 주석 편집 / 닫기
     # ------------------------------------------------------------------
@@ -462,6 +471,10 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         menu.addAction("파일로 저장 후 경로 복사").triggered.connect(
             lambda: self.copy_as_path_requested.emit(target))
         menu.addAction("Gemini에게 질문").triggered.connect(lambda: self.ask_ai_requested.emit(target))
+        # 복제 — 지금 보이는 모습(주석 있으면 평탄화본) 그대로, 같은 크기로 살짝 비켜 새 핀을
+        # 띄운다(2026-09-25 — 핀 단축키가 큐 순차 핀으로 바뀌어 같은 걸 다시 핀하는 수단).
+        menu.addAction("복제").triggered.connect(
+            lambda: self.duplicate_requested.emit(target, self._duplicate_rect()))
         menu.addAction("주석 편집\tSpace").triggered.connect(self.toggle_edit_mode)
         menu.addSeparator()
         menu.addAction("닫기").triggered.connect(self.close)

@@ -259,7 +259,6 @@ class PasteInterceptor:
         on_bulk_paste: Optional[Callable[[], None]] = None,
         on_bulk_path_paste: Optional[Callable[[], None]] = None,
         on_pin_image: Optional[Callable[[], None]] = None,
-        on_seq_pin: Optional[Callable[[], None]] = None,
         on_capture: Optional[Callable[[], None]] = None,
         on_record_gif: Optional[Callable[[], None]] = None,
         on_record_video: Optional[Callable[[], None]] = None,
@@ -278,7 +277,6 @@ class PasteInterceptor:
         self.on_bulk_paste = on_bulk_paste
         self.on_bulk_path_paste = on_bulk_path_paste
         self.on_pin_image = on_pin_image
-        self.on_seq_pin = on_seq_pin
         self.on_capture = on_capture
         self.on_record_gif = on_record_gif
         self.on_record_video = on_record_video
@@ -335,11 +333,6 @@ class PasteInterceptor:
         self._pin_need_ctrl: bool = False
         self._pin_need_shift: bool = False
         self._pin_need_alt: bool = False
-        # 순차 핀 단축키 (화면 핀의 큐 버전, 동일 구조)
-        self._seqpin_vk: int = 0
-        self._seqpin_need_ctrl: bool = False
-        self._seqpin_need_shift: bool = False
-        self._seqpin_need_alt: bool = False
         # 영역 캡처 단축키 (패널 토글과 동일 구조)
         self._capture_vk: int = 0
         self._capture_need_ctrl: bool = False
@@ -458,19 +451,6 @@ class PasteInterceptor:
             self._bulkpath_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._bulkpath_vk = 0
-
-    def set_seq_pin_hotkey(self, hotkey_str: str):
-        """순차 핀 단축키 설정 — 큐에서 다음 항목을 꺼내 화면에 핀(이미지면 그대로, 텍스트면 이미지화)."""
-        parts = hotkey_str.lower().replace(" ", "").split("+")
-        self._seqpin_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
-        self._seqpin_need_shift = "shift" in parts
-        self._seqpin_need_alt   = "alt" in parts
-        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
-        if key_parts:
-            key = key_parts[-1]
-            self._seqpin_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
-        else:
-            self._seqpin_vk = 0
 
     def set_pin_hotkey(self, hotkey_str: str):
         """화면에 핀 단축키 설정 — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다."""
@@ -846,7 +826,7 @@ class PasteInterceptor:
                             pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)
 
-                # 화면에 핀(이미지 띄우기) 단축키 감지 (기본 Alt+F3)
+                # 핀 단축키 감지 (기본 Alt+F3) — 큐에 다음 항목이 있으면 그걸, 없으면 클립보드를 핀
                 if (self._pin_vk and vk_code == self._pin_vk
                         and ctrl_pressed  == self._pin_need_ctrl
                         and shift_pressed == self._pin_need_shift
@@ -856,20 +836,6 @@ class PasteInterceptor:
                     if self.on_pin_image:
                         try:
                             self.on_pin_image()
-                        except Exception:
-                            pass
-                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
-
-                # 순차 핀 단축키 감지 (기본 Alt+Shift+F3) — 화면 핀의 큐 버전
-                if (self._seqpin_vk and vk_code == self._seqpin_vk
-                        and ctrl_pressed  == self._seqpin_need_ctrl
-                        and shift_pressed == self._seqpin_need_shift
-                        and alt_pressed   == self._seqpin_need_alt):
-                    # 새 핀 창이 포그라운드를 잡을 수 있도록 잠금 해제 (핀 트리거와 동일)
-                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
-                    if self.on_seq_pin:
-                        try:
-                            self.on_seq_pin()
                         except Exception:
                             pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)
