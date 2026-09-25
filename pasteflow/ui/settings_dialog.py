@@ -694,6 +694,16 @@ class SettingsDialog(QDialog):
             lbl.setContentsMargins(_SUB_INDENT, 0, 0, 0)
             return lbl
 
+        def _with_option(field: QWidget, option: QCheckBox) -> QHBoxLayout:
+            """입력칸 오른쪽에 그 입력칸에 딸린 체크박스를 같은 줄로 붙인다(베이크오프 라운드3
+            C3 채택 — 딸린 옵션이 부모와 같은 높이의 별도 줄이면 독립 항목처럼 읽혔다)."""
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(10)
+            row.addWidget(field, 1)
+            row.addWidget(option)
+            return row
+
         def _fixed_key(text: str) -> QLabel:
             """바꿀 수 없는 단축키 표시(HotkeyEdit 자리에 놓이는 읽기 전용 칸)."""
             lbl = QLabel(text)
@@ -819,8 +829,6 @@ class SettingsDialog(QDialog):
             "캡처 즉시 클립보드에 복사되고 지정 폴더에 PNG로 저장됩니다.\n"
             "ESC 또는 우클릭으로 취소합니다."
         )
-        capture_form.addRow("•  영역 캡처", self._capture_hotkey)
-
         self._capture_printscreen_check = QCheckBox("PrintScreen 키로도 실행")
         self._capture_printscreen_check.setToolTip(
             "PrintScreen 키를 단독으로 누르면(Alt/Ctrl/Shift/Win 없이) 위 영역 캡처와\n"
@@ -828,7 +836,8 @@ class SettingsDialog(QDialog):
             "⚠ 켜면 Windows 기본 PrintScreen 동작(전체화면 클립보드 복사/스니핑 도구 실행)을\n"
             "대체합니다. Alt+PrtScn·Win+PrtScn 등 다른 조합은 그대로 OS가 처리합니다."
         )
-        capture_form.addRow(_bullet_checkbox_row(self._capture_printscreen_check))
+        capture_form.addRow("•  영역 캡처",
+                            _with_option(self._capture_hotkey, self._capture_printscreen_check))
 
         self._pin_image_hotkey = HotkeyEdit()
         self._pin_image_hotkey.setToolTip(
@@ -861,9 +870,8 @@ class SettingsDialog(QDialog):
             "G=GIF, V=영상, Enter=지난번 선택, ESC=취소. 녹화 중 ■ 정지 또는 ESC로 끝냅니다.\n"
             "저장된 파일 경로가 클립보드에 복사됩니다."
         )
-        recording_form.addRow("•  녹화", self._record_hotkey)
         self._gif_cursor_check = QCheckBox("녹화에 마우스 커서 표시")
-        recording_form.addRow(_bullet_checkbox_row(self._gif_cursor_check))
+        recording_form.addRow("•  녹화", _with_option(self._record_hotkey, self._gif_cursor_check))
 
         recording_form.addRow(_subhead("GIF"))
         self._gif_fps_spin = QSpinBox()
