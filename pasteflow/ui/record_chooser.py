@@ -5,7 +5,10 @@ GIF·영상 녹화 단축키를 하나로 합치면서(2026-09-25, 사용자 요
 이 바를 띄워 방식만 고르게 한다.
 
 - 클릭: `GIF` / `영상` 버튼, `✕`=취소
-- 키보드: `G`=GIF, `V`=영상, `Enter`=지난번에 고른 쪽(코랄로 강조), `ESC`=취소
+- 키보드: `G`=GIF, `V`=영상, `Enter`=지난번에 고른 쪽(`↵` 표시), `ESC`=취소
+
+두 버튼은 대등한 선택지라 같은 색으로 둔다 — 지난번 쪽만 코랄로 칠했더니 '이미 정해진 것'
+이나 '추천'으로 읽혀 헷갈렸다(2026-09-25 사용자 피드백). Enter 대상은 `↵`만으로 알린다.
 
 바는 녹화 영역 '밖'(아래, 공간 없으면 위, 둘 다 없으면 영역 안쪽 아래)에 띄운다 —
 어차피 고르는 즉시 닫히고 녹화는 그 뒤 150ms에 시작하지만, 영역을 가리지 않아야
@@ -19,7 +22,7 @@ from ctypes import wintypes
 from PyQt6.QtWidgets import QWidget, QApplication, QPushButton, QHBoxLayout
 from PyQt6.QtCore import Qt, QRect, pyqtSignal
 
-from pasteflow.ui.theme import PEACH, PEACH_HOVER, BASE, TEXT, SURFACE2
+from pasteflow.ui.theme import PEACH_HOVER, BASE, TEXT, SURFACE2
 
 # 전용 WinDLL 인스턴스 — 공유 ctypes.windll.user32에 argtypes를 걸면 다른 모듈의 설정과
 # 서로 덮어쓴다(uia.py의 교훈).
@@ -74,7 +77,6 @@ class RecordModeChooser(QWidget):
             f"QWidget{{background:{BASE};border:1px solid {SURFACE2};border-radius:6px;}}"
             f"QPushButton{{color:{TEXT};background:{SURFACE2};border:none;border-radius:4px;"
             f"padding:5px 14px;font-size:12px;}}"
-            f"QPushButton#default{{background:{PEACH};color:{BASE};font-weight:bold;}}"
             f"QPushButton:hover{{background:{PEACH_HOVER};color:{BASE};}}"
             f"QPushButton#close{{padding:5px 8px;background:transparent;}}"
         )
@@ -82,12 +84,13 @@ class RecordModeChooser(QWidget):
         lay.setContentsMargins(8, 6, 8, 6)
         lay.setSpacing(6)
         for mode, text in (("gif", "GIF  (G)"), ("video", "영상  (V)")):
+            if mode == self._default:
+                text += "  ↵"
             btn = QPushButton(text)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 키는 바 자신이 받는다
             if mode == self._default:
-                btn.setObjectName("default")
-                btn.setToolTip("Enter")
+                btn.setToolTip("Enter로도 선택 (지난번에 고른 방식)")
             btn.clicked.connect(lambda _=False, m=mode: self._choose(m))
             lay.addWidget(btn)
         close_btn = QPushButton("✕")
