@@ -616,9 +616,8 @@ class SettingsDialog(QDialog):
         self.resize(start_w, min_h)
 
     def _setup_ui(self):
-        # 설정이 늘며 단일 스크롤이 화면을 넘어, 탭 2개(일반/AI)로 분리한다.
-        # "일반"은 일반 설정 + 단축키를 한 탭에 통합한 것(2026-07-29 요청) — 위에 일반
-        # 설정(히스토리·자동시작 등), 그 아래 단축키(기본→기능) 순으로 쌓는다.
+        # 설정이 늘며 단일 스크롤이 화면을 넘어 탭으로 나눈다 — 2026-09-25부터 기능별 4탭
+        # (일반/붙여넣기/캡처·녹화/AI), 각 카드에 그 기능의 단축키와 설정을 함께 둔다.
         # 창 높이는 _finalize_size가 '가장 큰 탭'에 맞춰 고정하므로 스크롤이 사실상
         # 사라진다. 버튼 바는 탭 밖에 둬 항상 노출.
         outer = QVBoxLayout(self)
@@ -646,20 +645,22 @@ class SettingsDialog(QDialog):
             self._tab_pages.append(page)
             return pl
 
+        # 탭 4개 — 단축키를 단축키끼리 모으지 않고 **기능별 카드에 그 기능의 설정과 함께**
+        # 둔다(2026-09-25 사용자 요청: "STT 단축키는 STT 모델 선택하는 쪽에"). 예전엔
+        # 「일반」 탭 하나에 기본/기능 단축키 그룹을 따로 모았다.
         tab_general = _make_tab("일반")
+        tab_paste = _make_tab("붙여넣기")
+        tab_capture = _make_tab("캡처·녹화")
         tab_ai = _make_tab("AI")
 
-        # ── 기능 단축키 그룹 (변경 가능) — 아래 기본 단축키 다음에 배치 ──
-        # 인식 편의를 위해 4개 하위 묶음을 얇은 구분선으로 분리(쭉 나열 대신 시각 그룹화):
-        #  ① 패널  ② 경로 붙여넣기류  ③ 일괄 붙여넣기(벌크)  ④ 영역 캡처·핀류
-        # AI 호출류(Gemini 호출·Gemini(캡처)·OCR·STT)는 「AI」 탭의 별도 그룹으로 옮겼다
-        # (2026-08-04, 사용자 요청 — 이 4개만 AI 관련이라 AI 탭에 있는 편이 자연스럽다).
-        hotkey_group = QGroupBox("기능 단축키 (변경 가능)")
-        hotkey_form = QFormLayout(hotkey_group)
-        hotkey_form.setVerticalSpacing(4)
-        hotkey_form.setContentsMargins(10, 8, 10, 8)
+        def _group(title: str) -> tuple[QGroupBox, QFormLayout]:
+            box = QGroupBox(title)
+            form = QFormLayout(box)
+            form.setVerticalSpacing(4)
+            form.setContentsMargins(10, 8, 10, 8)
+            return box, form
 
-        def _hk_sep():
+        def _sep() -> QFrame:
             line = QFrame()
             line.setFrameShape(QFrame.Shape.HLine)
             line.setFrameShadow(QFrame.Shadow.Plain)
@@ -667,162 +668,20 @@ class SettingsDialog(QDialog):
             line.setFixedHeight(1)
             return line
 
-        # ① 패널
-        self._panel_toggle_hotkey = HotkeyEdit()
-        hotkey_form.addRow("•  패널 불러오기:", self._panel_toggle_hotkey)
-        hotkey_form.addRow(_hk_sep())
+        def _subhead(text: str) -> QLabel:
+            """카드 안 소제목 — 한 카드에 성격이 다른 줄(단축키/설정)이 섞일 때 구분용."""
+            lbl = QLabel(text)
+            lbl.setStyleSheet(f"color:{_TITLE}; font-size:11px; font-weight:600; padding-top:2px;")
+            return lbl
 
-        # ② 경로 붙여넣기 / 순차 경로 붙여넣기
-        self._image_to_path_hotkey = HotkeyEdit()
-        self._image_to_path_hotkey.setToolTip(
-            "현재 클립보드 이미지를 임시 PNG로 저장하고 절대경로를 클립보드 텍스트로 교체합니다.\n"
-            "이어서 포그라운드 창에 Ctrl+V를 자동 전송합니다.\n"
-            "Claude Code CLI 등 '파일 경로 텍스트'를 첨부로 받는 앱에 한 키로 붙여넣기 위한 단축키.\n"
-            "팁: 패널에서 이미지 항목을 Alt를 누른 채 그 앱으로 드래그해도 같은 방식(경로 붙여넣기)으로 동작합니다."
-        )
-        hotkey_form.addRow("•  경로 붙여넣기:", self._image_to_path_hotkey)
-
-        self._seq_image_to_path_hotkey = HotkeyEdit()
-        self._seq_image_to_path_hotkey.setToolTip(
-            "순차 붙여넣기(Ctrl+Shift+V)의 '경로 버전'. 순차 큐에서 다음 항목을 꺼내되\n"
-            "이미지면 임시 PNG로 저장한 절대경로 텍스트로 붙여넣습니다.\n"
-            "예: 영역 캡처(Alt+F2)를 여러 장 찍은 뒤 이 키를 차례로 눌러 경로1·경로2… 순서대로 붙여넣기.\n"
-            "이미지가 아닌 항목은 원본 그대로 붙여넣습니다."
-        )
-        hotkey_form.addRow("•  순차 경로 붙여넣기:", self._seq_image_to_path_hotkey)
-        hotkey_form.addRow(_hk_sep())
-
-        # ③ 일괄 붙여넣기 — 순차/순차 경로 붙여넣기를 한 번에 큐 끝까지 자동 주입하는 '벌크' 버전.
-        # 반복해 누르지 않고 한 번 눌러 여러 항목을 순서대로 붙여넣고 싶을 때 사용(2026-09-06 도입).
-        self._bulk_paste_hotkey = HotkeyEdit()
-        self._bulk_paste_hotkey.setToolTip(
-            "순차 붙여넣기(Ctrl+Shift+V)의 '전체 자동주입' 버전.\n"
-            "한 번 눌러 큐에 남은 항목 전체를 짧은 간격을 두고 순서대로 자동 붙여넣습니다.\n"
-            "10개를 반복해 누르지 않고 한 번에 붙이고 싶을 때 사용합니다."
-        )
-        hotkey_form.addRow("•  순차 붙여넣기 전체:", self._bulk_paste_hotkey)
-
-        self._bulk_path_paste_hotkey = HotkeyEdit()
-        self._bulk_path_paste_hotkey.setToolTip(
-            "순차 경로 붙여넣기(Ctrl+Shift+[)의 '전체 자동주입' 버전.\n"
-            "큐에 남은 항목 전체를 순서대로 자동 붙여넣되, 이미지는 임시 PNG 경로 텍스트로 바꿔 붙입니다."
-        )
-        hotkey_form.addRow("•  순차 경로 붙여넣기 전체:", self._bulk_path_paste_hotkey)
-        hotkey_form.addRow(_hk_sep())
-
-        # ④ 영역 캡처(Alt+F2) / 핀(Alt+F3)
-        self._capture_hotkey = HotkeyEdit()
-        self._capture_hotkey.setToolTip(
-            "화면 영역을 드래그로 선택해 캡처합니다(Snipaste의 영역 캡처).\n"
-            "캡처 즉시 클립보드에 복사되고 지정 폴더에 PNG로 저장됩니다.\n"
-            "ESC 또는 우클릭으로 취소합니다."
-        )
-        hotkey_form.addRow("•  영역 캡처:", self._capture_hotkey)
-
-        self._capture_printscreen_check = QCheckBox("PrintScreen 키로도 실행")
-        self._capture_printscreen_check.setToolTip(
-            "PrintScreen 키를 단독으로 누르면(Alt/Ctrl/Shift/Win 없이) 위 영역 캡처와\n"
-            "완전히 동일하게 동작합니다. Alt를 누르면 사라지는 메뉴 등을 캡처할 때 유용합니다.\n"
-            "⚠ 켜면 Windows 기본 PrintScreen 동작(전체화면 클립보드 복사/스니핑 도구 실행)을\n"
-            "대체합니다. Alt+PrtScn·Win+PrtScn 등 다른 조합은 그대로 OS가 처리합니다."
-        )
-        hotkey_form.addRow(_bullet_checkbox_row(self._capture_printscreen_check))
-
-        self._pin_image_hotkey = HotkeyEdit()
-        self._pin_image_hotkey.setToolTip(
-            "순차 큐의 다음 항목을 화면 위에 떠 있는 창으로 띄웁니다(Snipaste의 화면 핀).\n"
-            "예: 영역 캡처(Alt+F2)를 여러 장 찍은 뒤 이 키를 차례로 눌러 캡처1·캡처2… 순서대로 핀.\n"
-            "큐가 비어 있으면 현재 클립보드를 핀합니다. 순차 붙여넣기와 같은 큐를 씁니다.\n"
-            "같은 걸 또 띄우려면 핀 창 우클릭 → 복제. ESC로 닫고, Space로 주석 편집합니다."
-        )
-        hotkey_form.addRow("•  핀:", self._pin_image_hotkey)
-
-        self._record_hotkey = HotkeyEdit()
-        self._record_hotkey.setToolTip(
-            "화면 영역을 드래그로 선택한 뒤, 뜨는 버튼에서 GIF 또는 영상(MP4)을 골라 녹화합니다.\n"
-            "G=GIF, V=영상, Enter=지난번 선택, ESC=취소. 녹화 중 ■ 정지 또는 ESC로 끝냅니다.\n"
-            "저장된 파일 경로가 클립보드에 복사됩니다."
-        )
-        hotkey_form.addRow("•  녹화:", self._record_hotkey)
-
-        # ── AI 단축키 그룹 — Gemini 호출/Gemini(캡처)/OCR/STT(2026-08-04: 「일반」 탭
-        # 기능 단축키에서 「AI」 탭으로 이동, 사용자 요청 — 이 4개만 AI 호출 기능이라
-        # AI 탭에 있는 편이 자연스럽다). 회색 테두리(그룹박스 전역 스타일)와 OCR↔STT
-        # 사이 구분선은 그대로 유지.
-        ai_hotkey_group = QGroupBox("AI 단축키 (변경 가능)")
-        ai_hotkey_form = QFormLayout(ai_hotkey_group)
-        ai_hotkey_form.setVerticalSpacing(4)
-        ai_hotkey_form.setContentsMargins(10, 8, 10, 8)
-
-        # OCR(옛 이름 "AI OCR") — 화면 영역을 AI(설정된 API)로 텍스트 인식. 별도 엔진 없음.
-        # 음성 입력(STT) 바로 위로 이동(2026-08-03, 사용자 요청) — 텍스트 인식·음성 인식이
-        # 나란히 있는 편이 자연스럽다.
-        self._ocr_hotkey = HotkeyEdit()
-        self._ocr_hotkey.setToolTip(
-            "화면 영역을 드래그로 선택해 그 안의 텍스트를 AI(설정된 API)로 인식합니다.\n"
-            "결과 텍스트가 클립보드·히스토리에 들어갑니다."
-        )
-        ai_hotkey_form.addRow("•  OCR:", self._ocr_hotkey)
-        ai_hotkey_form.addRow(_hk_sep())
-
-        # 음성 입력(STT) — 누르고 있는 동안 녹음(푸시투토크), 떼면 인식 후 자동 붙여넣기.
-        # allow_mod_only=True — Ctrl+Win처럼 일반키 없이 수식키만으로 된 조합도 캡처
-        # 가능(Wispr Flow와 동일 제스처로 비교하려는 사용자 요청, 2026-08-02). 기본값
-        # 자체가 ctrl+win(main.py)이라 여기서도 그 조합을 재캡처할 수 있어야 한다.
-        self._stt_hotkey = HotkeyEdit(allow_mod_only=True)
-        self._stt_hotkey.setToolTip(
-            "누르고 있는 동안 마이크로 녹음하고, 떼는 순간 음성을 인식해 텍스트로\n"
-            "변환한 뒤 포커스된 입력창에 자동으로 붙여넣습니다(최대 30초).\n"
-            "Ctrl+Win처럼 일반키 없이 수식키만으로 된 조합도 가능합니다(Wispr Flow와 동일 제스처).\n"
-            "게이트웨이 오디오 입력은 Gemini 계열 모델만 지원합니다 — 아래 STT 모델에서 선택하세요."
-        )
-        ai_hotkey_form.addRow("•  음성 입력(STT):", self._stt_hotkey)
-        # tab_ai.addWidget(ai_hotkey_group)는 AI 탭 맨 아래(API 연동 그룹 다음)에 배치하려고
-        # 여기서 바로 호출하지 않고 뒤로 미룬다(2026-08-04, 사용자 요청).
-
-        # 녹화 시작/종료를 하나의 다이얼로그 시그널로 모은다 — main이 이걸로 전역 훅을
-        # suspend/resume한다(어느 HotkeyEdit이든 녹화를 시작하면 suspend, 끝나면 resume).
-        for _hk in (
-            self._panel_toggle_hotkey, self._image_to_path_hotkey,
-            self._seq_image_to_path_hotkey, self._capture_hotkey,
-            self._pin_image_hotkey, self._record_hotkey,
-            self._ocr_hotkey,
-            self._stt_hotkey,
-        ):
-            _hk.listening_changed.connect(self.recording_active.emit)
-
-        # ── 기본 단축키 그룹 (고정) — 복사/붙여넣기 등 변경 불가한 핵심 기능. 맨 위 배치 ──
-        info_group = QGroupBox("기본 단축키 (고정)")
-        info_layout = QGridLayout(info_group)
-        info_layout.setSpacing(5)
-        info_layout.setContentsMargins(8, 8, 8, 8)
-        info_layout.setColumnStretch(0, 1)
-
-        _SHORTCUTS = [
-            ("일반 복사",         "Ctrl + C"),
-            ("일반 붙여넣기",     "Ctrl + V"),
-            ("순서대로 붙여넣기", "Ctrl + Shift + V"),
-        ]
-        for row, (action, keys) in enumerate(_SHORTCUTS):
-            action_lbl = QLabel("•  " + action)
-            action_lbl.setStyleSheet(
-                f"color: {COLORS['text']}; font-size: 12px;"
-            )
-            key_lbl = QLabel(keys)
-            key_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            key_lbl.setStyleSheet(
-                f"color: {COLORS['peach']}; font-size: 12px;"
-                f" font-family: 'Consolas', monospace;"
-            )
-            info_layout.addWidget(action_lbl, row, 0)
-            info_layout.addWidget(key_lbl, row, 1)
-
-        # 배치 순서: 기본 단축키(고정) 먼저, 그다음 기능 단축키(변경 가능).
-        # 「일반」 탭 안에서는 일반 설정 그룹이 이 둘보다 위에 와야 하므로(아래 general_group
-        # 참고) 여기선 일단 append하고, general_group 쪽에서 insertWidget(0, ...)로 맨 위로
-        # 끼워 넣는다 — general_group은 파일 순서상 뒤에 만들어지기 때문.
-        tab_general.addWidget(info_group)
-        tab_general.addWidget(hotkey_group)
+        def _fixed_key(text: str) -> QLabel:
+            """바꿀 수 없는 단축키 표시(HotkeyEdit 자리에 놓이는 읽기 전용 칸)."""
+            lbl = QLabel(text)
+            lbl.setToolTip("고정 단축키 — 변경할 수 없습니다")
+            lbl.setStyleSheet(
+                f"color:{COLORS['peach']}; font-size:12px; font-family:'Consolas', monospace;"
+                f" padding:5px 8px;")
+            return lbl
 
         _combo_style = (
             f"QComboBox {{ background-color: {_INSET}; color: {_TXT}; "
@@ -831,30 +690,209 @@ class SettingsDialog(QDialog):
             f"QComboBox:hover {{ border-color: {COLORS['peach']}; }}"
         )
 
-        # ── AI 연결 그룹 (OpenAI 호환 API) ──
+        # ════════════════════════ 「일반」 탭 ════════════════════════
+        general_group, general_form = _group("일반")
+        self._auto_start_check = QCheckBox("Windows 시작 시 자동 실행")
+        general_form.addRow(_bullet_checkbox_row(self._auto_start_check))
+        self._notify_copy_check = QCheckBox("복사 시 우하단 알림 표시")
+        general_form.addRow(_bullet_checkbox_row(self._notify_copy_check))
+        tab_general.addWidget(general_group)
+
+        # 패널·히스토리 — 패널 단축키와 히스토리 개수는 같은 '패널' 기능이다.
+        panel_group, panel_form = _group("패널·히스토리")
+        self._panel_toggle_hotkey = HotkeyEdit()
+        panel_form.addRow("•  패널 불러오기:", self._panel_toggle_hotkey)
+        self._history_max_spin = QSpinBox()
+        self._history_max_spin.setRange(10, 500)
+        self._history_max_spin.setValue(50)
+        panel_form.addRow("•  히스토리 최대 개수:", self._history_max_spin)
+        tab_general.addWidget(panel_group)
+
+        # 고정 단축키 안내 — 순차 붙여넣기(Ctrl+Shift+V)는 「붙여넣기」 탭의 표 안에 있다.
+        info_group = QGroupBox("기본 단축키 (고정)")
+        info_layout = QGridLayout(info_group)
+        info_layout.setSpacing(5)
+        info_layout.setContentsMargins(8, 8, 8, 8)
+        info_layout.setColumnStretch(0, 1)
+        for row, (action, keys) in enumerate([
+            ("일반 복사", "Ctrl + C"),
+            ("일반 붙여넣기", "Ctrl + V"),
+        ]):
+            action_lbl = QLabel("•  " + action)
+            action_lbl.setStyleSheet(f"color: {COLORS['text']}; font-size: 12px;")
+            key_lbl = QLabel(keys)
+            key_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            key_lbl.setStyleSheet(
+                f"color: {COLORS['peach']}; font-size: 12px; font-family: 'Consolas', monospace;")
+            info_layout.addWidget(action_lbl, row, 0)
+            info_layout.addWidget(key_lbl, row, 1)
+        tab_general.addWidget(info_group)
+
+        # ════════════════════════ 「붙여넣기」 탭 ════════════════════════
+        # 순차 붙여넣기 4키를 2×2 표로 — 네 키가 "하나씩/전체" × "원본/경로" 두 기준으로
+        # 정확히 나뉘어, 목록으로 늘어놓으면 안 보이던 짝 관계([ ↔ ])가 한눈에 보인다
+        # (2026-09-25 사용자 선택).
+        seq_group, seq_form = _group("순차 붙여넣기")
+        self._seq_image_to_path_hotkey = HotkeyEdit()
+        self._seq_image_to_path_hotkey.setToolTip(
+            "순차 붙여넣기(Ctrl+Shift+V)의 '경로 버전'. 순차 큐에서 다음 항목을 꺼내되\n"
+            "이미지면 임시 PNG로 저장한 절대경로 텍스트로 붙여넣습니다.\n"
+            "예: 영역 캡처(Alt+F2)를 여러 장 찍은 뒤 이 키를 차례로 눌러 경로1·경로2… 순서대로 붙여넣기.\n"
+            "이미지가 아닌 항목은 원본 그대로 붙여넣습니다."
+        )
+        self._bulk_paste_hotkey = HotkeyEdit()
+        self._bulk_paste_hotkey.setToolTip(
+            "순차 붙여넣기(Ctrl+Shift+V)의 '전체 자동주입' 버전.\n"
+            "한 번 눌러 큐에 남은 항목 전체를 짧은 간격을 두고 순서대로 자동 붙여넣습니다."
+        )
+        self._bulk_path_paste_hotkey = HotkeyEdit()
+        self._bulk_path_paste_hotkey.setToolTip(
+            "순차 경로 붙여넣기(Ctrl+Shift+[)의 '전체 자동주입' 버전.\n"
+            "큐에 남은 항목 전체를 순서대로 자동 붙여넣되, 이미지는 임시 PNG 경로 텍스트로 바꿔 붙입니다."
+        )
+        seq_grid_w = QWidget()
+        seq_grid = QGridLayout(seq_grid_w)
+        seq_grid.setContentsMargins(0, 0, 0, 0)
+        seq_grid.setHorizontalSpacing(6)
+        seq_grid.setVerticalSpacing(4)
+        seq_grid.setColumnStretch(1, 1)
+        seq_grid.setColumnStretch(2, 1)
+        for col, text in ((1, "원본 그대로"), (2, "이미지를 경로로")):
+            seq_grid.addWidget(_subhead(text), 0, col)
+        for row, text in ((1, "•  하나씩"), (2, "•  전체")):
+            seq_grid.addWidget(QLabel(text), row, 0)
+        seq_grid.addWidget(_fixed_key("Ctrl + Shift + V"), 1, 1)
+        seq_grid.addWidget(self._seq_image_to_path_hotkey, 1, 2)
+        seq_grid.addWidget(self._bulk_paste_hotkey, 2, 1)
+        seq_grid.addWidget(self._bulk_path_paste_hotkey, 2, 2)
+        seq_form.addRow(seq_grid_w)
+        seq_form.addRow(_sep())
+
+        self._queue_idle_spin = QSpinBox()
+        self._queue_idle_spin.setRange(1, 3600)
+        self._queue_idle_spin.setSuffix(" 초")
+        self._queue_idle_spin.setValue(10)
+        self._queue_idle_spin.setToolTip(
+            "마지막 복사로부터 이 시간이 지나면 다음 복사는 큐의 첫 항목으로 시작합니다.\n"
+            "(일반 Ctrl+V는 시간과 무관하게 즉시 큐를 비웁니다.)"
+        )
+        seq_form.addRow("•  큐 자동 초기화:", self._queue_idle_spin)
+        tab_paste.addWidget(seq_group)
+
+        # 경로 붙여넣기(단발) — 큐와 무관하게 최신 이미지 하나를 경로로.
+        path_group, path_form = _group("경로 붙여넣기")
+        self._image_to_path_hotkey = HotkeyEdit()
+        self._image_to_path_hotkey.setToolTip(
+            "현재 클립보드 이미지를 임시 PNG로 저장하고 절대경로를 클립보드 텍스트로 교체합니다.\n"
+            "이어서 포그라운드 창에 Ctrl+V를 자동 전송합니다.\n"
+            "Claude Code CLI 등 '파일 경로 텍스트'를 첨부로 받는 앱에 한 키로 붙여넣기 위한 단축키.\n"
+            "팁: 패널에서 이미지 항목을 Alt를 누른 채 그 앱으로 드래그해도 같은 방식(경로 붙여넣기)으로 동작합니다."
+        )
+        path_form.addRow("•  최신 이미지 경로 붙여넣기:", self._image_to_path_hotkey)
+        tab_paste.addWidget(path_group)
+
+        # ════════════════════════ 「캡처·녹화」 탭 ════════════════════════
+        capture_group, capture_form = _group("영역 캡처·핀")
+        self._capture_hotkey = HotkeyEdit()
+        self._capture_hotkey.setToolTip(
+            "화면 영역을 드래그로 선택해 캡처합니다(Snipaste의 영역 캡처).\n"
+            "캡처 즉시 클립보드에 복사되고 지정 폴더에 PNG로 저장됩니다.\n"
+            "ESC 또는 우클릭으로 취소합니다."
+        )
+        capture_form.addRow("•  영역 캡처:", self._capture_hotkey)
+
+        self._capture_printscreen_check = QCheckBox("PrintScreen 키로도 실행")
+        self._capture_printscreen_check.setToolTip(
+            "PrintScreen 키를 단독으로 누르면(Alt/Ctrl/Shift/Win 없이) 위 영역 캡처와\n"
+            "완전히 동일하게 동작합니다. Alt를 누르면 사라지는 메뉴 등을 캡처할 때 유용합니다.\n"
+            "⚠ 켜면 Windows 기본 PrintScreen 동작(전체화면 클립보드 복사/스니핑 도구 실행)을\n"
+            "대체합니다. Alt+PrtScn·Win+PrtScn 등 다른 조합은 그대로 OS가 처리합니다."
+        )
+        capture_form.addRow(_bullet_checkbox_row(self._capture_printscreen_check))
+
+        self._pin_image_hotkey = HotkeyEdit()
+        self._pin_image_hotkey.setToolTip(
+            "순차 큐의 다음 항목을 화면 위에 떠 있는 창으로 띄웁니다(Snipaste의 화면 핀).\n"
+            "예: 영역 캡처(Alt+F2)를 여러 장 찍은 뒤 이 키를 차례로 눌러 캡처1·캡처2… 순서대로 핀.\n"
+            "큐가 비어 있으면 현재 클립보드를 핀합니다. 순차 붙여넣기와 같은 큐를 씁니다.\n"
+            "같은 걸 또 띄우려면 핀 창 우클릭 → 복제. ESC로 닫고, Space로 주석 편집합니다."
+        )
+        capture_form.addRow("•  핀:", self._pin_image_hotkey)
+        capture_form.addRow(_sep())
+
+        # 캡처 저장 폴더 — 경로 표시 + 찾아보기 (녹화 파일도 같은 폴더에 저장된다)
+        self._capture_folder_edit = QLineEdit()
+        self._capture_folder_edit.setReadOnly(True)
+        self._capture_folder_edit.setToolTip("영역 캡처 이미지와 GIF·영상 녹화 파일을 저장할 폴더")
+        browse_btn = QPushButton("찾아보기")
+        browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        browse_btn.clicked.connect(self._pick_capture_folder)
+        folder_row = QHBoxLayout()
+        folder_row.setContentsMargins(0, 0, 0, 0)
+        folder_row.addWidget(self._capture_folder_edit, 1)
+        folder_row.addWidget(browse_btn)
+        capture_form.addRow("•  저장 폴더:", folder_row)
+        tab_capture.addWidget(capture_group)
+
+        recording_group, recording_form = _group("녹화")
+        self._record_hotkey = HotkeyEdit()
+        self._record_hotkey.setToolTip(
+            "화면 영역을 드래그로 선택한 뒤, 뜨는 버튼에서 GIF 또는 영상(MP4)을 골라 녹화합니다.\n"
+            "G=GIF, V=영상, Enter=지난번 선택, ESC=취소. 녹화 중 ■ 정지 또는 ESC로 끝냅니다.\n"
+            "저장된 파일 경로가 클립보드에 복사됩니다."
+        )
+        recording_form.addRow("•  녹화:", self._record_hotkey)
+        self._gif_cursor_check = QCheckBox("녹화에 마우스 커서 표시")
+        recording_form.addRow(_bullet_checkbox_row(self._gif_cursor_check))
+
+        recording_form.addRow(_subhead("GIF"))
+        self._gif_fps_spin = QSpinBox()
+        self._gif_fps_spin.setRange(1, 30)
+        self._gif_fps_spin.setSuffix(" fps")
+        self._gif_fps_spin.setValue(12)
+        self._gif_fps_spin.setToolTip(
+            "GIF 녹화 초당 프레임 수. 높을수록 부드럽지만 파일 용량이 커집니다."
+        )
+        recording_form.addRow("•  초당 프레임:", self._gif_fps_spin)
+        self._gif_max_sec_spin = QSpinBox()
+        self._gif_max_sec_spin.setRange(5, 60)
+        self._gif_max_sec_spin.setSuffix(" 초")
+        self._gif_max_sec_spin.setValue(15)
+        self._gif_max_sec_spin.setToolTip(
+            "GIF 녹화 최대 길이. 프레임을 전부 메모리에 모았다가 인코딩하므로,\n"
+            "fps·녹화 영역이 클수록 메모리 사용량이 커집니다(영상(MP4) 녹화는 이 제약이 없습니다)."
+        )
+        recording_form.addRow("•  최대 길이:", self._gif_max_sec_spin)
+
+        recording_form.addRow(_subhead("영상 (MP4)"))
+        self._video_fps_spin = QSpinBox()
+        self._video_fps_spin.setRange(1, 30)
+        self._video_fps_spin.setSuffix(" fps")
+        self._video_fps_spin.setValue(15)
+        self._video_fps_spin.setToolTip(
+            "영상(MP4) 녹화 초당 프레임 수. 높을수록 부드럽지만 파일 용량이 커집니다."
+        )
+        recording_form.addRow("•  초당 프레임:", self._video_fps_spin)
+        self._video_max_sec_spin = QSpinBox()
+        self._video_max_sec_spin.setRange(10, 3600)
+        self._video_max_sec_spin.setSuffix(" 초")
+        self._video_max_sec_spin.setValue(600)
+        self._video_max_sec_spin.setToolTip(
+            "영상 녹화 최대 길이. 프레임을 디스크에 즉시 흘려쓰므로 메모리 제약이 없어\n"
+            "GIF보다 훨씬 길게 잡아도 안전합니다(디스크 용량만 소비)."
+        )
+        recording_form.addRow("•  최대 길이:", self._video_max_sec_spin)
+        tab_capture.addWidget(recording_group)
+
+        # ════════════════════════ 「AI」 탭 ════════════════════════
+        # ── AI 연결 (OpenAI 호환 API) ──
         # 이 API 키를 쓰는 경로는 OCR·STT뿐이다. 호출은 `openai` 패키지의 chat.completions
         # 라 프로토콜 이름(OpenAI 호환)으로 부른다 — Mindlogic은 그 프로토콜을 쓰는
-        # 게이트웨이 회사명일 뿐이다(2026-09-25 사용자 요청으로 명칭 정리). 여러 API를
-        # 전환하던 'API 프로필' 드롭다운은 실사용이 없어 같은 날 제거했다.
-        ai_group = QGroupBox("AI 연결 (OpenAI 호환 API)")
-        self._ai_form = QFormLayout(ai_group)
-        ai_form = self._ai_form
-        ai_form.setVerticalSpacing(4)
-        ai_form.setContentsMargins(10, 8, 10, 8)
+        # 게이트웨이 회사명일 뿐이다(2026-09-25 사용자 요청으로 명칭 정리).
+        ai_group, ai_form = _group("AI 연결 (OpenAI 호환 API)")
 
-        # 섹션 구분선(크리덴셜 ↔ 모델).
-        def _ai_sep() -> QFrame:
-            line = QFrame()
-            line.setFrameShape(QFrame.Shape.HLine)
-            line.setFrameShadow(QFrame.Shadow.Plain)
-            line.setStyleSheet(f"color:{_LINE}; background-color:{_LINE};")
-            line.setFixedHeight(1)
-            return line
-
-        # 크리덴셜 — (API 키 + Base URL) 한 벌. 게이트웨이든 구글 직결이든 OpenAI 호환
-        # 경로라 base_url만 바꾸면 된다(구글: .../v1beta/openai).
-        # Base URL을 API 키보다 먼저 보여준다 — 엔드포인트를 먼저 정하고 그다음 키를
-        # 입력하는 게 자연스러운 순서(어느 API인지 모르는 채로 키부터 채우면 어색하다).
+        # Base URL을 API 키보다 먼저 — 엔드포인트를 먼저 정하고 그다음 키를 입력하는 게
+        # 자연스러운 순서. 게이트웨이든 구글 직결이든 base_url만 바꾸면 된다.
         self._base_url_edit = QLineEdit()
         self._base_url_edit.setPlaceholderText(
             "OpenAI 호환 주소 — 예: https://…mindlogic.ai/v1/gateway"
@@ -864,23 +902,19 @@ class SettingsDialog(QDialog):
         self._gateway_key_edit = QLineEdit()
         self._gateway_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._gateway_key_edit.setPlaceholderText("API 키")
-        # 키 보기 토글 — Password↔평문. '무슨 키가 들었나' 확인용.
-        # ⚠ 이모지(👁)는 Qt 컬러 이모지 폴백으로 버튼에서 깨져 렌더되므로(ai_query.py의
-        # 🕘·🔀 제거 전례) 텍스트로 둔다.
+        # 키 보기 토글 — Password↔평문. ⚠ 이모지(👁)는 Qt 컬러 이모지 폴백으로 버튼에서
+        # 깨져 렌더되므로 텍스트로 둔다. 40px는 두 글자 + 패딩에 모자라 글자가 잘렸다 → 56px.
         self._key_reveal_btn = QPushButton("보기")
         self._key_reveal_btn.setCheckable(True)
-        # 40px는 '보기'/'숨김' 두 글자 + 버튼 패딩에 모자라 글자가 잘렸다 → 56px로.
         self._key_reveal_btn.setFixedWidth(56)
         self._key_reveal_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._key_reveal_btn.setToolTip("API 키 보기/숨기기")
         self._key_reveal_btn.toggled.connect(self._on_key_reveal_toggled)
-        # 아이콘만으로는 뜻이 안 와닿는다는 사용자 피드백(2026-07-29)으로 "모델조회"
-        # 텍스트를 붙였다 — 폭은 아이콘+글자에 맞춰 자연스럽게(고정폭 제거).
+        # 아이콘만으로는 뜻이 안 와닿는다는 사용자 피드백(2026-07-29)으로 "모델조회" 텍스트.
         self._refresh_btn = QPushButton("모델조회")
-        # Qt 내장 표준 아이콘 — 폰트 의존성 없이 모든 환경에서 보장
         self._refresh_btn.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
-        self._refresh_btn.setToolTip("사용 가능한 모델 목록 가져오기")
+        self._refresh_btn.setToolTip("사용 가능한 모델 목록 가져오기 (아래 OCR·음성 입력 모델 목록에 반영)")
         # NoFocus 필수: 클릭 시 setEnabled(False)로 꺼지는데, StrongFocus면 포커스가
         # editable 모델 콤보로 넘어가 텍스트가 전체 선택돼 조회 중 파랗게 반전돼 보인다.
         self._refresh_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -893,42 +927,10 @@ class SettingsDialog(QDialog):
         gw_row.addWidget(self._refresh_btn)
         ai_form.addRow(QLabel("•  API 키:"), gw_row)
 
-        ai_form.addRow(_ai_sep())  # 크리덴셜 ↔ 모델 섹션 구분
-
-        # OCR 모델 — 이미지 입력을 받는 모델이어야 한다.
-        self._ocr_model_label = QLabel("•  OCR 모델:")
-        self._ocr_model_combo = QComboBox()
-        self._ocr_model_combo.setEditable(True)
-        self._ocr_model_combo.setStyleSheet(_combo_style)
-        self._ocr_model_combo.setToolTip(
-            "이미지에서 텍스트를 추출할 때 쓰는 모델.\n"
-            "이미지 입력을 받는 모델이어야 합니다 — [연결 테스트]로 확인하세요."
-        )
-
-        # 콤보 초기 채우기는 _load_values(_init_model_slots)에서 캐시를 읽어 수행한다.
-        # 캐시가 없으면 빈 콤보라, 무엇을 해야 할지 placeholder로 안내한다(빈 값은 엔진
-        # 기본 모델로 폴백).
-        le = self._ocr_model_combo.lineEdit()
-        if le is not None:
-            le.setPlaceholderText("↻를 눌러 모델 목록을 불러오세요")
-        # 계열 헤더 아래 모델명을 들여써 상하위를 구분(팝업 view 한정 — 닫힌 콤보는 불변).
-        # 델리게이트는 combo를 부모로 둬야 GC로 사라지지 않는다.
-        self._ocr_model_combo.view().setItemDelegate(_ModelIndentDelegate(self._ocr_model_combo))
-
-        # 프로브 결과 줄 — 연결 테스트가 실호출해 여기에 쓴다.
-        self._ocr_model_probe_status = self._make_probe_label()
-
-        # 모델을 바꾸면 직전 결과는 다른 모델 이야기다 — 낡은 ✓를 남기면 그게 거짓말이 된다.
-        self._ocr_model_combo.currentTextChanged.connect(
-            lambda _t: self._on_model_text_changed(self._ocr_model_probe_status))
-
-        # 연결 테스트 — 모델 콤보 오른쪽(다른 버튼들과 같은 자리)에 배치. "테스트"로
-        # 줄였다가(칸이 좁던 시절) 창을 넓힌 뒤 다시 "연결 테스트"로 되돌렸다
-        # (2026-07-29 사용자 요청). setFixedWidth는 쓰지 않는다 — 전역 QPushButton
-        # padding(6px 16px)보다 좁게 고정하면 글자가 양옆으로 잘린다(실측 확인됨).
-        # **크레딧 확인 병합(2026-08-12 사용자 요청)**: 원래 별도 버튼이던 크레딧 확인을
-        # 여기 흡수했다 — 둘 다 "지금 이 키로 뭐가 되는지" 그 자리에서 확인하는 동일 성격.
-        # 모델조회(콤보를 채우는 준비 동작, API 키 행 옆)는 성격이 달라 그대로 분리 유지.
+        # 연결 테스트 — 키·연결 + OCR 모델 + 크레딧을 한 번에 실호출한다(크레딧 확인은
+        # 2026-08-12에 이 버튼으로 흡수). 연결·크레딧 결과는 여기, OCR 모델 결과는 OCR
+        # 카드의 모델 아래에 쓴다. setFixedWidth는 쓰지 않는다 — 전역 QPushButton
+        # padding보다 좁게 고정하면 글자가 양옆으로 잘린다(실측 확인됨).
         self._test_btn = QPushButton("연결 테스트")
         self._test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._test_btn.setToolTip(
@@ -937,39 +939,81 @@ class SettingsDialog(QDialog):
             "크레딧 조회는 Mindlogic 게이트웨이 전용 — 다른 API에서는 지원하지 않을 수 있습니다."
         )
         self._test_btn.clicked.connect(self._on_test_api)
-
-        model_row = QHBoxLayout()
-        model_row.setContentsMargins(0, 0, 0, 0)
-        model_row.setSpacing(4)
-        model_row.addWidget(self._ocr_model_combo, 1)
-        model_row.addWidget(self._test_btn)
-        ai_form.addRow(self._ocr_model_label, model_row)
-
-        # 연결·모델·크레딧 프로브 결과 — 실행 순서(연결→모델→크레딧)대로 콤보 아래에 쌓는다.
         self._test_status = QLabel("")
         self._test_status.setWordWrap(True)
         self._test_status.setStyleSheet(f"color: {COLORS['subtext0']}; font-size: 11px;")
         self._credit_status = self._make_probe_label()
-        ai_form.addRow("", self._stack(self._test_status, self._ocr_model_probe_status, self._credit_status))
+        test_row = QHBoxLayout()
+        test_row.setContentsMargins(0, 0, 0, 0)
+        test_row.addWidget(self._test_btn)
+        test_row.addStretch(1)
+        ai_form.addRow("", test_row)
+        ai_form.addRow("", self._stack(self._test_status, self._credit_status))
+        tab_ai.addWidget(ai_group)
 
-        ai_form.addRow(_ai_sep())  # 모델 ↔ STT 모델 구분
+        # ── OCR — 단축키 + 모델 ──
+        ocr_group, ocr_form = _group("OCR (화면 글자 인식)")
+        self._ocr_hotkey = HotkeyEdit()
+        self._ocr_hotkey.setToolTip(
+            "화면 영역을 드래그로 선택해 그 안의 텍스트를 AI(설정된 API)로 인식합니다.\n"
+            "결과 텍스트가 클립보드·히스토리에 들어갑니다."
+        )
+        ocr_form.addRow("•  OCR:", self._ocr_hotkey)
 
-        # STT 모델 — 음성 입력(Alt+R 기본) 전용. 게이트웨이 오디오 입력은 Gemini 계열만
-        # 지원해(2026-08-02 실측: 18개 모델 실호출, Gemini 8/8·GPT/Claude/Grok/Perplexity
-        # 0/10) 목록 자체를 Gemini로 필터링한다 — GPT/Claude를 골라 400을 겪을 일이 없다.
-        self._stt_model_label = QLabel("•  STT 모델:")
+        # OCR 모델 — 이미지 입력을 받는 모델이어야 한다.
+        self._ocr_model_label = QLabel("•  모델:")
+        self._ocr_model_combo = QComboBox()
+        self._ocr_model_combo.setEditable(True)
+        self._ocr_model_combo.setStyleSheet(_combo_style)
+        self._ocr_model_combo.setToolTip(
+            "이미지에서 텍스트를 추출할 때 쓰는 모델.\n"
+            "이미지 입력을 받는 모델이어야 합니다 — [연결 테스트]로 확인하세요."
+        )
+        # 콤보 초기 채우기는 _load_values(_init_model_slots)에서 캐시를 읽어 수행한다.
+        # 캐시가 없으면 빈 콤보라 placeholder로 안내한다(빈 값은 엔진 기본 모델로 폴백).
+        le = self._ocr_model_combo.lineEdit()
+        if le is not None:
+            le.setPlaceholderText("[모델조회]를 눌러 모델 목록을 불러오세요")
+        # 계열 헤더 아래 모델명을 들여써 상하위를 구분(팝업 view 한정 — 닫힌 콤보는 불변).
+        # 델리게이트는 combo를 부모로 둬야 GC로 사라지지 않는다.
+        self._ocr_model_combo.view().setItemDelegate(_ModelIndentDelegate(self._ocr_model_combo))
+        # 프로브 결과 줄 — 연결 테스트가 실호출해 여기에 쓴다.
+        self._ocr_model_probe_status = self._make_probe_label()
+        # 모델을 바꾸면 직전 결과는 다른 모델 이야기다 — 낡은 ✓를 남기면 그게 거짓말이 된다.
+        self._ocr_model_combo.currentTextChanged.connect(
+            lambda _t: self._on_model_text_changed(self._ocr_model_probe_status))
+        ocr_form.addRow(self._ocr_model_label, self._ocr_model_combo)
+        ocr_form.addRow("", self._ocr_model_probe_status)
+        tab_ai.addWidget(ocr_group)
+
+        # ── 음성 입력(STT) — 단축키 + 모델 + 마이크 ──
+        stt_group, stt_form = _group("음성 입력 (STT)")
+        # allow_mod_only=True — Ctrl+Win처럼 일반키 없이 수식키만으로 된 조합도 캡처
+        # 가능(Wispr Flow와 동일 제스처, 2026-08-02). 기본값 자체가 ctrl+win(main.py).
+        self._stt_hotkey = HotkeyEdit(allow_mod_only=True)
+        self._stt_hotkey.setToolTip(
+            "누르고 있는 동안 마이크로 녹음하고, 떼는 순간 음성을 인식해 텍스트로\n"
+            "변환한 뒤 포커스된 입력창에 자동으로 붙여넣습니다(최대 30초).\n"
+            "Ctrl+Win처럼 일반키 없이 수식키만으로 된 조합도 가능합니다(Wispr Flow와 동일 제스처)."
+        )
+        stt_form.addRow("•  음성 입력:", self._stt_hotkey)
+
+        # STT 모델 — 게이트웨이 오디오 입력은 Gemini 계열만 지원해(2026-08-02 실측: 18개
+        # 모델 실호출, Gemini 8/8·GPT/Claude/Grok/Perplexity 0/10) 목록 자체를 Gemini로
+        # 필터링한다 — GPT/Claude를 골라 400을 겪을 일이 없다.
+        self._stt_model_label = QLabel("•  모델:")
         self._stt_model_combo = QComboBox()
         self._stt_model_combo.setEditable(True)
         self._stt_model_combo.setStyleSheet(_combo_style)
         self._stt_model_combo.setToolTip(
-            "음성 입력(Alt+R 기본)에 쓰는 모델 — Gemini 계열만 표시됩니다.\n"
+            "음성 입력에 쓰는 모델 — Gemini 계열만 표시됩니다.\n"
             "게이트웨이 오디오 입력이 Gemini 계열에서만 확인됐기 때문입니다(2026-08-02)."
         )
         le = self._stt_model_combo.lineEdit()
         if le is not None:
-            le.setPlaceholderText("↻(모델조회)를 눌러 목록을 불러오세요")
+            le.setPlaceholderText("[모델조회]를 눌러 목록을 불러오세요")
         self._stt_model_combo.view().setItemDelegate(_ModelIndentDelegate(self._stt_model_combo))
-        ai_form.addRow(self._stt_model_label, self._stt_model_combo)
+        stt_form.addRow(self._stt_model_label, self._stt_model_combo)
 
         # 마이크 — 시스템 기본 입력 장치 또는 특정 장치를 지정(2026-08-02 사용자 요청).
         # 목록은 MME 호스트 API로 한정(중복 표기 방지 — stt_engine.list_input_devices 참고).
@@ -998,125 +1042,23 @@ class SettingsDialog(QDialog):
         mic_row.addWidget(self._mic_combo, 1)
         mic_row.addWidget(self._refresh_mic_btn)
         mic_row.addWidget(self._mic_test_btn)
-        ai_form.addRow(QLabel("•  마이크:"), mic_row)
+        stt_form.addRow(QLabel("•  마이크:"), mic_row)
         self._mic_test_status = self._make_probe_label()
-        ai_form.addRow("", self._mic_test_status)
+        stt_form.addRow("", self._mic_test_status)
+        tab_ai.addWidget(stt_group)
 
-        tab_ai.addWidget(ai_group)
-
-        # AI 단축키 그룹은 AI 탭 맨 아래에 배치(2026-08-04, 사용자 요청 — 크리덴셜이
-        # 우선이고 단축키는 참고용으로 하단에).
-        tab_ai.addWidget(ai_hotkey_group)
-
-        # ── 일반 설정 그룹 ── 「일반」 탭의 맨 위(아래 insertWidget(0, ...) 참고).
-        # 탭 제목도 "일반"이라 그룹박스 제목까지 "일반"이면 중복으로 읽혀 "일반 설정"으로 구분.
-        general_group = QGroupBox("일반 설정")
-        general_form = QFormLayout(general_group)
-        general_form.setVerticalSpacing(4)
-        general_form.setContentsMargins(10, 8, 10, 8)
-
-        def _gen_sep():
-            line = QFrame()
-            line.setFrameShape(QFrame.Shape.HLine)
-            line.setFrameShadow(QFrame.Shadow.Plain)
-            line.setStyleSheet(f"color:{_LINE}; background-color:{_LINE};")
-            line.setFixedHeight(1)
-            return line
-
-        self._auto_start_check = QCheckBox("Windows 시작 시 자동 실행")
-        general_form.addRow(_bullet_checkbox_row(self._auto_start_check))
-
-        self._notify_copy_check = QCheckBox("복사 시 우하단 알림 표시")
-        general_form.addRow(_bullet_checkbox_row(self._notify_copy_check))
-
-        general_form.addRow(_gen_sep())
-
-        self._history_max_spin = QSpinBox()
-        self._history_max_spin.setRange(10, 500)
-        self._history_max_spin.setValue(50)
-        general_form.addRow("•  히스토리 최대 개수:", self._history_max_spin)
-
-        self._queue_idle_spin = QSpinBox()
-        self._queue_idle_spin.setRange(1, 3600)
-        self._queue_idle_spin.setSuffix(" 초")
-        self._queue_idle_spin.setValue(10)
-        self._queue_idle_spin.setToolTip(
-            "마지막 복사로부터 이 시간이 지나면 다음 복사는 큐의 첫 항목으로 시작합니다.\n"
-            "(일반 Ctrl+V는 시간과 무관하게 즉시 큐를 비웁니다.)"
-        )
-        general_form.addRow("•  순차 큐 자동 초기화:", self._queue_idle_spin)
-
-        # 캡처 저장 폴더 — 경로 표시 + 찾아보기
-        self._capture_folder_edit = QLineEdit()
-        self._capture_folder_edit.setReadOnly(True)
-        self._capture_folder_edit.setToolTip("영역 캡처(Alt+F2) 이미지를 저장할 폴더")
-        browse_btn = QPushButton("찾아보기")
-        browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        browse_btn.clicked.connect(self._pick_capture_folder)
-        folder_row = QHBoxLayout()
-        folder_row.setContentsMargins(0, 0, 0, 0)
-        folder_row.addWidget(self._capture_folder_edit, 1)
-        folder_row.addWidget(browse_btn)
-        general_form.addRow("•  캡처 저장 폴더:", folder_row)
-
-        # ── GIF/녹화 설정 그룹 ── 「일반 설정」과 별도 카드로 분리해 녹화 관련
-        # 옵션(5개)을 한눈에 묶어 보여준다(2026-08-04 — 색깔 구분선 대신 그룹박스 분리로
-        # 정리, 코랄 강조선은 이 카드 하나 크기에 비해 과했다는 사용자 피드백 반영).
-        recording_group = QGroupBox("GIF/녹화 설정")
-        recording_form = QFormLayout(recording_group)
-        recording_form.setVerticalSpacing(4)
-        recording_form.setContentsMargins(10, 8, 10, 8)
-
-        self._gif_cursor_check = QCheckBox("GIF/영상 녹화 시 마우스 커서 표시")
-        recording_form.addRow(_bullet_checkbox_row(self._gif_cursor_check))
-
-        recording_form.addRow(_gen_sep())
-
-        self._gif_fps_spin = QSpinBox()
-        self._gif_fps_spin.setRange(1, 30)
-        self._gif_fps_spin.setSuffix(" fps")
-        self._gif_fps_spin.setValue(12)
-        self._gif_fps_spin.setToolTip(
-            "GIF 녹화 초당 프레임 수. 높을수록 부드럽지만 파일 용량이 커집니다."
-        )
-        recording_form.addRow("•  GIF 녹화 fps:", self._gif_fps_spin)
-
-        self._gif_max_sec_spin = QSpinBox()
-        self._gif_max_sec_spin.setRange(5, 60)
-        self._gif_max_sec_spin.setSuffix(" 초")
-        self._gif_max_sec_spin.setValue(15)
-        self._gif_max_sec_spin.setToolTip(
-            "GIF 녹화 최대 길이. 프레임을 전부 메모리에 모았다가 인코딩하므로,\n"
-            "fps·녹화 영역이 클수록 메모리 사용량이 커집니다(영상(MP4) 녹화는 이 제약이 없습니다)."
-        )
-        recording_form.addRow("•  GIF 최대 길이:", self._gif_max_sec_spin)
-
-        recording_form.addRow(_gen_sep())
-
-        self._video_fps_spin = QSpinBox()
-        self._video_fps_spin.setRange(1, 30)
-        self._video_fps_spin.setSuffix(" fps")
-        self._video_fps_spin.setValue(15)
-        self._video_fps_spin.setToolTip(
-            "영상(MP4) 녹화 초당 프레임 수. 높을수록 부드럽지만 파일 용량이 커집니다."
-        )
-        recording_form.addRow("•  영상 녹화 fps:", self._video_fps_spin)
-
-        self._video_max_sec_spin = QSpinBox()
-        self._video_max_sec_spin.setRange(10, 3600)
-        self._video_max_sec_spin.setSuffix(" 초")
-        self._video_max_sec_spin.setValue(600)
-        self._video_max_sec_spin.setToolTip(
-            "영상 녹화 최대 길이. 프레임을 디스크에 즉시 흘려쓰므로 메모리 제약이 없어\n"
-            "GIF보다 훨씬 길게 잡아도 안전합니다(디스크 용량만 소비)."
-        )
-        recording_form.addRow("•  영상 최대 길이:", self._video_max_sec_spin)
-
-        # insertWidget(0/1, ...) — 기본/기능 단축키 그룹은 이 시점보다 앞서(위쪽) 이미
-        # tab_general에 append돼 있으므로, 맨 위로 오려면 append가 아니라 인덱스 삽입.
-        # 순서: 일반 설정(0) → GIF/녹화 설정(1) → 기본 단축키 → 기능 단축키.
-        tab_general.insertWidget(0, general_group)
-        tab_general.insertWidget(1, recording_group)
+        # 녹화 시작/종료를 하나의 다이얼로그 시그널로 모은다 — main이 이걸로 전역 훅을
+        # suspend/resume한다(어느 HotkeyEdit이든 녹화를 시작하면 suspend, 끝나면 resume).
+        # 벌크 2종은 2026-09-06 도입 때 이 목록에서 빠져 있었다(녹화 중 옛 단축키가 발동하던
+        # 버그) — 2026-09-25 재배치 때 함께 넣었다.
+        for _hk in (
+            self._panel_toggle_hotkey, self._image_to_path_hotkey,
+            self._seq_image_to_path_hotkey, self._bulk_paste_hotkey,
+            self._bulk_path_paste_hotkey, self._capture_hotkey,
+            self._pin_image_hotkey, self._record_hotkey,
+            self._ocr_hotkey, self._stt_hotkey,
+        ):
+            _hk.listening_changed.connect(self.recording_active.emit)
 
         # ── 버튼 바 (탭 밖, 항상 노출) ──
         self._btn_bar = QWidget()
