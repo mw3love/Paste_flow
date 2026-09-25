@@ -65,57 +65,14 @@ def checkbox_row(check) -> QWidget:
     return check.parentWidget()
 
 
-# ── 라운드3 — 딸린 옵션(체크박스)의 위계 ─────────────────────────────────────────
-# 대상: 영역 캡처 ← PrintScreen 체크, 녹화 ← 커서 표시 체크.
-
-def _pairs(d):
-    return [(d._capture_hotkey, d._capture_printscreen_check),
-            (d._record_hotkey, d._gif_cursor_check)]
-
-
-def _c1_under_field(d):
-    """C1 — 체크박스를 부모 입력칸 바로 아래, 입력칸 열에 맞춘다(불릿 없음)."""
-    for _parent, check in _pairs(d):
-        container = checkbox_row(check)
-        form, row = find_row(container)
-        form.takeRow(row)
-        container.findChild(QLabel).setVisible(False)  # 불릿
-        form.insertRow(row, "", container)
-    realign_labels(d)
-
-
-def _c2_indent(d):
-    """C2 — 부모 라벨 아래 한 단계 들여쓰기(소제목 아래 줄과 같은 폭)."""
-    for _parent, check in _pairs(d):
-        checkbox_row(check).layout().setContentsMargins(sd._SUB_INDENT, 0, 0, 0)
-
-
-def _c3_inline(d):
-    """C3 — 부모 입력칸과 같은 줄 오른쪽에 붙인다."""
-    for parent, check in _pairs(d):
-        container = checkbox_row(check)
-        form, row = find_row(container)
-        form.takeRow(row)
-        container.hide()
-        pform, prow = find_row(parent)
-        taken = pform.takeRow(prow)
-        label_widget = taken.labelItem.widget()
-        box = QWidget()
-        h = QHBoxLayout(box)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(10)
-        h.addWidget(parent, 1)
-        h.addWidget(check)
-        pform.insertRow(prow, label_widget, box)
-    realign_labels(d)
-
+# ── 이번 라운드 후보 ─────────────────────────────────────────────────────────────
+# 라운드마다 여기에 후보 함수를 두고 CANDIDATES에 등록한다. 채택안을 원본에 반영한 뒤
+# 다시 기준점 하나로 비운다. 지난 라운드: 1 코랄 범위, 2 라벨 꾸밈, 3 딸린 옵션 위치,
+# 4 내비게이션(왼쪽 목록+아이콘 채택 — 원본 반영 완료).
 
 # (id, 버튼 라벨, 설명, 덧붙일 QSS, 후처리)
 CANDIDATES = [
-    ("C0", "C0 지금", "딸린 옵션이 부모와 같은 높이", "", None),
-    ("C1", "C1 입력칸 아래", "부모 입력칸 바로 아래, 입력칸 열에 맞춤(윈도우 설정 앱 방식)", "", _c1_under_field),
-    ("C2", "C2 들여쓰기", "부모 라벨 아래 한 단계 들여쓰기(소제목 아래 줄과 같은 폭)", "", _c2_indent),
-    ("C3", "C3 같은 줄", "부모 입력칸과 같은 줄 오른쪽", "", _c3_inline),
+    ("X0", "X0 지금", "현재 설정창(기준점)", "", None),
 ]
 
 

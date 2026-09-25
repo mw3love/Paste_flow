@@ -6,11 +6,12 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSpinBox, QCheckBox, QGroupBox, QFormLayout, QGridLayout, QComboBox, QLineEdit,
     QStyledItemDelegate, QFileDialog, QScrollArea, QWidget, QFrame, QApplication,
-    QTabWidget,
+    QTabWidget, QListWidget, QListWidgetItem,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize, QTimer
-from PyQt6.QtGui import QColor, QFontMetrics
+from PyQt6.QtGui import QColor, QFontMetrics, QIcon
 
+from pasteflow.ui.nav_icons import nav_pixmap
 from pasteflow.ui.theme import COLORS, PEACH_HOVER, check_icon_url, chevron_icon_url
 
 
@@ -211,37 +212,36 @@ DIALOG_STYLE = f"""
     QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
         background: transparent;
     }}
-    /* 탭 — 어두운 탭 바(밝은 네이티브 타이틀바와 분리) + 활성만 코랄 밑줄 강조.
-       스타일이 없으면 Qt 기본(밝은 회색)이라 타이틀바와 뭉쳐 시인성이 떨어진다. */
+    /* 탭 내용 영역 — 탭 바는 숨기고 왼쪽 목록(settingsNav)으로 고른다(베이크오프 라운드4 D2). */
     QTabWidget::pane {{
-        border: 1px solid {_LINE};
-        border-radius: 8px;
-        top: -1px;                 /* 콘텐츠 패널이 탭 바 밑줄과 겹치게 */
+        border: none;
+        top: 0px;
         background: {_PAGE};
     }}
-    QTabWidget::tab-bar {{
-        left: 6px;
-    }}
-    QTabBar {{
-        background: transparent;
-        qproperty-drawBase: 0;     /* Qt가 그리는 밝은 base strip 제거 */
-    }}
-    QTabBar::tab {{
-        background: transparent;
-        color: {_TITLE};           /* 비활성 = 차분한 회청 */
-        padding: 7px 18px;
-        margin-right: 2px;
+    /* 왼쪽 목록 — 비활성 = 차분한 회청, 선택 = 코랄 글자·아이콘 + 왼쪽 코랄 막대. */
+    QListWidget#settingsNav {{
+        background: {_PAGE};
         border: none;
-        border-bottom: 2px solid transparent;
-        font-size: 12px;
+        border-right: 1px solid {_LINE};
+        padding: 10px 0;
+        outline: none;
+    }}
+    QListWidget#settingsNav::item {{
+        color: {_TITLE};
+        padding: 9px 14px;
+        border: none;
+        border-left: 3px solid transparent;
+        font-size: 13px;
         font-weight: 600;
     }}
-    QTabBar::tab:hover {{
+    QListWidget#settingsNav::item:hover {{
         color: {_TXT};
+        background: #222222;
     }}
-    QTabBar::tab:selected {{
-        color: {COLORS['peach']};              /* 활성 = 코랄 글자 */
-        border-bottom: 2px solid {COLORS['peach']};  /* + 코랄 밑줄 */
+    QListWidget#settingsNav::item:selected {{
+        color: {COLORS['peach']};
+        background: {_CARD};
+        border-left: 3px solid {COLORS['peach']};
     }}
 """
 
@@ -508,6 +508,8 @@ class SettingsDialog(QDialog):
     # (사용자 요청, 모델조회는 콤보를 채우는 별개 준비 동작이라 그대로 분리 유지).
     _probe_done = pyqtSignal(int, str, str, str)
 
+    _NAV_W = 150  # 왼쪽 목록 폭
+
     def __init__(self, current_settings: dict, parent=None):
         super().__init__(parent)
         self._settings = dict(current_settings)
@@ -602,13 +604,13 @@ class SettingsDialog(QDialog):
         pages = self._tab_pages
         content_w = max((p.sizeHint().width() for p in pages), default=360)
         content_h = max((p.sizeHint().height() for p in pages), default=420)
-        tabbar_h = self._tabs.tabBar().sizeHint().height()
+        tabbar_h = 0  # 탭 바는 숨김(왼쪽 목록이 대신한다)
         btn_h = self._btn_bar.sizeHint().height()
         screen = self.screen() or QApplication.primaryScreen()
         ag = screen.availableGeometry() if screen else None
         avail_w = ag.width() if ag else 1200
         avail_h = ag.height() if ag else 1000
-        min_w = min(content_w + 24, avail_w - 80)   # +24: 세로 스크롤바 + 탭 프레임 여유
+        min_w = min(content_w + 24 + self._NAV_W, avail_w - 80)   # +24: 세로 스크롤바 여유, + 왼쪽 목록
         min_h = min(content_h + tabbar_h + btn_h + 8, avail_h - 64)
         min_w = max(360, min_w)
         min_h = max(420, min_h)
@@ -627,13 +629,30 @@ class SettingsDialog(QDialog):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
+        # 내비게이션 = 왼쪽 목록(아이콘+글자) — 베이크오프 라운드4에서 위쪽 탭 대신 채택
+        # (2026-09-25, D2). MS 가이드는 항목 4개면 위쪽 탭을 권하지만 실제로 보고 골랐다.
+        # 내용은 그대로 QTabWidget 페이지로 두고 탭 바만 숨긴다 — 목록 선택 = 탭 전환.
         self._tabs = QTabWidget()
-        outer.addWidget(self._tabs, 1)
+        self._tabs.tabBar().hide()
+        self._nav = QListWidget()
+        self._nav.setObjectName("settingsNav")
+        self._nav.setFixedWidth(self._NAV_W)
+        self._nav.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._nav.setIconSize(QSize(18, 18))
+        self._nav.currentRowChanged.connect(self._tabs.setCurrentIndex)
+        self._tabs.currentChanged.connect(self._nav.setCurrentRow)  # 코드로 탭을 바꿔도 목록이 따라오게
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        body_layout.addWidget(self._nav)
+        body_layout.addWidget(self._tabs, 1)
+        outer.addWidget(body, 1)
 
         # 각 탭 페이지(스크롤 안의 콘텐츠 위젯)를 모아 _finalize_size가 가장 큰 것에 맞춘다.
         self._tab_pages: list[QWidget] = []
 
-        def _make_tab(title: str) -> QVBoxLayout:
+        def _make_tab(title: str, icon: str) -> QVBoxLayout:
             page = QWidget()
             # 스크롤 영역 안 페이지는 스타일을 안 주면 Qt 기본(밝은 회색)으로 칠해져, 어두운
             # 카드 뒤 빈 공간이 밝게 떴다(2026-09-25 베이크오프 0-b 점검에서 발견).
@@ -650,15 +669,22 @@ class SettingsDialog(QDialog):
             sc.setWidget(page)
             self._tabs.addTab(sc, title)
             self._tab_pages.append(page)
+            item = QListWidgetItem(title)
+            ic = QIcon()
+            ic.addPixmap(nav_pixmap(icon, _TITLE), QIcon.Mode.Normal)
+            ic.addPixmap(nav_pixmap(icon, COLORS['peach']), QIcon.Mode.Selected)
+            item.setIcon(ic)
+            self._nav.addItem(item)
             return pl
 
         # 탭 4개 — 단축키를 단축키끼리 모으지 않고 **기능별 카드에 그 기능의 설정과 함께**
         # 둔다(2026-09-25 사용자 요청: "STT 단축키는 STT 모델 선택하는 쪽에"). 예전엔
         # 「일반」 탭 하나에 기본/기능 단축키 그룹을 따로 모았다.
-        tab_general = _make_tab("일반")
-        tab_paste = _make_tab("붙여넣기")
-        tab_capture = _make_tab("캡처·녹화")
-        tab_ai = _make_tab("AI")
+        tab_general = _make_tab("일반", "gear-six")
+        tab_paste = _make_tab("붙여넣기", "clipboard-text")
+        tab_capture = _make_tab("캡처·녹화", "camera")
+        tab_ai = _make_tab("AI", "sparkle")
+        self._nav.setCurrentRow(0)
 
         # 탭별 폼 목록 — 같은 탭의 카드들은 라벨 열 폭을 맞춰 입력칸 시작선을 일치시킨다
         # (카드마다 가장 긴 라벨이 달라 입력칸이 들쭉날쭉 시작하던 문제, 0-b 점검).
