@@ -6,7 +6,7 @@
 - 원본 코드는 건드리지 않는다. 후보 = 다이얼로그 스타일시트 **뒤에** 덧붙일 QSS 조각
   (뒤 규칙이 이긴다) + 필요하면 위젯을 옮기는 후처리 함수.
 - 후보를 바꿀 때마다 **설정창을 새로 만든다** — 위젯을 옮기는 후보도 되돌리기 코드 없이
-  깨끗하게 비교된다. 탭·창 위치는 이어받는다.
+  깨끗하게 비교된다. 탭·창 위치(크기 제외)는 이어받는다.
 - 격리: 설정값은 로컬 DB에서 **읽기만** 한다(시크릿 제외). settings_changed를 어디에도
   연결하지 않으므로 [저장]을 눌러도 실제 설정은 바뀌지 않는다.
 - 라운드마다 CANDIDATES를 채워 쓰고, 채택안을 원본에 반영한 뒤 다시 비운다.
@@ -70,9 +70,37 @@ def checkbox_row(check) -> QWidget:
 # 다시 기준점 하나로 비운다. 지난 라운드: 1 코랄 범위, 2 라벨 꾸밈, 3 딸린 옵션 위치,
 # 4 내비게이션(왼쪽 목록+아이콘 채택 — 원본 반영 완료).
 
+# ── 라운드5 — 여백·밀도 (한 축: 간격만, 색·모양 불변) ──
+def _density(card_gap: int, row_gap: int, field_pad: str | None = None):
+    """카드 사이 간격(탭 페이지 레이아웃)과 카드 안 줄 사이 간격(폼)을 바꾼다.
+
+    field_pad: 입력칸 안쪽 여백. 콤보·단축키 칸은 자기 스타일시트를 따로 들고 있어 부모
+    QSS로 안 바뀌므로, 위젯마다 원본 여백 문자열을 치환한다.
+    """
+    def post(d):
+        if field_pad:
+            from PyQt6.QtWidgets import QComboBox
+            for w in d.findChildren(QComboBox) + d.findChildren(sd.HotkeyEdit) + d.findChildren(QLabel):
+                ss = w.styleSheet()
+                if "padding: 5px 8px" in ss or "padding:5px 8px" in ss:
+                    w.setStyleSheet(ss.replace("padding: 5px 8px", f"padding: {field_pad}")
+                                      .replace("padding:5px 8px", f"padding:{field_pad}"))
+        for t in range(d._tabs.count()):
+            page = d._tabs.widget(t).widget()
+            page.layout().setSpacing(card_gap)
+            for form in page.findChildren(QFormLayout):
+                form.setVerticalSpacing(row_gap)
+    return post
+
+
 # (id, 버튼 라벨, 설명, 덧붙일 QSS, 후처리)
 CANDIDATES = [
-    ("X0", "X0 지금", "현재 설정창(기준점)", "", None),
+    ("E0", "E0 지금", "카드 사이 6px · 줄 사이 4px · 카드 안쪽 32/14/14", "", None),
+    ("E1", "E1 촘촘", "카드 사이 4px · 줄 사이 2px · 카드 안쪽 28/12/10",
+     "QGroupBox { padding: 28px 12px 10px 12px; }", _density(4, 2)),
+    ("E2", "E2 여유", "카드 사이 12px · 줄 사이 8px · 카드 안쪽 34/16/16 · 입력칸 조금 크게",
+     "QGroupBox { padding: 34px 16px 16px 16px; }"
+     " QLineEdit, QSpinBox { padding: 7px 10px; }", _density(12, 8, "7px 10px")),
 ]
 
 
@@ -101,6 +129,8 @@ def build_dialog(cid: str):
                 d.setStyleSheet(d.styleSheet() + qss)
             if post:
                 post(d)
+            if qss or post:
+                d._finalize_size()  # 간격·여백이 바뀌었으면 창 크기를 다시 맞춘다(공정 비교)
     return d
 
 
@@ -140,7 +170,7 @@ class Switcher(QWidget):
             QShortcut(QKeySequence(str(i)), d, activated=lambda c=c: self.apply(c))
         d._tabs.setCurrentIndex(tab)
         if geom is not None:
-            d.setGeometry(geom)
+            d.move(geom.topLeft())  # 크기는 후보가 정한 대로(여백 후보가 잘리지 않게), 위치만 이어받는다
         d.show()
         self._dialog = d
         if old is not None:

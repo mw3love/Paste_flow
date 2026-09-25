@@ -82,7 +82,7 @@ DIALOG_STYLE = f"""
         border: 1px solid {_LINE};
         border-radius: 8px;
         margin-top: 6px;
-        padding: 32px 14px 14px 14px;
+        padding: 34px 16px 16px 16px;  /* 여유 밀도 — 베이크오프 라운드5 E2 */
         font-weight: 600;
     }}
     QGroupBox::title {{
@@ -105,7 +105,7 @@ DIALOG_STYLE = f"""
         color: {_TXT};
         border: 1px solid {_LINE};
         border-radius: 5px;
-        padding: 5px 8px;
+        padding: 7px 10px;
     }}
     QLineEdit:focus, QSpinBox:focus {{
         border-color: {COLORS['peach']};
@@ -324,13 +324,13 @@ class HotkeyEdit(QPushButton):
             self.setStyleSheet(
                 f"QPushButton {{ background-color: {_INSET}; "
                 f"color: {COLORS['peach']}; border: 1px solid {COLORS['peach']}; "
-                f"border-radius: 5px; padding: 5px 8px; text-align: left; }}"
+                f"border-radius: 5px; padding: 7px 10px; text-align: left; }}"
             )
         else:
             self.setStyleSheet(
                 f"QPushButton {{ background-color: {_INSET}; "
                 f"color: {_TXT}; border: 1px solid {_LINE}; "
-                f"border-radius: 5px; padding: 5px 8px; text-align: left; }}"
+                f"border-radius: 5px; padding: 7px 10px; text-align: left; }}"
                 f"QPushButton:hover {{ border-color: {COLORS['peach']}; }}"
             )
 
@@ -467,7 +467,6 @@ class SettingsDialog(QDialog):
     KEY_AUTO_START = "auto_start"
     KEY_NOTIFY_ON_COPY = "notify_on_copy"
     KEY_OCR_HOTKEY = "hotkey_ocr_trigger"
-    KEY_IMAGE_TO_PATH_HOTKEY = "hotkey_image_to_path"
     KEY_SEQ_IMAGE_TO_PATH_HOTKEY = "hotkey_seq_image_to_path"
     KEY_BULK_PASTE_HOTKEY = "hotkey_bulk_paste"
     KEY_BULK_PATH_PASTE_HOTKEY = "hotkey_bulk_path_paste"
@@ -659,7 +658,7 @@ class SettingsDialog(QDialog):
             page.setObjectName("tabpage")
             page.setStyleSheet(f"QWidget#tabpage {{ background: {_PAGE}; }}")
             pl = QVBoxLayout(page)
-            pl.setSpacing(6)
+            pl.setSpacing(12)  # 카드 사이 — 라운드5 E2(여유) 채택
             pl.setContentsMargins(16, 12, 16, 12)
             pl.setAlignment(Qt.AlignmentFlag.AlignTop)  # 짧은 탭은 위로 붙임
             sc = QScrollArea()
@@ -693,7 +692,7 @@ class SettingsDialog(QDialog):
         def _group(title: str, tab: QVBoxLayout) -> tuple[QGroupBox, QFormLayout]:
             box = QGroupBox(title)
             form = QFormLayout(box)
-            form.setVerticalSpacing(4)
+            form.setVerticalSpacing(8)  # 카드 안 줄 사이 — 라운드5 E2
             form.setContentsMargins(10, 8, 10, 8)
             tab_forms.setdefault(id(tab), []).append(form)
             return box, form
@@ -736,12 +735,12 @@ class SettingsDialog(QDialog):
             lbl.setToolTip("고정 단축키 — 변경할 수 없습니다")
             lbl.setStyleSheet(
                 f"color:{_TITLE}; background:{_INSET}; border:1px solid {_LINE};"
-                f" border-radius:5px; padding:5px 8px;")
+                f" border-radius:5px; padding:7px 10px;")
             return lbl
 
         _combo_style = (
             f"QComboBox {{ background-color: {_INSET}; color: {_TXT}; "
-            f"border: 1px solid {_LINE}; border-radius: 5px; padding: 5px 8px; }}"
+            f"border: 1px solid {_LINE}; border-radius: 5px; padding: 7px 10px; }}"
             f"QComboBox:focus {{ border-color: {COLORS['peach']}; }}"
             f"QComboBox:hover {{ border-color: {COLORS['peach']}; }}"
         )
@@ -803,7 +802,7 @@ class SettingsDialog(QDialog):
         )
         self._bulk_path_paste_hotkey = HotkeyEdit()
         self._bulk_path_paste_hotkey.setToolTip(
-            "순차 경로 붙여넣기(Ctrl+Shift+[)의 '전체 자동주입' 버전.\n"
+            "순차 경로 붙여넣기(Ctrl+Shift+P)의 '전체 자동주입' 버전.\n"
             "큐에 남은 항목 전체를 순서대로 자동 붙여넣되, 이미지는 임시 PNG 경로 텍스트로 바꿔 붙입니다."
         )
         seq_grid_w = QWidget()
@@ -834,18 +833,6 @@ class SettingsDialog(QDialog):
         )
         seq_form.addRow("•  큐 자동 초기화", self._queue_idle_spin)
         tab_paste.addWidget(seq_group)
-
-        # 경로 붙여넣기(단발) — 큐와 무관하게 최신 이미지 하나를 경로로.
-        path_group, path_form = _group("경로 붙여넣기", tab_paste)
-        self._image_to_path_hotkey = HotkeyEdit()
-        self._image_to_path_hotkey.setToolTip(
-            "현재 클립보드 이미지를 임시 PNG로 저장하고 절대경로를 클립보드 텍스트로 교체합니다.\n"
-            "이어서 포그라운드 창에 Ctrl+V를 자동 전송합니다.\n"
-            "Claude Code CLI 등 '파일 경로 텍스트'를 첨부로 받는 앱에 한 키로 붙여넣기 위한 단축키.\n"
-            "팁: 패널에서 이미지 항목을 Alt를 누른 채 그 앱으로 드래그해도 같은 방식(경로 붙여넣기)으로 동작합니다."
-        )
-        path_form.addRow("•  최신 이미지 경로 붙여넣기", self._image_to_path_hotkey)
-        tab_paste.addWidget(path_group)
 
         # ════════════════════════ 「캡처·녹화」 탭 ════════════════════════
         capture_group, capture_form = _group("영역 캡처·핀", tab_capture)
@@ -1118,7 +1105,7 @@ class SettingsDialog(QDialog):
         # 벌크 2종은 2026-09-06 도입 때 이 목록에서 빠져 있었다(녹화 중 옛 단축키가 발동하던
         # 버그) — 2026-09-25 재배치 때 함께 넣었다.
         for _hk in (
-            self._panel_toggle_hotkey, self._image_to_path_hotkey,
+            self._panel_toggle_hotkey,
             self._seq_image_to_path_hotkey, self._bulk_paste_hotkey,
             self._bulk_path_paste_hotkey, self._capture_hotkey,
             self._pin_image_hotkey, self._record_hotkey,
@@ -1317,17 +1304,14 @@ class SettingsDialog(QDialog):
         self._ocr_hotkey.set_value(
             self._settings.get(self.KEY_OCR_HOTKEY, "ctrl+shift+s")
         )
-        self._image_to_path_hotkey.set_value(
-            self._settings.get(self.KEY_IMAGE_TO_PATH_HOTKEY, "ctrl+shift+p")
-        )
         self._seq_image_to_path_hotkey.set_value(
-            self._settings.get(self.KEY_SEQ_IMAGE_TO_PATH_HOTKEY, "ctrl+shift+[")
+            self._settings.get(self.KEY_SEQ_IMAGE_TO_PATH_HOTKEY, "ctrl+shift+p")
         )
         self._bulk_paste_hotkey.set_value(
             self._settings.get(self.KEY_BULK_PASTE_HOTKEY, "ctrl+shift+a")
         )
         self._bulk_path_paste_hotkey.set_value(
-            self._settings.get(self.KEY_BULK_PATH_PASTE_HOTKEY, "ctrl+shift+]")
+            self._settings.get(self.KEY_BULK_PATH_PASTE_HOTKEY, "ctrl+shift+[")
         )
         self._pin_image_hotkey.set_value(
             self._settings.get(self.KEY_PIN_IMAGE_HOTKEY, "alt+f3")
@@ -1663,10 +1647,9 @@ class SettingsDialog(QDialog):
         new_settings = {
             self.KEY_PANEL_TOGGLE: self._panel_toggle_hotkey.value() or "ctrl+space",
             self.KEY_OCR_HOTKEY: self._ocr_hotkey.value() or "ctrl+shift+s",
-            self.KEY_IMAGE_TO_PATH_HOTKEY: self._image_to_path_hotkey.value() or "ctrl+shift+p",
-            self.KEY_SEQ_IMAGE_TO_PATH_HOTKEY: self._seq_image_to_path_hotkey.value() or "ctrl+shift+[",
+            self.KEY_SEQ_IMAGE_TO_PATH_HOTKEY: self._seq_image_to_path_hotkey.value() or "ctrl+shift+p",
             self.KEY_BULK_PASTE_HOTKEY: self._bulk_paste_hotkey.value() or "ctrl+shift+a",
-            self.KEY_BULK_PATH_PASTE_HOTKEY: self._bulk_path_paste_hotkey.value() or "ctrl+shift+]",
+            self.KEY_BULK_PATH_PASTE_HOTKEY: self._bulk_path_paste_hotkey.value() or "ctrl+shift+[",
             self.KEY_PIN_IMAGE_HOTKEY: self._pin_image_hotkey.value() or "alt+f3",
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
             self.KEY_CAPTURE_USE_PRINTSCREEN: "1" if self._capture_printscreen_check.isChecked() else "0",

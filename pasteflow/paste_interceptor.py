@@ -5,8 +5,8 @@
   패널 토글    — 설정 가능 (기본 Ctrl+Space). RegisterHotKey 대신 WH_KEYBOARD_LL로
                  감지하여 Windows 탐색기 등 모든 포그라운드 앱에서 동작 보장.
   OCR 트리거   — 설정 가능 (기본 Ctrl+Shift+S).
-  이미지→경로 — 설정 가능 (기본 Ctrl+Shift+P). 현재 클립보드 이미지를 임시 PNG로
-                 저장 → 경로 텍스트로 교체 → 자동 Ctrl+V (Claude CLI 등 경로 첨부 앱용).
+  순차 경로   — 설정 가능 (기본 Ctrl+Shift+P, 전체는 Ctrl+Shift+[). 큐의 다음 이미지를 임시
+                 PNG로 저장 → 경로 텍스트로 교체 → 자동 Ctrl+V (Claude CLI 등 경로 첨부 앱용).
 
 일반 Ctrl+C는 모든 복사를 큐에 추가한다. PasteFlow가 Ctrl+C에 개입하지 않는다.
 """
@@ -254,7 +254,6 @@ class PasteInterceptor:
         on_toggle_panel: Optional[Callable[[], None]] = None,
         on_ocr_trigger: Optional[Callable[[], None]] = None,
         on_plain_paste: Optional[Callable[[], None]] = None,
-        on_image_to_path: Optional[Callable[[], None]] = None,
         on_seq_image_to_path: Optional[Callable[[], None]] = None,
         on_bulk_paste: Optional[Callable[[], None]] = None,
         on_bulk_path_paste: Optional[Callable[[], None]] = None,
@@ -271,7 +270,6 @@ class PasteInterceptor:
         self.on_toggle_panel = on_toggle_panel
         self.on_ocr_trigger = on_ocr_trigger
         self.on_plain_paste = on_plain_paste
-        self.on_image_to_path = on_image_to_path
         self.on_seq_image_to_path = on_seq_image_to_path
         self.on_bulk_paste = on_bulk_paste
         self.on_bulk_path_paste = on_bulk_path_paste
@@ -306,11 +304,6 @@ class PasteInterceptor:
         self._ocr_need_ctrl: bool = False
         self._ocr_need_shift: bool = False
         self._ocr_need_alt: bool = False
-        # 이미지→경로 단축키 (패널 토글과 동일 구조)
-        self._img2path_vk: int = 0
-        self._img2path_need_ctrl: bool = False
-        self._img2path_need_shift: bool = False
-        self._img2path_need_alt: bool = False
         # 순차 경로 붙여넣기 단축키 (이미지→경로의 큐 버전, 동일 구조)
         self._seqimg2path_vk: int = 0
         self._seqimg2path_need_ctrl: bool = False
@@ -321,7 +314,7 @@ class PasteInterceptor:
         self._bulk_need_ctrl: bool = False
         self._bulk_need_shift: bool = False
         self._bulk_need_alt: bool = False
-        # 순차 경로 붙여넣기 전체 자동주입 단축키 (Ctrl+Shift+[의 '벌크' 버전, 동일 구조)
+        # 순차 경로 붙여넣기 전체 자동주입 단축키 (Ctrl+Shift+P의 '벌크' 버전, 동일 구조)
         self._bulkpath_vk: int = 0
         self._bulkpath_need_ctrl: bool = False
         self._bulkpath_need_shift: bool = False
@@ -391,20 +384,6 @@ class PasteInterceptor:
             self._ocr_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._ocr_vk = 0
-
-    def set_image_to_path_hotkey(self, hotkey_str: str):
-        """이미지→경로 단축키 설정 — 현재 클립보드 이미지를 임시 PNG로 저장 후
-        절대경로를 클립보드 텍스트로 교체하고 자동 Ctrl+V."""
-        parts = hotkey_str.lower().replace(" ", "").split("+")
-        self._img2path_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
-        self._img2path_need_shift = "shift" in parts
-        self._img2path_need_alt   = "alt" in parts
-        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
-        if key_parts:
-            key = key_parts[-1]
-            self._img2path_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
-        else:
-            self._img2path_vk = 0
 
     def set_seq_image_to_path_hotkey(self, hotkey_str: str):
         """순차 경로 붙여넣기 단축키 설정 — 큐에서 다음 항목을 꺼내 이미지면 경로 텍스트로 붙여넣기."""
@@ -757,19 +736,7 @@ class PasteInterceptor:
                             pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)
 
-                # 이미지→경로 단축키 감지
-                if (self._img2path_vk and vk_code == self._img2path_vk
-                        and ctrl_pressed  == self._img2path_need_ctrl
-                        and shift_pressed == self._img2path_need_shift
-                        and alt_pressed   == self._img2path_need_alt):
-                    if self.on_image_to_path:
-                        try:
-                            self.on_image_to_path()
-                        except Exception:
-                            pass
-                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
-
-                # 순차 경로 붙여넣기 단축키 감지 (기본 Ctrl+Shift+[) — 이미지→경로의 큐 버전
+                # 순차 경로 붙여넣기 단축키 감지 (기본 Ctrl+Shift+P) — 큐에서 다음 항목을 경로로
                 if (self._seqimg2path_vk and vk_code == self._seqimg2path_vk
                         and ctrl_pressed  == self._seqimg2path_need_ctrl
                         and shift_pressed == self._seqimg2path_need_shift
@@ -794,7 +761,7 @@ class PasteInterceptor:
                             pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)
 
-                # 순차 경로 붙여넣기 전체 자동주입 단축키 감지 (기본 Ctrl+Shift+]) — Ctrl+Shift+[의 벌크 버전
+                # 순차 경로 붙여넣기 전체 자동주입 단축키 감지 (기본 Ctrl+Shift+[) — Ctrl+Shift+[의 벌크 버전
                 if (self._bulkpath_vk and vk_code == self._bulkpath_vk
                         and ctrl_pressed  == self._bulkpath_need_ctrl
                         and shift_pressed == self._bulkpath_need_shift

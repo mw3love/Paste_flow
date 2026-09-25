@@ -843,6 +843,35 @@ _OFFICIAL_KEYS = (
 )
 
 
+def _migrate_path_paste_hotkeys(db):
+    """1회 마이그레이션(2026-09-25): 한 번짜리 경로 붙여넣기 제거 + 경로 단축키 재배치.
+
+    옛 배치: 한 번짜리 Ctrl+Shift+P / 순차 경로 Ctrl+Shift+[ / 전체 경로 Ctrl+Shift+].
+    새 배치: 순차 경로(하나씩) Ctrl+Shift+P / 전체 경로 Ctrl+Shift+[ (] 없음) — 2×2 표에서
+    「경로」 열이 P(Path)·[ 두 키가 된다(사용자 요청).
+    설정창 [저장]은 모든 키를 DB에 쓰므로 기본값만 바꾸면 옛 키가 남는다 → 여기서 옮긴다.
+    **판정 재료 = `hotkey_image_to_path` 행이 남아 있는가**(옛 배치로 저장된 적 있음). 옮긴 뒤
+    그 행을 지우므로 두 번째 실행부터는 아무것도 안 한다(idempotent). 사용자가 바꿔 둔 키는
+    옛 기본값과 같을 때만 옮기고 나머지는 존중한다.
+    """
+    with db._lock:
+        row = db.conn.execute(
+            "SELECT 1 FROM settings WHERE key='hotkey_image_to_path'").fetchone()
+        if row is None:
+            return
+        cur = dict(db.conn.execute(
+            "SELECT key, value FROM settings WHERE key IN "
+            "('hotkey_seq_image_to_path','hotkey_bulk_path_paste')").fetchall())
+        if cur.get("hotkey_seq_image_to_path", "ctrl+shift+[") == "ctrl+shift+[":
+            db.conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)",
+                            ("hotkey_seq_image_to_path", "ctrl+shift+p"))
+        if cur.get("hotkey_bulk_path_paste", "ctrl+shift+]") == "ctrl+shift+]":
+            db.conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)",
+                            ("hotkey_bulk_path_paste", "ctrl+shift+["))
+        db.conn.execute("DELETE FROM settings WHERE key='hotkey_image_to_path'")
+        db.conn.commit()
+
+
 def _migrate_drop_official_backend(db):
     """1회 마이그레이션: official(Google AI Studio) 백엔드 잔재 제거. Idempotent.
 
@@ -895,7 +924,6 @@ class _SignalBridge(QObject):
     ocr_done           = pyqtSignal(str)     # 워커 스레드 → 메인: OCR 결과 텍스트
     ocr_error          = pyqtSignal(str)     # 워커 스레드 → 메인: 에러 메시지
     ocr_fallback       = pyqtSignal(str, str)  # 워커 스레드 → 메인: (실패 모델, 폴백 모델) 자동 폴백 알림
-    image_to_path      = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 경로 텍스트로 교체 후 Ctrl+V
     seq_image_to_path  = pyqtSignal()        # 훅 스레드 → 메인: 큐에서 다음 항목을 꺼내 이미지면 경로 텍스트로 순차 붙여넣기
     bulk_paste         = pyqtSignal()        # 훅 스레드 → 메인: 큐 전체를 간격 두고 순차 자동주입(Ctrl+Shift+V 벌크 버전)
     bulk_path_paste    = pyqtSignal()        # 훅 스레드 → 메인: 큐 전체를 경로 텍스트로 간격 두고 순차 자동주입(Ctrl+Shift+[ 벌크 버전)
@@ -939,7 +967,6 @@ class PasteFlowApp:
         self._bridge.ocr_error.connect(self._on_ocr_error)
         self._bridge.ocr_fallback.connect(self._on_ocr_fallback)
         self._bridge.plain_paste.connect(self._on_plain_paste)
-        self._bridge.image_to_path.connect(self._on_image_to_path_hotkey)
         self._bridge.seq_image_to_path.connect(self._on_seq_image_to_path_hotkey)
         self._bridge.bulk_paste.connect(self._on_bulk_paste_hotkey)
         self._bridge.bulk_path_paste.connect(self._on_bulk_path_paste_hotkey)
@@ -989,7 +1016,6 @@ class PasteFlowApp:
             on_toggle_panel=self._bridge.panel_toggle.emit,
             on_ocr_trigger=self._bridge.ocr_requested.emit,
             on_plain_paste=self._bridge.plain_paste.emit,
-            on_image_to_path=self._bridge.image_to_path.emit,
             on_seq_image_to_path=self._bridge.seq_image_to_path.emit,
             on_bulk_paste=self._bridge.bulk_paste.emit,
             on_bulk_path_paste=self._bridge.bulk_path_paste.emit,
@@ -1048,15 +1074,11 @@ class PasteFlowApp:
         self._fg_hook = None
         self._fg_proc = None
 
-        # 이미지→경로(Ctrl+Shift+P) 임시 PNG 캐시: (item_id, saved_path) 또는 None.
-        # 같은 최신 이미지에 반복 실행 시 디스크 재저장을 피하기 위함.
-        self._img_to_path_cache = None
-
-        # 직전 이미지→경로(Ctrl+Shift+P·Ctrl+Shift+[)로 클립보드에 올린 임시 PNG 경로.
+        # 직전 순차 경로 붙여넣기(Ctrl+Shift+P·Ctrl+Shift+[)로 클립보드에 올린 임시 PNG 경로.
         # Alt+F3 핀이 이 경로가 클립보드에 남아 있으면 경로 문자열이 아니라 원본 이미지를 핀한다.
         self._last_pasted_image_path: str | None = None
 
-        # 벌크(전체 자동주입) 진행 중 플래그 — Ctrl+Shift+A/Ctrl+Shift+] 둘이 공유.
+        # 벌크(전체 자동주입) 진행 중 플래그 — Ctrl+Shift+A/Ctrl+Shift+[ 둘이 공유.
         # 재진입(같은 키 연타·다른 벌크 키 겹눌림) 방지 + HUD ✕ 취소 시 루프를 멈추는 신호로도 쓴다.
         self._bulk_paste_active: bool = False
 
@@ -1107,16 +1129,13 @@ class PasteFlowApp:
         ocr_hotkey = self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s")
         self.interceptor.set_ocr_hotkey(ocr_hotkey)
 
-        img2path_hotkey = self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p")
-        self.interceptor.set_image_to_path_hotkey(img2path_hotkey)
-
-        seq_img2path_hotkey = self.db.get_setting("hotkey_seq_image_to_path", "ctrl+shift+[")
+        seq_img2path_hotkey = self.db.get_setting("hotkey_seq_image_to_path", "ctrl+shift+p")
         self.interceptor.set_seq_image_to_path_hotkey(seq_img2path_hotkey)
 
         bulk_paste_hotkey = self.db.get_setting("hotkey_bulk_paste", "ctrl+shift+a")
         self.interceptor.set_bulk_paste_hotkey(bulk_paste_hotkey)
 
-        bulk_path_paste_hotkey = self.db.get_setting("hotkey_bulk_path_paste", "ctrl+shift+]")
+        bulk_path_paste_hotkey = self.db.get_setting("hotkey_bulk_path_paste", "ctrl+shift+[")
         self.interceptor.set_bulk_path_paste_hotkey(bulk_path_paste_hotkey)
 
         pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
@@ -1183,7 +1202,7 @@ class PasteFlowApp:
         """큐를 비우고 tray·패널 하이라이트를 초기화 (큐 포기/클리어 공통 경로).
 
         '큐를 언제 비울지' 정책의 '포기/클리어' 범주가 공유: 일반 Ctrl+V, 큐 소진 완료,
-        HUD ✕ 취소, 우클릭 큐 해제, Ctrl+Shift+P 단발 경로 붙여넣기.
+        HUD ✕ 취소, 우클릭 큐 해제.
         """
         self.queue.clear()
         self.tray.update_queue_status(0, 0)
@@ -1202,7 +1221,7 @@ class PasteFlowApp:
     def _on_cancel_paste_queue(self):
         """HUD ✕ 클릭 — 남은 붙여넣기 취소: 큐 비우기 + 표시 초기화 + HUD 즉시 닫기
 
-        벌크 자동주입(Ctrl+Shift+A/Ctrl+Shift+]) 진행 중이면 플래그를 내려 다음
+        벌크 자동주입(Ctrl+Shift+A/Ctrl+Shift+[) 진행 중이면 플래그를 내려 다음
         예약된 스텝(_bulk_paste_step)이 스스로 멈추게 한다(큐가 비어도 이미 예약된
         QTimer 콜백은 취소되지 않으므로, 콜백 시작 시 이 플래그를 확인해야 함).
         """
@@ -1268,12 +1287,6 @@ class PasteFlowApp:
 
         saved_item = self._persist_clipboard_item(item)
         self._pin_place_item_id = saved_item.id
-
-        if saved_path:
-            # 캡처 직후 Ctrl+Shift+P를 누르는 것이 흔한 흐름(캡처→경로 붙여넣기)이라,
-            # 이미지→경로 단축키의 재사용 캐시에 이 경로를 미리 등록해 둔다 — 그러면
-            # temp에 별도 사본을 또 만들지 않고 방금 저장한 이 파일 경로를 그대로 쓴다.
-            self._img_to_path_cache = (saved_item.id, saved_path)
 
         # 일반 복사와 동일한 토스트(Q{n} 배지+썸네일)로 통일 — "캡처됨" 문구·파일명
         # 노출 없이 텍스트/이미지 복사와 같은 UX로 몇 번째 큐에 걸렸는지 바로 보여준다.
@@ -1682,92 +1695,16 @@ class PasteFlowApp:
             f"경로 복사됨: {os.path.basename(saved_path)}",
             icon="", image_path=saved_path)
 
-    def _on_image_to_path_hotkey(self):
-        """이미지→경로 단축키(기본 Ctrl+Shift+P) — 최신 히스토리 이미지를 임시 PNG로 저장 후
-        절대경로 텍스트로 클립보드 교체 → 단축키를 누른 포그라운드 창에 자동 Ctrl+V.
-
-        Claude Code CLI 등 "이미지 파일 경로를 첨부로 받는" 앱에 한 키로 바로 붙여넣기 위한 경로.
-
-        **소스 = 라이브 클립보드가 아니라 최신 히스토리 항목**(Ctrl+V의 "마지막 복사물"에 대응).
-        경로 텍스트는 히스토리에 안 남으므로(_set_clipboard의 self_triggered) 원본 이미지가
-        최신 자리에 유지돼 이 키를 여러 번 눌러도 같은 이미지를 무한히 경로로 붙일 수 있다
-        (Ctrl+V의 무한 반복과 대칭). 같은 항목에 반복 실행 시 _img_to_path_cache로 저장된 경로를
-        재사용해 디스크 재저장을 피한다 — 이 캐시는 영역 캡처(Alt+F2)도 채워 넣는다(2026-08-02):
-        캡처→Ctrl+Shift+P가 흔한 흐름이라, 그때는 temp에 새로 안 만들고 캡처가 이미 저장해 둔
-        캡처 폴더의 파일 경로를 그대로 쓴다. 최신 항목이 이미지가 아니면 토스트만 표시(경로
-        붙여넣기는 이미지에만 의미) — 큐 기반 순차 경로 붙여넣기는 Ctrl+Shift+[가 담당.
-
-        **클립보드는 붙여넣기 직후 원본 이미지로 복원된다**(주입 250ms 후) — 그렇지 않으면
-        실제 Windows 클립보드에 경로 텍스트만 남아, 이 단축키 다음에 일반 Ctrl+V를 누르면
-        이미지가 아니라 경로가 또 붙는 문제가 있었다(2026-08-01). 복원 덕에 "이 키=경로,
-        일반 Ctrl+V=이미지"가 독립된 동작으로 쓰인다. 단 복원 전 250ms 창 안에 수동으로
-        Ctrl+V를 누르면 여전히 경로가 붙는다(사실상 무시할 수 있는 짧은 창).
-
-        주의: 발화 시점에 사용자가 Ctrl+Shift를 여전히 누르고 있으므로 `_send_ctrl_v_plain`
-        (수정키 처리 없는 단순 Ctrl+V)을 그대로 쓰면 OS가 Ctrl+Shift+V로 인식해 실패한다.
-        Ctrl+Shift+V 순차 붙여넣기와 동일하게 `_send_clean_key(VK_V)`로 수정키 해제·복원·
-        입력기 전환 마스킹을 거쳐 주입해야 한다.
-        """
-        from pasteflow.ui.toast import ToastNotification
-        from pasteflow.paste_interceptor import VK_V
-
-        recent = self.db.get_recent_items(limit=1)
-        item = recent[0] if recent else None
-        if item is None or item.content_type != "image" or not item.image_data:
-            ToastNotification("최근 복사 항목이 이미지가 아닙니다", icon="🔤")
-            return
-
-        # 캐시된 경로가 같은 항목의 것이고 파일이 아직 있으면 재사용(반복 실행 디스크 절약)
-        saved_path = None
-        if self._img_to_path_cache is not None:
-            cached_id, cached_path = self._img_to_path_cache
-            if cached_id == item.id and item.id is not None and os.path.exists(cached_path):
-                saved_path = cached_path
-        if saved_path is None:
-            try:
-                saved_path = _save_image_to_drop_temp(item.image_data)
-            except Exception as e:
-                ToastNotification(f"임시 파일 저장 실패 — {e}", icon="🔤")
-                return
-            self._img_to_path_cache = (item.id, saved_path)
-
-        # Alt+F3 핀이 "방금 붙여넣은 경로"를 원본 이미지로 되살리기 위해 경로를 기억
-        self._last_pasted_image_path = saved_path
-
-        path_item = ClipboardItem(
-            content_type="text",
-            text_content=saved_path,
-            preview_text=saved_path[:200],
-        )
-        # _set_clipboard가 monitor._self_triggered를 설정해 히스토리 자동 추가 방지
-        self.interceptor._set_clipboard(path_item)
-
-        # 50ms 후 Ctrl+V 주입 — _send_clean_key가 사용자 Ctrl/Shift 해제 → Ctrl+V → 복원
-        QTimer.singleShot(50, lambda: self.interceptor._send_clean_key(VK_V))
-        # 붙여넣기 대상 앱이 클립보드를 다 읽고 난 뒤(주입 후 200ms 여유) 클립보드를
-        # 원본 이미지로 되돌린다 — 안 그러면 실제 Windows 클립보드에 경로 텍스트만
-        # 남아, 이 단축키 이후 사용자가 일반 Ctrl+V를 누르면 이미지가 아니라 경로가
-        # 또 붙는다(2026-08-01 사용자 리포트). 복원도 self_triggered라 히스토리에
-        # 중복 추가되지 않는다(0.5초 무시창 안이라 안전).
-        QTimer.singleShot(250, lambda: self.interceptor._set_clipboard(item))
-        # 단발 경로 붙여넣기는 큐가 아닌 현재 클립보드를 붙이는 '이탈' — 일반 Ctrl+V처럼
-        # 큐를 클리어해 일관성 유지(큐 기반 경로 붙여넣기는 Ctrl+Shift+[가 담당)
-        self._clear_queue_ui()
-        # 썸네일을 함께 띄워 "의도한 이미지가 맞는지" 그 자리에서 시각 확인
-        ToastNotification(
-            f"경로 붙여넣음: {os.path.basename(saved_path)}",
-            icon="", image_path=saved_path)
-
     def _on_seq_image_to_path_hotkey(self):
-        """순차 경로 붙여넣기 단축키(기본 Ctrl+Shift+[) — 큐에서 다음 항목을 꺼내되
+        """순차 경로 붙여넣기 단축키(기본 Ctrl+Shift+P) — 큐에서 다음 항목을 꺼내되
         이미지면 임시 PNG 경로 텍스트로 렌더해 붙여넣는다.
 
         Ctrl+Shift+V(순차)와 **같은 큐·포인터를 공유하는 '경로 버전'**. 캡처(Alt+F2)가
         이미 큐에 이미지로 쌓이므로(_on_capture_region → _persist_clipboard_item), 캡처
         여러 장을 이 키로 순서대로 경로 텍스트로 붙일 수 있다(예: 캡처1·2 → 이 키 두 번 →
         경로1·2). 이미지가 아닌 항목은 원본 그대로 붙여(Ctrl+Shift+V와 동일). 큐가 소진되면
-        토스트만 표시하고 아무것도 하지 않는다(현재 클립보드 폴백은 일반 Ctrl+Shift+P가 담당 —
-        '순차/일반'을 키로 구분하는 원칙 유지).
+        토스트만 표시하고 아무것도 하지 않는다(옛 한 번짜리 경로 붙여넣기는 2026-09-25 제거 —
+        같은 경로를 여러 번 붙일 일이 드물고, 필요하면 패널에서 따로 복사한다).
 
         클립보드 교체는 _set_clipboard(모니터 재감지 방지)로, 주입은 _send_clean_key(VK_V)로
         수정키(Ctrl+Shift+Alt) 해제·복원 + 입력기 전환 마스킹을 거친다(일반 경로 붙여넣기와 동일).
@@ -1834,7 +1771,7 @@ class PasteFlowApp:
         self._start_bulk_paste(mode="normal")
 
     def _on_bulk_path_paste_hotkey(self):
-        """순차 경로 붙여넣기 전체 자동주입 단축키(기본 Ctrl+Shift+]) — Ctrl+Shift+[의 '벌크' 버전.
+        """순차 경로 붙여넣기 전체 자동주입 단축키(기본 Ctrl+Shift+[) — Ctrl+Shift+P의 '벌크' 버전.
 
         이미지 항목은 임시 PNG 경로 텍스트로, 그 외는 원본 그대로 순서대로 자동 주입한다.
         """
@@ -1859,7 +1796,7 @@ class PasteFlowApp:
         """벌크 자동주입 한 스텝 — 항목 하나를 주입하고 남았으면 다음 스텝을 예약한다.
 
         mode="normal"은 Ctrl+Shift+V와 동일하게 원본 그대로, mode="path"는
-        Ctrl+Shift+[와 동일하게 이미지를 임시 PNG 경로 텍스트로 바꿔 주입한다.
+        Ctrl+Shift+P와 동일하게 이미지를 임시 PNG 경로 텍스트로 바꿔 주입한다.
         HUD ✕ 취소(_on_cancel_paste_queue)가 _bulk_paste_active를 False로 내리면
         다음 예약된 스텝이 여기서 조용히 멈춘다(이미 예약된 QTimer 콜백 자체는
         취소되지 않으므로, 실행 시점에 이 플래그를 확인하는 것으로 대신한다).
@@ -2877,6 +2814,9 @@ class PasteFlowApp:
         # 초기화보다 반드시 뒤에 와야 한다(ocr_gemini_model_gateway를 여기서 지운다).
         _migrate_drop_ai_query_feature(self.db)
 
+        # 한 번짜리 경로 붙여넣기 제거 + 경로 단축키 재배치(P=하나씩, [=전체). Idempotent.
+        _migrate_path_paste_hotkeys(self.db)
+
         # 시크릿 암호화 + 고아 키 purge. Idempotent.
         _migrate_secrets(self.db)
 
@@ -2918,10 +2858,9 @@ class PasteFlowApp:
             "history_max": self.db.get_setting("history_max", "50"),
             "auto_start": self.db.get_setting("auto_start", "0"),
             "hotkey_ocr_trigger": self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s"),
-            "hotkey_image_to_path": self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p"),
-            "hotkey_seq_image_to_path": self.db.get_setting("hotkey_seq_image_to_path", "ctrl+shift+["),
+            "hotkey_seq_image_to_path": self.db.get_setting("hotkey_seq_image_to_path", "ctrl+shift+p"),
             "hotkey_bulk_paste": self.db.get_setting("hotkey_bulk_paste", "ctrl+shift+a"),
-            "hotkey_bulk_path_paste": self.db.get_setting("hotkey_bulk_path_paste", "ctrl+shift+]"),
+            "hotkey_bulk_path_paste": self.db.get_setting("hotkey_bulk_path_paste", "ctrl+shift+["),
             "hotkey_pin_image": self.db.get_setting("hotkey_pin_image", "alt+f3"),
             "hotkey_capture": self.db.get_setting("hotkey_capture", "alt+f2"),
             "hotkey_record": self.db.get_setting("hotkey_record", "ctrl+shift+r"),
@@ -2975,10 +2914,9 @@ class PasteFlowApp:
         # 단축키 비교는 DB 저장 전에 이전 값을 먼저 읽어야 함
         old_hotkey = self.db.get_setting("hotkey_panel_toggle", "ctrl+space")
         old_ocr_hotkey = self.db.get_setting("hotkey_ocr_trigger", "ctrl+shift+s")
-        old_img2path_hotkey = self.db.get_setting("hotkey_image_to_path", "ctrl+shift+p")
-        old_seq_img2path_hotkey = self.db.get_setting("hotkey_seq_image_to_path", "ctrl+shift+[")
+        old_seq_img2path_hotkey = self.db.get_setting("hotkey_seq_image_to_path", "ctrl+shift+p")
         old_bulk_paste_hotkey = self.db.get_setting("hotkey_bulk_paste", "ctrl+shift+a")
-        old_bulk_path_paste_hotkey = self.db.get_setting("hotkey_bulk_path_paste", "ctrl+shift+]")
+        old_bulk_path_paste_hotkey = self.db.get_setting("hotkey_bulk_path_paste", "ctrl+shift+[")
         old_pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         old_capture_use_printscreen = self.db.get_setting("capture_use_printscreen", "1")
@@ -3001,13 +2939,8 @@ class PasteFlowApp:
         if old_ocr_hotkey != new_ocr_hotkey:
             self.interceptor.set_ocr_hotkey(new_ocr_hotkey)
 
-        # 이미지→경로 단축키 재설정
-        new_img2path_hotkey = new_settings.get("hotkey_image_to_path", "ctrl+shift+p")
-        if old_img2path_hotkey != new_img2path_hotkey:
-            self.interceptor.set_image_to_path_hotkey(new_img2path_hotkey)
-
         # 순차 경로 붙여넣기 단축키 재설정
-        new_seq_img2path_hotkey = new_settings.get("hotkey_seq_image_to_path", "ctrl+shift+[")
+        new_seq_img2path_hotkey = new_settings.get("hotkey_seq_image_to_path", "ctrl+shift+p")
         if old_seq_img2path_hotkey != new_seq_img2path_hotkey:
             self.interceptor.set_seq_image_to_path_hotkey(new_seq_img2path_hotkey)
 
@@ -3017,7 +2950,7 @@ class PasteFlowApp:
             self.interceptor.set_bulk_paste_hotkey(new_bulk_paste_hotkey)
 
         # 순차 경로 붙여넣기 전체 자동주입 단축키 재설정
-        new_bulk_path_paste_hotkey = new_settings.get("hotkey_bulk_path_paste", "ctrl+shift+]")
+        new_bulk_path_paste_hotkey = new_settings.get("hotkey_bulk_path_paste", "ctrl+shift+[")
         if old_bulk_path_paste_hotkey != new_bulk_path_paste_hotkey:
             self.interceptor.set_bulk_path_paste_hotkey(new_bulk_path_paste_hotkey)
 
