@@ -471,8 +471,7 @@ class SettingsDialog(QDialog):
     KEY_PIN_IMAGE_HOTKEY = "hotkey_pin_image"
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
     KEY_CAPTURE_USE_PRINTSCREEN = "capture_use_printscreen"
-    KEY_RECORD_GIF_HOTKEY = "hotkey_record_gif"
-    KEY_RECORD_VIDEO_HOTKEY = "hotkey_record_video"
+    KEY_RECORD_HOTKEY = "hotkey_record"  # GIF/영상 공용(영역 선택 뒤 방식 선택)
     KEY_GIF_SHOW_CURSOR = "gif_show_cursor"
     KEY_GIF_FPS = "gif_fps"
     KEY_GIF_MAX_SECONDS = "gif_max_seconds"
@@ -738,22 +737,13 @@ class SettingsDialog(QDialog):
         )
         hotkey_form.addRow("•  핀:", self._pin_image_hotkey)
 
-        self._record_gif_hotkey = HotkeyEdit()
-        self._record_gif_hotkey.setToolTip(
-            "화면 영역을 드래그로 선택해 GIF로 녹화합니다.\n"
-            "녹화 중 뜨는 ■ 정지 버튼(또는 ESC로 취소)으로 끝내면 GIF로 저장되고\n"
-            "파일 경로가 클립보드에 복사됩니다(노션·슬랙 등엔 파일/경로로 넘김).\n"
-            "선택이 시작된 단일 모니터만 녹화됩니다(MVP)."
+        self._record_hotkey = HotkeyEdit()
+        self._record_hotkey.setToolTip(
+            "화면 영역을 드래그로 선택한 뒤, 뜨는 버튼에서 GIF 또는 영상(MP4)을 골라 녹화합니다.\n"
+            "G=GIF, V=영상, Enter=지난번 선택, ESC=취소. 녹화 중 ■ 정지 또는 ESC로 끝냅니다.\n"
+            "저장된 파일 경로가 클립보드에 복사됩니다."
         )
-        hotkey_form.addRow("•  GIF 녹화:", self._record_gif_hotkey)
-
-        self._record_video_hotkey = HotkeyEdit()
-        self._record_video_hotkey.setToolTip(
-            "화면 영역을 드래그로 선택해 MP4 영상으로 녹화합니다(GIF 녹화와 같은 방식).\n"
-            "GIF보다 파일 용량이 훨씬 작고 길게 녹화할 수 있습니다(최대 길이 제한 없음).\n"
-            "■ 정지 버튼(또는 ESC로 취소)으로 끝내면 저장되고 파일 경로가 클립보드에 복사됩니다."
-        )
-        hotkey_form.addRow("•  영상 녹화:", self._record_video_hotkey)
+        hotkey_form.addRow("•  녹화:", self._record_hotkey)
 
         # ── AI 단축키 그룹 — Gemini 호출/Gemini(캡처)/OCR/STT(2026-08-04: 「일반」 탭
         # 기능 단축키에서 「AI」 탭으로 이동, 사용자 요청 — 이 4개만 AI 호출 기능이라
@@ -795,8 +785,7 @@ class SettingsDialog(QDialog):
         for _hk in (
             self._panel_toggle_hotkey, self._image_to_path_hotkey,
             self._seq_image_to_path_hotkey, self._capture_hotkey,
-            self._pin_image_hotkey, self._record_gif_hotkey,
-            self._record_video_hotkey,
+            self._pin_image_hotkey, self._record_hotkey,
             self._ocr_hotkey,
             self._stt_hotkey,
         ):
@@ -1341,11 +1330,8 @@ class SettingsDialog(QDialog):
         self._capture_printscreen_check.setChecked(
             self._settings.get(self.KEY_CAPTURE_USE_PRINTSCREEN, "1") == "1"
         )
-        self._record_gif_hotkey.set_value(
-            self._settings.get(self.KEY_RECORD_GIF_HOTKEY, "ctrl+shift+g")
-        )
-        self._record_video_hotkey.set_value(
-            self._settings.get(self.KEY_RECORD_VIDEO_HOTKEY, "ctrl+shift+r")
+        self._record_hotkey.set_value(
+            self._settings.get(self.KEY_RECORD_HOTKEY, "ctrl+shift+r")
         )
         self._stt_hotkey.set_value(
             self._settings.get(self.KEY_STT_HOTKEY, "ctrl+win")
@@ -1680,8 +1666,7 @@ class SettingsDialog(QDialog):
             self.KEY_PIN_IMAGE_HOTKEY: self._pin_image_hotkey.value() or "alt+f3",
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
             self.KEY_CAPTURE_USE_PRINTSCREEN: "1" if self._capture_printscreen_check.isChecked() else "0",
-            self.KEY_RECORD_GIF_HOTKEY: self._record_gif_hotkey.value() or "ctrl+shift+g",
-            self.KEY_RECORD_VIDEO_HOTKEY: self._record_video_hotkey.value() or "ctrl+shift+r",
+            self.KEY_RECORD_HOTKEY: self._record_hotkey.value() or "ctrl+shift+r",
             self.KEY_STT_HOTKEY: self._stt_hotkey.value() or "ctrl+win",
             self.KEY_CAPTURE_FOLDER: self._capture_folder_edit.text(),
             # OCR은 별도 엔진 선택 없이 항상 AI(Gemini/Mindlogic) API로 처리 → kind 고정.

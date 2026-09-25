@@ -260,8 +260,7 @@ class PasteInterceptor:
         on_bulk_path_paste: Optional[Callable[[], None]] = None,
         on_pin_image: Optional[Callable[[], None]] = None,
         on_capture: Optional[Callable[[], None]] = None,
-        on_record_gif: Optional[Callable[[], None]] = None,
-        on_record_video: Optional[Callable[[], None]] = None,
+        on_record: Optional[Callable[[], None]] = None,
         on_stt_start: Optional[Callable[[], None]] = None,
         on_stt_stop: Optional[Callable[[], None]] = None,
     ):
@@ -278,8 +277,7 @@ class PasteInterceptor:
         self.on_bulk_path_paste = on_bulk_path_paste
         self.on_pin_image = on_pin_image
         self.on_capture = on_capture
-        self.on_record_gif = on_record_gif
-        self.on_record_video = on_record_video
+        self.on_record = on_record
         self.on_stt_start = on_stt_start
         self.on_stt_stop = on_stt_stop
         self._hook = None
@@ -343,16 +341,11 @@ class PasteInterceptor:
         # 때만 발동해 Alt+PrtScn(활성창 캡처)·Win+PrtScn(전체화면 파일저장) 등 다른 OS
         # 조합은 건드리지 않는다.
         self._capture_via_printscreen: bool = False
-        # GIF 녹화 단축키 (패널 토글과 동일 구조)
+        # 녹화 단축키 — GIF/영상 공용, 영역 선택 뒤 방식을 고른다 (패널 토글과 동일 구조)
         self._record_vk: int = 0
         self._record_need_ctrl: bool = False
         self._record_need_shift: bool = False
         self._record_need_alt: bool = False
-        # 영상(MP4) 녹화 단축키 (GIF 녹화와 동일 구조)
-        self._record_video_vk: int = 0
-        self._record_video_need_ctrl: bool = False
-        self._record_video_need_shift: bool = False
-        self._record_video_need_alt: bool = False
         # 음성 입력(STT) 단축키 — 다른 단축키와 달리 keydown(녹음 시작)·keyup(녹음 종료+전송)
         # 둘 다 동작하는 푸시투토크 패턴이라 진행 상태(_stt_active)를 별도로 추적한다.
         self._stt_vk: int = 0
@@ -482,8 +475,8 @@ class PasteInterceptor:
         """PrintScreen 키를 영역 캡처(Alt+F2)의 추가 트리거로 쓸지 설정한다."""
         self._capture_via_printscreen = bool(enabled)
 
-    def set_record_gif_hotkey(self, hotkey_str: str):
-        """GIF 녹화 단축키 설정 — 영역을 드래그로 선택해 라이브로 녹화, GIF로 저장."""
+    def set_record_hotkey(self, hotkey_str: str):
+        """녹화 단축키 설정 — 영역을 드래그로 선택한 뒤 GIF/영상 중 골라 라이브로 녹화."""
         parts = hotkey_str.lower().replace(" ", "").split("+")
         self._record_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
         self._record_need_shift = "shift" in parts
@@ -494,19 +487,6 @@ class PasteInterceptor:
             self._record_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._record_vk = 0
-
-    def set_record_video_hotkey(self, hotkey_str: str):
-        """영상(MP4) 녹화 단축키 설정 — GIF 녹화와 같은 방식으로 영역을 드래그로 선택."""
-        parts = hotkey_str.lower().replace(" ", "").split("+")
-        self._record_video_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
-        self._record_video_need_shift = "shift" in parts
-        self._record_video_need_alt   = "alt" in parts
-        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
-        if key_parts:
-            key = key_parts[-1]
-            self._record_video_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
-        else:
-            self._record_video_vk = 0
 
     def set_stt_hotkey(self, hotkey_str: str):
         """음성 입력(STT) 단축키 설정 — 누르고 있는 동안 녹음(푸시투토크), 떼면 인식+전송.
@@ -868,29 +848,16 @@ class PasteInterceptor:
                             pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지, OS 기본 PrtScn 동작 차단)
 
-                # GIF 녹화 단축키 감지 (기본 Ctrl+Shift+G)
+                # 녹화 단축키 감지 (기본 Ctrl+Shift+R) — GIF/영상은 영역 선택 뒤 고른다
                 if (self._record_vk and vk_code == self._record_vk
                         and ctrl_pressed  == self._record_need_ctrl
                         and shift_pressed == self._record_need_shift
                         and alt_pressed   == self._record_need_alt):
                     # 선택 오버레이·정지 컨트롤러가 포그라운드를 잡도록 잠금 해제 (캡처 트리거와 동일)
                     _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
-                    if self.on_record_gif:
+                    if self.on_record:
                         try:
-                            self.on_record_gif()
-                        except Exception:
-                            pass
-                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
-
-                # 영상(MP4) 녹화 단축키 감지 (기본 Ctrl+Shift+R, GIF 녹화와 동일 구조)
-                if (self._record_video_vk and vk_code == self._record_video_vk
-                        and ctrl_pressed  == self._record_video_need_ctrl
-                        and shift_pressed == self._record_video_need_shift
-                        and alt_pressed   == self._record_video_need_alt):
-                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
-                    if self.on_record_video:
-                        try:
-                            self.on_record_video()
+                            self.on_record()
                         except Exception:
                             pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)
