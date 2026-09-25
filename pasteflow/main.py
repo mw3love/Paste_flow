@@ -716,10 +716,6 @@ def _resolve_db_path() -> str:
 # 읽기/쓰기 시 자동 복호화/암호화. 다른 PC 복호화 불가(설계상 — 동기화 폐지됨).
 _SECRET_KEYS = frozenset({
     "ocr_gemini_api_key_gateway",
-    # API 프로필 묶음(OCR 크리덴셜 전환용) — JSON 안에 각 프로필의 api_key가 들어 있어
-    # 통째로 비밀이다. 설정창엔 _get_secret으로 복호화해 넘기고, 저장 시 crypto.protect가
-    # JSON 전체를 암호화.
-    "ai_profiles",
 })
 
 # 과거 빌드의 잔재로 DB에 남았으나 현재 코드 어디서도 참조하지 않는 고아 키.
@@ -752,6 +748,10 @@ _ORPHAN_KEYS = (
     "hotkey_ask_ai",
     "hotkey_capture_ask",
     "ai_palette_sites",
+    # 2026-09-25 제거된 API 프로필(여러 크리덴셜 전환). ai_profiles는 JSON 안에 각 프로필의
+    # api_key를 품은 DPAPI 암호문이라, 기능이 사라진 지금 남겨둘 이유가 없다.
+    "ai_profiles",
+    "ai_active_profile",
 )
 
 
@@ -2101,7 +2101,7 @@ class PasteFlowApp:
 
     # ── 음성 입력(STT) — 푸시투토크: keydown=녹음 시작, keyup=녹음 종료+게이트웨이 전송 ──
     # 게이트웨이 오디오 입력은 Gemini 계열만 지원(2026-08-02 실측, stt_engine.py 참고).
-    # api_key/base_url은 OCR과 같은 AI 프로필을 공유하고 모델만 별도 슬롯을 쓴다.
+    # api_key/base_url은 OCR과 같은 크리덴셜을 공유하고 모델만 별도 슬롯을 쓴다.
 
     def _resolve_stt_cfg(self) -> tuple[str, str, str]:
         """STT용 게이트웨이 설정 — (api_key, base_url, model). 크리덴셜은 OCR과 공유,
@@ -2931,10 +2931,6 @@ class PasteFlowApp:
             "ocr_gemini_model_cache_gateway": self.db.get_setting("ocr_gemini_model_cache_gateway", ""),
             # OCR 전용 모델 슬롯 (API 키를 쓰는 유일한 경로 — v1.6x에서 AI 질의 기능 제거)
             "ocr_model_gateway": self.db.get_setting("ocr_model_gateway", ""),
-            # API 프로필(OCR 크리덴셜 전환용) — 묶음은 api_key를 품어 DPAPI 암호화돼
-            # 있으므로 복호화해 넘긴다.
-            "ai_profiles": self._get_secret("ai_profiles"),
-            "ai_active_profile": self.db.get_setting("ai_active_profile", ""),
             "notify_on_copy": self.db.get_setting("notify_on_copy", "1"),
             "queue_idle_reset_sec": self.db.get_setting("queue_idle_reset_sec", "10"),
         }
