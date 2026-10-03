@@ -430,7 +430,7 @@ pasteflow/
 ├── clipboard_monitor.py    # 클립보드 감시 (WM_CLIPBOARDUPDATE)
 ├── paste_queue.py          # 순차 붙여넣기 큐 & 포인터 관리 (핵심)
 ├── paste_interceptor.py    # Ctrl+Shift+V 감지 → 클립보드 교체 실행 (핵심)
-├── hotkey_manager.py       # 글로벌 단축키 등록/해제 유틸 (현재 미사용)
+├── hotkey_manager.py       # 특수 키 이름 → VK 코드 표(_SPECIAL_KEY_MAP)만 남음
 ├── database.py             # SQLite CRUD
 ├── models.py               # ClipboardItem 데이터 모델
 └── ui/
