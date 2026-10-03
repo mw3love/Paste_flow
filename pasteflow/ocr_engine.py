@@ -1,11 +1,9 @@
-"""OCR 엔진 추상화 — Windows WinRT 기본, Gemini 옵션.
+"""OCR 엔진 — OpenAI 호환 게이트웨이(AI API)로 글자를 읽는다.
 
 설계
 ----
 - recognize(PIL.Image) → str (동기). UI 블로킹 방지를 위해 호출자가 워커 스레드에서 실행.
-- winocr 패키지가 winrt-* 계열을 래핑해 recognize_pil_sync() 동기 API를 제공.
-  winsdk는 Python 3.14 미지원으로 채택하지 않음.
-- 언어 지원 확인은 winrt.windows.media.ocr.OcrEngine.is_language_supported()로.
+- 옛 Windows WinRT 엔진(winocr)은 v1.28.0부터 앱이 쓰지 않아 2026-10-03 코드째 제거했다.
 """
 from __future__ import annotations
 
@@ -14,7 +12,7 @@ from typing import Literal, NamedTuple, Optional
 
 from PIL import Image
 
-EngineKind = Literal["winrt", "gemini"]
+EngineKind = Literal["gemini"]
 
 
 def _normalize_base_url(base_url: str) -> str:
@@ -192,30 +190,6 @@ def select_fallback_model(failed_model: str) -> Optional[str]:
     return None
 
 
-# WinRT OcrEngine.MaxImageDimension (4096px 초과 이미지는 에러)
-_WINRT_MAX_DIM = 4096
-# OCR 전 이미지 4방향 여백 — 한 줄짜리 좁은 이미지에서 WinRT 인식률 향상
-_OCR_PAD = 16
-
-# ── winocr/winrt lazy load ──────────────────────────────────────────────────
-_winocr_checked = False
-_winocr_error: Optional[str] = None
-
-
-def _check_winocr() -> bool:
-    """winocr 패키지 import 가능 여부를 한 번 확인하고 캐시."""
-    global _winocr_checked, _winocr_error
-    if _winocr_checked:
-        return _winocr_error is None
-    try:
-        import winocr  # noqa: F401
-        _winocr_error = None
-    except ImportError as e:
-        _winocr_error = f"winocr 미설치: {e}. pip install winocr"
-    _winocr_checked = True
-    return _winocr_error is None
-
-
 # ── OpenAI 호환 클라이언트 캐시 ──────────────────────────────────────────────
 # 옛 코드는 OCR 호출마다 openai.OpenAI()를 새로 만들었다 — 그러면 매 호출이 TCP+TLS
 # 핸드셰이크를 새로 치른다(연결 재사용 0). (api_key, base_url)별로 클라이언트를 캐싱해
@@ -277,11 +251,11 @@ def _ocr_prompt(language: str) -> str:
 
 
 class OcrEngine:
-    """OCR 추상화 — kind에 따라 WinRT/AI API 분기."""
+    """OCR — AI API(게이트웨이) 호출."""
 
     def __init__(
         self,
-        kind: EngineKind = "winrt",
+        kind: EngineKind = "gemini",
         api_key: str = "",
         base_url: str = "",
         language: str = "ko",
@@ -300,32 +274,11 @@ class OcrEngine:
 
     def recognize(self, pil_image: Image.Image) -> str:
         """동기 OCR — 호출자가 워커 스레드에서 실행해야 UI 블로킹이 없다."""
-        if self.kind == "winrt":
-            return self._recognize_winrt(pil_image)
         if self.kind == "gemini":
             return self._recognize_gemini(pil_image)
         raise ValueError(f"Unknown OCR engine kind: {self.kind!r}")
 
-    # ── 진단용 정적 메서드 ──
-
-    @staticmethod
-    def is_winrt_available() -> bool:
-        """winocr 패키지가 설치되어 있는지."""
-        return _check_winocr()
-
-    @staticmethod
-    def is_winrt_language_supported(lang_code: str = "ko") -> bool:
-        """Windows에 해당 언어팩이 있어 OCR 가능한지.
-
-        winrt.windows.media.ocr.OcrEngine.is_language_supported() 사용.
-        winocr가 같은 winrt-* 패키지를 의존하므로 winocr 설치 시 사용 가능.
-        """
-        try:
-            from winrt.windows.media.ocr import OcrEngine as WinOcrEngine
-            from winrt.windows.globalization import Language
-            return bool(WinOcrEngine.is_language_supported(Language(lang_code)))
-        except Exception:
-            return False
+    # ── 정적 메서드 ──
 
     @staticmethod
     def list_gemini_models(api_key: str, base_url: str = "") -> list[str]:
@@ -362,69 +315,6 @@ class OcrEngine:
             raise RuntimeError(f"게이트웨이 모델 조회 실패: {e}") from e
 
         return sorted(set(models))
-
-    @staticmethod
-    def winrt_supported_languages() -> list[str]:
-        """OCR 가능한 언어 BCP-47 태그 목록 (주요 언어 탐색 방식).
-
-        winrt-* 3.x에서 get_available_recognizer_languages() 미지원이므로
-        is_language_supported()로 알려진 언어 코드를 개별 탐색한다.
-        """
-        _PROBE = ["ko", "ko-KR", "en-US", "en-GB", "ja", "zh-Hans", "zh-Hant",
-                  "fr-FR", "de-DE", "es-ES", "ru", "ar", "pt-BR"]
-        try:
-            from winrt.windows.media.ocr import OcrEngine as WinOcrEngine
-            from winrt.windows.globalization import Language
-            return [code for code in _PROBE
-                    if WinOcrEngine.is_language_supported(Language(code))]
-        except Exception:
-            return []
-
-    # ── WinRT 구현 ──
-
-    def _recognize_winrt(self, pil_image: Image.Image) -> str:
-        if not _check_winocr():
-            raise RuntimeError(_winocr_error or "winocr가 설치되지 않았습니다. pip install winocr")
-
-        w, h = pil_image.size
-        if w == 0 or h == 0:
-            return ""
-
-        # WinRT OcrEngine 최대 처리 크기 제한 — 패딩 추가분(_OCR_PAD*2) 포함해 4096 이내 유지
-        max_before_pad = _WINRT_MAX_DIM - _OCR_PAD * 2
-        if max(w, h) > max_before_pad:
-            scale = max_before_pad / max(w, h)
-            pil_image = pil_image.resize(
-                (max(1, int(w * scale)), max(1, int(h * scale))),
-                Image.LANCZOS,
-            )
-
-        # RGBA/RGB 이외 모드는 변환 (OCR은 투명도 불필요)
-        if pil_image.mode not in ("RGB", "RGBA"):
-            pil_image = pil_image.convert("RGB")
-
-        # 한 줄짜리 좁은 이미지에서 WinRT OCR이 인식 실패하는 문제 방지
-        fill = (255, 255, 255, 255) if pil_image.mode == "RGBA" else (255, 255, 255)
-        padded = Image.new(
-            pil_image.mode,
-            (pil_image.width + _OCR_PAD * 2, pil_image.height + _OCR_PAD * 2),
-            fill,
-        )
-        padded.paste(pil_image, (_OCR_PAD, _OCR_PAD))
-        pil_image = padded
-
-        try:
-            from winocr import recognize_pil_sync
-            result = recognize_pil_sync(pil_image, lang=self.language)
-            return (result.get("text") or "").strip()
-        except AssertionError as e:
-            # winocr가 언어팩 미지원 시 AssertionError + 설치 안내 메시지를 던짐
-            msg = str(e)
-            raise RuntimeError(
-                f"Windows OCR이 '{self.language}' 언어를 지원하지 않습니다. "
-                f"언어팩 설치: {msg}\n"
-                "Windows 설정 → 시간 및 언어 → 언어 → 한국어 → 언어 옵션 → OCR 다운로드"
-            ) from e
 
     # ── Gemini ──
 
@@ -625,48 +515,3 @@ def probe_ocr_model(api_key: str, base_url: str, model: str, language: str = "ko
     if not text.strip():
         return ProbeResult("ok", "이미지 수락 — 응답 본문은 비어 있음")
     return ProbeResult("weak", "이미지는 받지만 글자를 못 읽었습니다 — OCR 품질이 낮을 수 있습니다.")
-
-
-# ── 단독 실행 검증 ────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    import sys
-    import threading
-
-    print(f"[OCR] winocr 사용 가능: {OcrEngine.is_winrt_available()}")
-    if OcrEngine.is_winrt_available():
-        print(f"[OCR] 한국어 지원: {OcrEngine.is_winrt_language_supported('ko')}")
-        print(f"[OCR] 사용 가능한 언어: {OcrEngine.winrt_supported_languages()}")
-
-    if len(sys.argv) > 1:
-        import argparse
-        parser = argparse.ArgumentParser(description="OCR 단독 실행 검증")
-        parser.add_argument("path", help="이미지 파일 경로")
-        parser.add_argument("lang", nargs="?", default="ko", help="언어 코드 (기본: ko)")
-        parser.add_argument("--engine", default="winrt", choices=["winrt", "gemini"])
-        parser.add_argument("--key", default="", help="AI API 키 (--engine gemini 시 필요)")
-        args = parser.parse_args()
-
-        path = args.path
-        lang = args.lang
-        engine = OcrEngine(kind=args.engine, api_key=args.key, language=lang)
-
-        # 워커 스레드에서 호출 (실제 사용 환경 재현)
-        result_holder: list[str] = []
-        error_holder: list[Exception] = []
-
-        def _run():
-            try:
-                result_holder.append(engine.recognize(Image.open(path)))
-            except Exception as e:
-                error_holder.append(e)
-
-        t = threading.Thread(target=_run)
-        t.start()
-        t.join()
-
-        if error_holder:
-            print(f"[OCR] 오류: {error_holder[0]}", file=sys.stderr)
-            sys.exit(1)
-        print(f"\n[OCR] {path!r} ({lang}):\n{result_holder[0]}")
-    else:
-        print("\n사용법: python -m pasteflow.ocr_engine <이미지경로> [언어=ko] [--engine winrt|gemini] [--key <API키>]")

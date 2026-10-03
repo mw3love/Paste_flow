@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, QSize, QEvent, pyqtSignal
 
 from pasteflow.ui.theme import (
-    BASE as _BG, SURFACE2 as _SURFACE2, PEACH as _PEACH,
+    SURFACE2 as _SURFACE2, PEACH as _PEACH,
 )
 from pasteflow.models import ClipboardItem
 from pasteflow.ui.menu_style import make_menu

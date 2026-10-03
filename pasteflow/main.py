@@ -17,7 +17,6 @@ from pasteflow.models import ClipboardItem
 from pasteflow.paste_queue import PasteQueue
 from pasteflow.clipboard_monitor import ClipboardMonitor
 from pasteflow.paste_interceptor import PasteInterceptor
-from pasteflow.hotkey_manager import HotkeyManager
 from pasteflow.ui.panel import (
     ClipboardPanel, EditItemDialog, PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT,
 )
@@ -1028,7 +1027,6 @@ class PasteFlowApp:
             on_stt_start=self._bridge.stt_start.emit,
             on_stt_stop=self._bridge.stt_stop.emit,
         )
-        self.hotkey_manager = HotkeyManager()
 
         # UI (패널이 기본 UI — 미니창 없음)
         self.panel = ClipboardPanel()
@@ -3208,7 +3206,6 @@ class PasteFlowApp:
 
         self.interceptor.stop()
         self.monitor.stop()
-        self.hotkey_manager.destroy()
         self.tray.hide()
         self.db.close()
         self.app.quit()

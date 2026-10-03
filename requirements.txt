@@ -1,7 +1,6 @@
 PyQt6
 pywin32
 Pillow
-winocr          # Windows WinRT OCR (winrt-* 패키지 포함, Python 3.14+ 지원)
 comtypes        # Windows UI Automation (마그네틱 캡처 — ElementFromPoint)
 openai                  # Mindlogic 게이트웨이 OCR (lazy import)
 certifi                 # 크레딧 확인(urllib 직접 호출)의 CA 번들 — openai(httpx)의 전이 의존성이라

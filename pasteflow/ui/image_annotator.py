@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QWidget, QGraphicsScene, QGraphicsView, QGraphicsRectItem,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsPathItem,
     QGraphicsTextItem, QGraphicsItem, QHBoxLayout, QVBoxLayout,
-    QPushButton, QToolButton, QButtonGroup, QLabel, QSlider,
+    QToolButton, QButtonGroup, QLabel, QSlider,
     QStyle, QStyleOptionGraphicsItem,
 )
 
@@ -580,15 +580,6 @@ class _HandleResizeMixin:
         c = self._rot_handle_center()
         return QRectF(c.x() - d / 2, c.y() - d / 2, d, d)
 
-    def _owner_tool(self):
-        """현재 활성 도구를 뷰→owner 경로로 조회(없으면 None)."""
-        sc = self.scene()
-        if sc is not None and sc.views():
-            owner = getattr(sc.views()[0], "_owner", None)
-            if owner is not None:
-                return getattr(owner, "current_tool", None)
-        return None
-
     def _handle_active(self) -> bool:
         if not self.isSelected():
             return False
@@ -1046,9 +1037,6 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
     def set_head_at_end(self, value: bool):
         self._head_at_end = value
         self.update()
-
-    def flip_head(self):
-        self.set_head_at_end(not self._head_at_end)
 
     def apply_color(self, color):
         self._color = QColor(color)

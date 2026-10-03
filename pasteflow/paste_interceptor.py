@@ -992,18 +992,6 @@ class PasteInterceptor:
         """
         _send_inputs([_make_key_input(vk), _make_key_input(vk, KEYEVENTF_KEYUP)])
 
-    def send_ctrl_v_to(self, target_hwnd):
-        """대상 윈도우에 포커스 이동 후 Ctrl+V 전송"""
-        if target_hwnd:
-            _user32.SetForegroundWindow(target_hwnd)
-            time.sleep(0.05)
-        self._direct_paste_active = True
-        try:
-            _send_ctrl_v_plain()
-        finally:
-            time.sleep(0.05)
-            self._direct_paste_active = False
-
     def _set_clipboard(self, item: ClipboardItem):
         """클립보드에 항목 설정 — ctypes 기반 (pywin32 ACCESS VIOLATION 방지)"""
         self._set_clipboard_ctypes(item)

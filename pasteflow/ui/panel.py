@@ -783,12 +783,6 @@ class ClipboardPanel(QWidget):
         self.activateWindow()
         self._fade_in()
 
-    def toggle(self):
-        if self.isVisible():
-            self.hide()
-        else:
-            self.show_near_cursor()
-
     # ── Internal ──
 
     def _rebuild(self):
@@ -1410,23 +1404,6 @@ class ClipboardPanel(QWidget):
         """현재 위치/크기를 dict로 반환"""
         g = self.geometry()
         return {"x": g.x(), "y": g.y(), "w": g.width(), "h": g.height()}
-
-    def restore_geometry_dict(self, d: dict):
-        """dict에서 위치/크기 복원 — 화면 밖이면 우하단 기본 위치로 clamp"""
-        from PyQt6.QtWidgets import QApplication
-        try:
-            x, y, w, h = int(d["x"]), int(d["y"]), int(d["w"]), int(d["h"])
-            screen = QApplication.screenAt(
-                self.geometry().center()
-            ) or QApplication.primaryScreen()
-            avail = screen.availableGeometry()
-            # 패널이 완전히 화면 밖이면 우하단으로 이동
-            if x >= avail.right() or y >= avail.bottom() or x + w <= avail.left() or y + h <= avail.top():
-                x = avail.right() - w - 20
-                y = avail.bottom() - h - 20
-            self.setGeometry(x, y, w, h)
-        except (KeyError, ValueError):
-            pass
 
     # ── F4-9: 외부 클릭 시 자동 닫기 ──
 
