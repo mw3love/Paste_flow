@@ -28,3 +28,60 @@ class TestComputeHashImage:
         b = ClipboardItem(content_type="image", image_data=bytes(data))
 
         assert monitor._compute_hash(a) == monitor._compute_hash(b)
+
+
+class _FakeClock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def _monitor_with(texts, clock, monkeypatch):
+    """_read_clipboard가 texts의 다음 값을 돌려주는 모니터 + 받은 항목 목록."""
+    import pasteflow.clipboard_monitor as cm
+    monkeypatch.setattr(cm.time, "monotonic", clock)
+    got = []
+    m = ClipboardMonitor(on_new_item=lambda it: got.append(it.text_content))
+    queue = list(texts)
+    m._read_clipboard = lambda: [ClipboardItem(content_type="text", text_content=queue.pop(0))]
+    return m, got
+
+
+class TestDuplicateWindow:
+    def test_quick_repeat_is_skipped(self, monkeypatch):
+        """같은 내용이 짧은 간격으로 두 번 오면(이벤트 중복·Ctrl+C 연타) 한 번만 받는다"""
+        clock = _FakeClock()
+        m, got = _monitor_with(["A", "A"], clock, monkeypatch)
+        m._on_clipboard_changed()
+        clock.t += 0.3
+        m._on_clipboard_changed()
+        assert got == ["A"]
+
+    def test_recopy_after_window_is_new_item(self, monkeypatch):
+        """한참 뒤 같은 내용을 다시 복사하면 새 복사로 받는다(새 순차 묶음의 첫 항목)"""
+        clock = _FakeClock()
+        m, got = _monitor_with(["A", "A"], clock, monkeypatch)
+        m._on_clipboard_changed()
+        clock.t += 5
+        m._on_clipboard_changed()
+        assert got == ["A", "A"]
+
+    def test_recopy_of_self_written_item_is_new_item(self, monkeypatch):
+        """PasteFlow가 붙여넣은(자체 쓰기) 내용을 나중에 사용자가 복사하면 받는다"""
+        clock = _FakeClock()
+        m, got = _monitor_with(["A"], clock, monkeypatch)
+        m.mark_self_write(ClipboardItem(content_type="text", text_content="A"))
+        clock.t += 5
+        m._on_clipboard_changed()
+        assert got == ["A"]
+
+    def test_late_self_write_event_is_skipped(self, monkeypatch):
+        """자체 쓰기의 늦은 이벤트(0.5초 시간창을 넘김)는 해시로 계속 걸러진다"""
+        clock = _FakeClock()
+        m, got = _monitor_with(["A"], clock, monkeypatch)
+        m.mark_self_write(ClipboardItem(content_type="text", text_content="A"))
+        clock.t += 1.0
+        m._on_clipboard_changed()
+        assert got == []

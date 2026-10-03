@@ -933,6 +933,7 @@ class _SignalBridge(QObject):
     gif_saved          = pyqtSignal(str)     # 인코딩 워커 → 메인: 저장된 GIF 경로
     gif_error          = pyqtSignal(str)     # 인코딩 워커 → 메인: 에러 메시지
     annotation_copied  = pyqtSignal(bytes)   # 주석 복사 워커 → 메인: 클립보드+DB 저장 완료(썸네일 토스트용)
+    panel_paste_done   = pyqtSignal()        # 패널 붙여넣기 워커 → 메인: _paste_in_progress 해제
     stt_start          = pyqtSignal()        # 훅 스레드 → 메인: 음성 입력 단축키 keydown(녹음 시작)
     stt_stop           = pyqtSignal()        # 훅 스레드 → 메인: 음성 입력 단축키 keyup(녹음 종료+전송)
     stt_done           = pyqtSignal(str)     # 워커 스레드 → 메인: STT 결과 텍스트
@@ -976,6 +977,8 @@ class PasteFlowApp:
         self._bridge.gif_saved.connect(self._on_gif_saved)
         self._bridge.gif_error.connect(self._on_gif_error)
         self._bridge.annotation_copied.connect(self._on_annotation_copied)
+        self._bridge.panel_paste_done.connect(
+            lambda: setattr(self.panel, '_paste_in_progress', False))
         self._bridge.stt_start.connect(self._on_stt_start)
         self._bridge.stt_stop.connect(self._on_stt_stop)
         self._bridge.stt_done.connect(self._on_stt_done)
@@ -2325,7 +2328,9 @@ class PasteFlowApp:
                 except Exception as e:
                     print(f"[PanelPaste] Error: {e}")
                 finally:
-                    QTimer.singleShot(0, lambda: setattr(self.panel, '_paste_in_progress', False))
+                    # 워커 스레드엔 Qt 이벤트 루프가 없어 QTimer.singleShot은 영영 발화하지
+                    # 않는다(실측) — 시그널로 메인 스레드에 넘긴다.
+                    self._bridge.panel_paste_done.emit()
 
         threading.Thread(target=_do_paste, daemon=True).start()
 

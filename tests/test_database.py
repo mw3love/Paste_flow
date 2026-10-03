@@ -273,3 +273,33 @@ class TestSettings:
         db.set_setting("key", "old")
         db.set_setting("key", "new")
         assert db.get_setting("key") == "new"
+
+
+class TestCompactOnOpen:
+    """지운 항목이 남긴 빈 공간을 열 때 되돌려받는다 (실측: 264MB 중 99%가 빈 공간)"""
+
+    def test_reopen_shrinks_file_after_big_deletes(self, tmp_path):
+        import os
+        path = str(tmp_path / "t.db")
+        d = Database(path)
+        ids = [d.save_item(ClipboardItem(content_type="image",
+                                         image_data=os.urandom(2_000_000))).id
+               for _ in range(5)]
+        for i in ids:
+            d.delete_item(i)
+        d.close()
+        before = os.path.getsize(path)
+        Database(path).close()
+        assert os.path.getsize(path) < before / 2
+
+    def test_small_free_space_is_left_alone(self, tmp_path):
+        """빈 공간이 작으면 매번 압축하지 않는다(시작 시간 보호)"""
+        import os
+        path = str(tmp_path / "t.db")
+        d = Database(path)
+        item = d.save_item(ClipboardItem(content_type="text", text_content="x" * 50_000))
+        d.delete_item(item.id)
+        d.close()
+        before = os.path.getsize(path)
+        Database(path).close()
+        assert os.path.getsize(path) == before

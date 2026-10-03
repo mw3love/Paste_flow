@@ -21,6 +21,25 @@ class Database:
         # RLock: 한 잠금 메서드가 다른 잠금 메서드를 호출해도 데드락이 없도록.
         self._lock = threading.RLock()
         self._create_tables()
+        self._compact_if_bloated()
+
+    # 빈 페이지가 이만큼 넘게 쌓였을 때만 열 때 VACUUM한다(작은 낭비로 매번 시작을 늦추지 않음).
+    _COMPACT_MIN_FREE_BYTES = 5_000_000
+
+    def _compact_if_bloated(self):
+        """지운 이미지가 남긴 빈 페이지를 파일에서 되돌려받는다.
+
+        SQLite는 행을 지워도 파일을 줄이지 않는다 — 실사용 DB가 항목 23개(실데이터 2MB)에
+        264MB였다(빈 페이지 99%). 빈 공간이 절반 넘고 기준치 이상일 때만 VACUUM한다.
+        """
+        try:
+            page_size = self.conn.execute("PRAGMA page_size").fetchone()[0]
+            pages = self.conn.execute("PRAGMA page_count").fetchone()[0]
+            free = self.conn.execute("PRAGMA freelist_count").fetchone()[0]
+            if free * page_size >= self._COMPACT_MIN_FREE_BYTES and free * 2 > pages:
+                self.conn.execute("VACUUM")
+        except sqlite3.Error as e:
+            print(f"[DB] 압축(VACUUM) 실패 — 무시: {e}")
 
     def _create_tables(self):
         cur = self.conn.cursor()

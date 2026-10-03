@@ -95,6 +95,9 @@ class ClipboardMonitor:
     클립보드 변경 시 콜백 호출. self_triggered 플래그로 자체 쓰기 무시.
     """
 
+    DUPLICATE_WINDOW_SEC = 1.5      # 같은 내용 연속 수신을 중복으로 보는 시간
+    SELF_WRITE_BACKSTOP_SEC = 2.0   # 자체 쓰기의 늦은 이벤트를 해시로 거르는 시간
+
     def __init__(self, on_new_item: Optional[Callable[[ClipboardItem], None]] = None,
                  on_duplicate: Optional[Callable[[], None]] = None):
         self.on_new_item = on_new_item  # 모든 복사 경로: DB + 큐 추가
@@ -102,6 +105,7 @@ class ClipboardMonitor:
         self._ignore_until: float = 0.0  # 시간 기반 무시
         self._lock = threading.Lock()
         self._last_hash: Optional[str] = None
+        self._last_hash_time: float = 0.0
         self._hwnd = None
         self._running = False
 
@@ -120,8 +124,12 @@ class ClipboardMonitor:
         여기서 _last_hash를 함께 세팅해, 늦은 이벤트가 시간창을 넘겨도 해시로 걸러지게 한다.
         """
         with self._lock:
-            self._ignore_until = time.monotonic() + duration
+            now = time.monotonic()
+            self._ignore_until = now + duration
             self._last_hash = self._compute_hash(item)
+            # 해시 백스톱은 SELF_WRITE_BACKSTOP_SEC만 유효하다 — 영구히 두면 사용자가 나중에
+            # 같은 내용을 다시 복사해도(새 순차 묶음의 첫 항목) 큐에 안 들어간다.
+            self._last_hash_time = now + self.SELF_WRITE_BACKSTOP_SEC - self.DUPLICATE_WINDOW_SEC
 
     def start(self):
         """클립보드 리스너 등록 (숨겨진 윈도우 생성)"""
@@ -179,12 +187,18 @@ class ClipboardMonitor:
         # (일반적인 단일 항목 경로도 리스트 길이 1로 동일하게 흐른다).
         for item in items:
             content_hash = self._compute_hash(item)
-            if content_hash == self._last_hash:
-                print(f"[Monitor] 중복 해시 — 스킵")
+            now = time.monotonic()
+            # 직전과 같은 내용이라도 시간창 안일 때만 중복으로 본다(이벤트 중복·Ctrl+C 연타).
+            # 창이 지난 재복사는 새 복사다 — 영구 비교였을 땐 방금 붙여넣은 내용을 다시
+            # 복사해 새 묶음을 시작하면 그 항목이 큐에서 빠져 순서가 한 칸씩 밀렸다.
+            if (content_hash == self._last_hash
+                    and now - self._last_hash_time < self.DUPLICATE_WINDOW_SEC):
+                print("[Monitor] 중복 해시 — 스킵")
                 if self.on_duplicate:
                     self.on_duplicate()
                 continue
             self._last_hash = content_hash
+            self._last_hash_time = now
 
             preview = (item.preview_text or "")[:30]
             print(f"[Monitor] 새 항목: '{preview}'")
