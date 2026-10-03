@@ -7,7 +7,7 @@ from typing import Optional
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QMenu, QApplication, QGraphicsOpacityEffect,
+    QScrollArea, QApplication, QGraphicsOpacityEffect,
     QSizePolicy, QDialog, QPlainTextEdit,
 )
 import ctypes
@@ -26,6 +26,7 @@ from pasteflow.models import ClipboardItem
 from pasteflow.ui.ai_query import AiQueryDialog
 from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.text_preview import TextPreviewPopup
+from pasteflow.ui.menu_style import make_menu
 from pasteflow.ui.theme import COLORS, PEACH_HOVER
 
 PANEL_WIDTH = 320
@@ -1072,78 +1073,69 @@ class ClipboardPanel(QWidget):
         if not item:
             return
 
-        menu = QMenu(self)
-        menu.setStyleSheet(f"""
-            QMenu {{
-                background-color: {COLORS['surface0']};
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['surface1']};
-                border-radius: 8px;
-                padding: 4px;
-            }}
-            QMenu::item {{
-                padding: 6px 16px;
-                border-radius: 4px;
-            }}
-            QMenu::item:selected {{
-                background-color: {COLORS['surface1']};
-            }}
-        """)
+        menu = make_menu()
 
+        # 묶음: 보기·큐 | 꺼내기(복사·경로·파일 위치) | 다루기(OCR·Gemini / 수정) | 고정 | 삭제.
+        # 조건부 항목도 숨기지 않고 비활성으로 남긴다 — 숨기면 아래 항목 자리가 이미지마다
+        # 한 칸씩 흔들려 손이 위치를 못 외운다(2026-10-03).
         if item.content_type == "image":
-            preview_action = menu.addAction("미리보기\tSpace")
+            preview_action = menu.add("미리보기	Space", "eye")
             preview_action.triggered.connect(
                 lambda: self.preview_image_requested.emit(item_id)
             )
         else:
-            preview_action = menu.addAction("미리보기\tSpace")
+            preview_action = menu.add("미리보기	Space", "eye")
             preview_action.triggered.connect(
                 lambda: self.preview_text_requested.emit(item_id)
             )
 
         if item_id in self._queue_item_ids:
-            queue_action = menu.addAction("큐 해제\tC")
+            queue_action = menu.add("큐 해제	C", "list-numbers")
             queue_action.triggered.connect(lambda: self.queue_deselect_requested.emit(item_id))
         else:
-            queue_action = menu.addAction("큐에 추가\tC")
+            queue_action = menu.add("큐에 추가	C", "list-numbers")
             queue_action.triggered.connect(lambda: self.queue_select_requested.emit(item_id))
 
         menu.addSeparator()
 
-        copy_action = menu.addAction("복사\tCtrl+C")
+        copy_action = menu.add("복사	Ctrl+C", "copy")
         copy_action.triggered.connect(lambda: self._do_copy(item))
 
         if item.content_type == "image":
-            path_action = menu.addAction("파일로 저장 후 경로 복사\tS")
+            path_action = menu.add("파일로 저장 후 경로 복사	S", "file-arrow-down")
             path_action.triggered.connect(lambda: self.copy_image_as_path_requested.emit(item_id))
-            if item.saved_image_path and os.path.isfile(item.saved_image_path):
-                open_loc_action = menu.addAction("파일 위치 열기\tO")
-                open_loc_action.triggered.connect(
-                    lambda: self.open_file_location_requested.emit(item_id)
-                )
-            ocr_action = menu.addAction("텍스트 추출(OCR)")
+            file_path = item.saved_image_path
+        else:
+            file_path = (item.text_content or "").strip()
+        open_loc_action = menu.add("파일 위치 열기	O", "folder-open")
+        open_loc_action.triggered.connect(
+            lambda: self.open_file_location_requested.emit(item_id)
+        )
+        open_loc_action.setEnabled(bool(file_path) and os.path.isfile(file_path))
+
+        menu.addSeparator()
+
+        if item.content_type == "image":
+            ocr_action = menu.add("텍스트 추출(OCR)", "scan")
             ocr_action.triggered.connect(lambda: self.ocr_item_requested.emit(item_id))
-            ask_ai_action = menu.addAction("Gemini에게 질문\tG")
+            ask_ai_action = menu.add("Gemini에게 질문	G", "sparkle")
             ask_ai_action.triggered.connect(lambda: self.ask_ai_item_requested.emit(item_id))
         else:
-            edit_action = menu.addAction("수정")
+            edit_action = menu.add("수정", "pencil-simple")
             edit_action.triggered.connect(lambda: self._on_edit_item(item))
-            if item.text_content and os.path.isfile(item.text_content.strip()):
-                open_loc_action = menu.addAction("파일 위치 열기\tO")
-                open_loc_action.triggered.connect(
-                    lambda: self.open_file_location_requested.emit(item_id)
-                )
+
+        menu.addSeparator()
 
         if item.is_pinned:
-            unpin_action = menu.addAction("고정 해제\tP")
+            unpin_action = menu.add("고정 해제	P", "push-pin-slash")
             unpin_action.triggered.connect(lambda: self.unpin_item_requested.emit(item_id))
         else:
-            pin_action = menu.addAction("고정추가\tP")
+            pin_action = menu.add("고정	P", "push-pin")
             pin_action.triggered.connect(lambda: self.pin_item_requested.emit(item_id))
 
         menu.addSeparator()
 
-        delete_action = menu.addAction("삭제\tDel")
+        delete_action = menu.add("삭제	Del", "trash", danger=True)
         delete_action.triggered.connect(lambda: self.delete_item_requested.emit(item_id))
 
         menu.exec(pos)
@@ -1709,43 +1701,22 @@ class ClipboardPanel(QWidget):
 
     def contextMenuEvent(self, event):
         """패널 빈 곳 우클릭 → 패널 닫기 / 설정 / 종료"""
-        menu = QMenu(self)
-        menu.setStyleSheet(f"""
-            QMenu {{
-                background-color: {COLORS['surface0']};
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['surface1']};
-                border-radius: 8px;
-                padding: 4px;
-            }}
-            QMenu::item {{
-                padding: 6px 16px;
-                border-radius: 4px;
-            }}
-            QMenu::item:selected {{
-                background-color: {COLORS['surface1']};
-            }}
-            QMenu::separator {{
-                height: 1px;
-                background: {COLORS['surface1']};
-                margin: 4px 8px;
-            }}
-        """)
+        menu = make_menu()
 
-        close_action = menu.addAction("×  패널 숨기기")
+        close_action = menu.add("패널 숨기기", "eye-slash")
         close_action.triggered.connect(self.hide)
 
         menu.addSeparator()
 
-        clear_action = menu.addAction("🗑  히스토리 초기화")
+        clear_action = menu.add("히스토리 초기화", "broom", danger=True)
         clear_action.triggered.connect(self.clear_history_requested.emit)
 
         menu.addSeparator()
 
-        settings_action = menu.addAction("⚙  설정")
+        settings_action = menu.add("설정", "gear-six")
         settings_action.triggered.connect(self.open_settings_requested.emit)
 
-        quit_action = menu.addAction("⏻  PasteFlow 종료")
+        quit_action = menu.add("PasteFlow 종료", "power")
         quit_action.triggered.connect(self.quit_requested.emit)
 
         menu.exec(event.globalPos())

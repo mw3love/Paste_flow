@@ -9,15 +9,15 @@
 """
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QGraphicsScene, QGraphicsView, QFrame,
-    QMenu, QApplication, QToolButton,
+    QApplication, QToolButton,
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, QSize, QEvent, pyqtSignal
 
 from pasteflow.ui.theme import (
-    BASE as _BG, SURFACE0 as _SURFACE0, SURFACE1 as _BORDER, SURFACE2 as _SURFACE2,
-    TEXT as _TEXT, PEACH as _PEACH,
+    BASE as _BG, SURFACE2 as _SURFACE2, PEACH as _PEACH,
 )
 from pasteflow.models import ClipboardItem
+from pasteflow.ui.menu_style import make_menu
 from pasteflow.ui.image_annotator import (
     _EditorMixin, _AnnotatorView, _pixmap_from_data, _tool_icon,
     flatten_scene_to_png,
@@ -69,25 +69,6 @@ def compute_preview_pos(
 
     x = max(avail.left(), min(panel_geom.right() + _PREVIEW_MARGIN, avail.right() - w))
     return QPoint(x, _clamp_y(panel_geom.top()))
-
-
-def _dark_menu_style() -> str:
-    return f"""
-        QMenu {{
-            background-color: {_SURFACE0};
-            color: {_TEXT};
-            border: 1px solid {_BORDER};
-            border-radius: 6px;
-            padding: 4px;
-        }}
-        QMenu::item {{
-            padding: 6px 16px;
-            border-radius: 4px;
-        }}
-        QMenu::item:selected {{
-            background-color: {_SURFACE2};
-        }}
-    """
 
 
 class ImagePreviewPopup(_EditorMixin, QWidget):
@@ -456,30 +437,30 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         if self._edit_mode:
             return  # 편집 모드에선 그리기 우선 (메뉴 없음)
         target = self._effective_item()  # 주석 있으면 평탄화본, 없으면 원본
-        menu = QMenu(self)
-        menu.setStyleSheet(_dark_menu_style())
-        # 단축키 힌트("\t..." 뒤는 Qt가 메뉴에서 오른쪽 정렬로 보여줌, 패널 우클릭 메뉴와
-        # 동일한 표기 방식) — 2026-08-02 사용자 요청, 실제 단축키를 새로 바인딩하는 게
-        # 아니라 이미 있는 것(Ctrl+C·Space)을 메뉴에 드러내는 것뿐이다.
+        menu = make_menu()
+        # 단축키 힌트("	..." 뒤)는 이미 있는 키(Ctrl+C·Space)만 드러낸다 — 새로 바인딩하지 않음.
+        # 묶음·순서는 히스토리 우클릭 메뉴와 맞춘다: 꺼내기 | 다루기(OCR·Gemini) | 창(복제·주석) | 닫기.
         if target is self._item:
-            menu.addAction("복사\tCtrl+C").triggered.connect(lambda: self.copy_requested.emit(target))
+            menu.add("복사	Ctrl+C", "copy").triggered.connect(lambda: self.copy_requested.emit(target))
         else:
             # 평탄화본(임시, id 없음)의 복사는 주석 편집 완료 복사와 동일 경로로 —
             # 클립보드 + 히스토리 저장 + 토스트. copy_requested는 DB 항목을 전제해
             # id 없는 항목이면 히스토리에 안 남고 피드백도 없다.
-            menu.addAction("복사\tCtrl+C").triggered.connect(
+            menu.add("복사	Ctrl+C", "copy").triggered.connect(
                 lambda: self.annotated_copy_requested.emit(target.image_data))
-        menu.addAction("파일로 저장 후 경로 복사").triggered.connect(
+        menu.add("파일로 저장 후 경로 복사", "file-arrow-down").triggered.connect(
             lambda: self.copy_as_path_requested.emit(target))
-        menu.addAction("텍스트 추출(OCR)").triggered.connect(lambda: self.ocr_requested.emit(target))
-        menu.addAction("Gemini에게 질문").triggered.connect(lambda: self.ask_ai_requested.emit(target))
+        menu.addSeparator()
+        menu.add("텍스트 추출(OCR)", "scan").triggered.connect(lambda: self.ocr_requested.emit(target))
+        menu.add("Gemini에게 질문", "sparkle").triggered.connect(lambda: self.ask_ai_requested.emit(target))
+        menu.addSeparator()
         # 복제 — 지금 보이는 모습(주석 있으면 평탄화본) 그대로, 같은 크기로 살짝 비켜 새 핀을
         # 띄운다(2026-09-25 — 핀 단축키가 큐 순차 핀으로 바뀌어 같은 걸 다시 핀하는 수단).
-        menu.addAction("복제").triggered.connect(
+        menu.add("복제", "cards").triggered.connect(
             lambda: self.duplicate_requested.emit(target, self._duplicate_rect()))
-        menu.addAction("주석 편집\tSpace").triggered.connect(self.toggle_edit_mode)
+        menu.add("주석 편집	Space", "pencil-line").triggered.connect(self.toggle_edit_mode)
         menu.addSeparator()
-        menu.addAction("닫기").triggered.connect(self.close)
+        menu.add("닫기", "x").triggered.connect(self.close)
         menu.exec(event.globalPos())
 
     # ------------------------------------------------------------------

@@ -10,16 +10,17 @@ UX 정책:
 import math
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QApplication, QMenu, QPlainTextEdit, QFrame,
+    QWidget, QVBoxLayout, QApplication, QPlainTextEdit, QFrame,
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, QEvent, pyqtSignal
 from PyQt6.QtGui import QTextOption, QFont, QTextDocument
 
 from pasteflow.ui.theme import BASE as _BG, SURFACE2 as _SURFACE2, TEXT as _TEXT, PEACH as _PEACH
 from pasteflow.ui.image_preview import (
-    compute_preview_pos, _CASCADE_STEP, _dark_menu_style,
+    compute_preview_pos, _CASCADE_STEP,
 )
 from pasteflow.models import ClipboardItem
+from pasteflow.ui.menu_style import make_menu
 
 # 초기 표시 시점 폭/높이 상한 (사용자가 zoom하면 화면 한계까지 확장)
 PREVIEW_INITIAL_MAX_W = 360
@@ -220,18 +221,17 @@ class TextPreviewPopup(QWidget):
     # ------------------------------------------------------------------
 
     def contextMenuEvent(self, event):
-        menu = QMenu(self)
-        menu.setStyleSheet(_dark_menu_style())
+        menu = make_menu()
 
-        copy_action = menu.addAction("전체 복사")
+        copy_action = menu.add("전체 복사", "copy")
         copy_action.triggered.connect(self._emit_copy)
 
         if self._editable and self._item.content_type != "image":
-            edit_action = menu.addAction("수정")
+            edit_action = menu.add("수정", "pencil-simple")
             edit_action.triggered.connect(lambda: self.edit_requested.emit(self._item.id))
 
         menu.addSeparator()
-        close_action = menu.addAction("닫기")
+        close_action = menu.add("닫기", "x")
         close_action.triggered.connect(self.close)
 
         menu.exec(event.globalPos())
