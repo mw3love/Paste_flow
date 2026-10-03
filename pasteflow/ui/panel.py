@@ -461,6 +461,7 @@ class ClipboardPanel(QWidget):
     preview_text_requested = pyqtSignal(int)   # item_id — 동상
     copy_image_as_path_requested = pyqtSignal(int)  # item_id — 이미지를 임시 PNG로 저장 후 경로를 클립보드에 텍스트로 복사
     ask_ai_item_requested = pyqtSignal(int)  # item_id — 이미지를 미리 첨부한 채 Gemini 질문창 열기
+    ocr_item_requested = pyqtSignal(int)  # item_id — 이미지 항목 텍스트 추출(OCR)
     open_file_location_requested = pyqtSignal(int)  # item_id — 텍스트가 가리키는 파일을 탐색기에서 선택 표시
     open_settings_requested = pyqtSignal()
     quit_requested = pyqtSignal()
@@ -1120,6 +1121,8 @@ class ClipboardPanel(QWidget):
                 open_loc_action.triggered.connect(
                     lambda: self.open_file_location_requested.emit(item_id)
                 )
+            ocr_action = menu.addAction("텍스트 추출(OCR)")
+            ocr_action.triggered.connect(lambda: self.ocr_item_requested.emit(item_id))
             ask_ai_action = menu.addAction("Gemini에게 질문\tG")
             ask_ai_action.triggered.connect(lambda: self.ask_ai_item_requested.emit(item_id))
         else:

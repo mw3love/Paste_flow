@@ -1114,6 +1114,7 @@ class PasteFlowApp:
         self.panel.preview_text_requested.connect(self._on_preview_text)
         self.panel.copy_image_as_path_requested.connect(self._on_copy_image_as_path)
         self.panel.ask_ai_item_requested.connect(self._on_ask_ai_item_by_id)
+        self.panel.ocr_item_requested.connect(self._on_ocr_item_by_id)
         self.panel.open_file_location_requested.connect(self._on_open_file_location)
         self.panel.open_settings_requested.connect(self._open_settings)
         self.panel.quit_requested.connect(self._quit)
@@ -1593,6 +1594,34 @@ class PasteFlowApp:
 
         threading.Thread(target=_run, daemon=True, name="ocr-worker").start()
 
+    def _on_ocr_image_item(self, item: ClipboardItem):
+        """이미지 우클릭 "텍스트 추출(OCR)"(히스토리·미리보기·핀 공용) — 영역 OCR과 같은 워커로 처리.
+
+        2026-08-02에 실사용 근거가 없어 지웠다가 실제로 필요해져 되살렸다. 옛 코드는
+        `Image.open`으로 바로 열어 Alt+F2 캡처가 저장한 raw CF_DIB에서 실패할 수 있었으므로
+        `_image_data_to_png_bytes`(DIB 대응)로 변환한다.
+        """
+        from pasteflow.ui.toast import ToastNotification
+
+        if not item.image_data:
+            ToastNotification("이미지 데이터를 찾을 수 없습니다", icon="🔤")
+            return
+        try:
+            png_bytes = _image_data_to_png_bytes(item.image_data)
+        except Exception as e:
+            ToastNotification(f"이미지 변환 실패 — {e}", icon="🔤")
+            return
+        self._start_ocr_worker(png_bytes)
+
+    def _on_ocr_item_by_id(self, item_id: int):
+        """히스토리 우클릭 "텍스트 추출(OCR)"(item_id 기반) → DB에서 풀 로드 후 공용 코어로 위임."""
+        from pasteflow.ui.toast import ToastNotification
+        item = self.db.get_item(item_id)
+        if not item:
+            ToastNotification("항목을 찾을 수 없습니다", icon="🔤")
+            return
+        self._on_ocr_image_item(item)
+
     def _on_ask_ai_for_image(self, item: ClipboardItem):
         """이미지 우클릭 "Gemini에게 질문"(핀·미리보기·히스토리 공용) — 이미지를 미리 첨부한 채
         AI 질문창을 연다(2026-08-02 사용자 요청). image_data(DIB/PNG)를 PNG bytes로 변환해 첨부한다."""
@@ -1889,6 +1918,7 @@ class PasteFlowApp:
         popup.copy_requested.connect(self._on_copy_item)
         popup.copy_as_path_requested.connect(self._copy_image_as_path_for_item)
         popup.ask_ai_requested.connect(self._on_ask_ai_for_image)
+        popup.ocr_requested.connect(self._on_ocr_image_item)
         popup.annotated_copy_requested.connect(self._on_annotation_copy)
         popup.export_file_requested.connect(self._on_annotation_export)
         # 복제 — 원본 창 옆(같은 크기)에 새 핀을 띄운다.

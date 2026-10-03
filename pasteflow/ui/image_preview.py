@@ -99,6 +99,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
     copy_requested = pyqtSignal(object)        # ClipboardItem
     copy_as_path_requested = pyqtSignal(object)  # ClipboardItem — 파일로 저장 후 경로 복사
     ask_ai_requested = pyqtSignal(object)      # ClipboardItem — Gemini에게 질문(이미지 첨부, 2026-08-02)
+    ocr_requested = pyqtSignal(object)         # ClipboardItem — 텍스트 추출(OCR)
     duplicate_requested = pyqtSignal(object, QRect)  # (ClipboardItem, 놓을 논리 전역 사각형) — 복제
     # 편집 완료 → main 핸들러 (PNG bytes)
     annotated_copy_requested = pyqtSignal(bytes)   # 클립보드 복사 + 히스토리 저장
@@ -470,6 +471,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
                 lambda: self.annotated_copy_requested.emit(target.image_data))
         menu.addAction("파일로 저장 후 경로 복사").triggered.connect(
             lambda: self.copy_as_path_requested.emit(target))
+        menu.addAction("텍스트 추출(OCR)").triggered.connect(lambda: self.ocr_requested.emit(target))
         menu.addAction("Gemini에게 질문").triggered.connect(lambda: self.ask_ai_requested.emit(target))
         # 복제 — 지금 보이는 모습(주석 있으면 평탄화본) 그대로, 같은 크기로 살짝 비켜 새 핀을
         # 띄운다(2026-09-25 — 핀 단축키가 큐 순차 핀으로 바뀌어 같은 걸 다시 핀하는 수단).
