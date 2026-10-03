@@ -1653,7 +1653,7 @@ class PasteFlowApp:
         텍스트 항목은 경로 텍스트(녹화 GIF/영상·"파일로 저장 후 경로 복사"·이미지→경로
         단축키 등으로 생긴 것), 이미지 항목은 영역 캡처(Alt+F2)가 저장한 원본 PNG
         (`saved_image_path` — 캡처 시점에 함께 기록됨, 위 `_on_capture_region` 참고)를
-        쓴다(메뉴 자체가 panel._on_item_context_menu에서 파일이 실제 존재할 때만 노출됨).
+        쓴다(panel._on_item_context_menu가 파일이 실제 존재할 때만 이 항목을 활성화함).
         `explorer /select,` 는 해당 파일이 든 폴더를 열고 그 파일을 하이라이트한다
         (shell=True 없이 인자 리스트로 호출해 경로에 특수문자가 섞여도 안전).
 
