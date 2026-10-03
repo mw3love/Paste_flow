@@ -1425,7 +1425,7 @@ class SettingsDialog(QDialog):
         """STT 모델 콤보를 캐시(Gemini만)로 채우고 저장된 모델명을 복원한다.
 
         저장값이 없는 첫 실행은 `STT_FALLBACK_DEFAULT`(gemini-3.1-flash-lite)를 우선
-        선택한다 — `_fill_model_combo`의 일반 폴백(`_FALLBACK_DEFAULT`=gemini-2.5-flash,
+        선택한다 — `_fill_model_combo`의 일반 폴백(`_FALLBACK_DEFAULT`,
         OCR 콤보와 공유)보다 STT는 지연시간이 더 중요해 별도로 오버라이드한다
         (2026-08-02 실측: 동일 문장 인식에 flash-lite가 일관되게 더 빠름).
         """

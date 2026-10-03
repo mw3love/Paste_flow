@@ -91,8 +91,12 @@ def get_credit_balance(api_key: str, base_url: str) -> tuple[float, float]:
 #
 # 이 사슬만 상수로 남기는 이유: 폴백은 사용자가 볼 수 없는 자리에서 일어나므로 후보를
 # 실호출로 정할 기회가 없다.
-_FALLBACK_DEFAULT = "gemini-2.5-flash"
-_FALLBACK_CHAIN = (_FALLBACK_DEFAULT, "gemini-2.0-flash")
+#
+# ⚠ 게이트웨이가 모델을 내리면 이 사슬이 조용히 죽는다 — 2026-10-03 실호출로 옛 사슬
+# (gemini-2.5-flash → gemini-2.0-flash)이 둘 다 404였다(2.5-flash는 /models 목록에는
+# 계속 나오는 '유령 모델'). 같은 날 OCR 비교에서 가장 좋았던 순서로 교체했다.
+_FALLBACK_DEFAULT = "gemini-3.5-flash-lite"
+_FALLBACK_CHAIN = (_FALLBACK_DEFAULT, "gemini-3.1-flash-lite")
 
 # STT(음성 입력) 기본 모델 — OCR과 별도 선택. 2026-08-02 실측(3초 한국어 음성, 동일 문장
 # 5회): gemini-2.5-flash 3.1~6.0s(평균 ~4.4s) vs gemini-3.1-flash-lite 2.2~3.0s(평균

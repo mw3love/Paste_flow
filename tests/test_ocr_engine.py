@@ -48,13 +48,13 @@ class TestGroupModels:
 class TestSelectFallbackModel:
     def test_returns_default_safety_net(self):
         from pasteflow.ocr_engine import select_fallback_model
-        assert select_fallback_model("gemini-anything") == "gemini-2.5-flash"
+        assert select_fallback_model("gemini-anything") == "gemini-3.5-flash-lite"
 
     def test_skips_failed_model_when_it_is_default(self):
         from pasteflow.ocr_engine import select_fallback_model
-        result = select_fallback_model("gemini-2.5-flash")
+        result = select_fallback_model("gemini-3.5-flash-lite")
         assert result is not None
-        assert result != "gemini-2.5-flash"
+        assert result != "gemini-3.5-flash-lite"
 
     def test_never_returns_the_failed_model(self):
         from pasteflow.ocr_engine import _FALLBACK_CHAIN, select_fallback_model
@@ -162,10 +162,10 @@ class TestCallWithFallback:
             return f"text-from-{m}"
 
         result = engine._call_with_fallback("gemini-foo-preview", call=_call)
-        assert result == "text-from-gemini-2.5-flash"
+        assert result == "text-from-gemini-3.5-flash-lite"
         assert engine.last_fallback_from == "gemini-foo-preview"
-        assert engine.last_used_model == "gemini-2.5-flash"
-        assert calls == ["gemini-foo-preview", "gemini-2.5-flash"]
+        assert engine.last_used_model == "gemini-3.5-flash-lite"
+        assert calls == ["gemini-foo-preview", "gemini-3.5-flash-lite"]
 
     def test_no_fallback_on_other_error(self):
         from pasteflow.ocr_engine import OcrEngine
