@@ -22,7 +22,6 @@ from pasteflow.models import ClipboardItem
 from pasteflow.paste_queue import PasteQueue
 from pasteflow.hotkey_manager import _SPECIAL_KEY_MAP
 from pasteflow.clipboard_monitor import is_encoded_image
-from pasteflow import hotkey_diag
 
 CF_HTML = win32clipboard.RegisterClipboardFormat("HTML Format")
 CF_RTF = win32clipboard.RegisterClipboardFormat("Rich Text Format")
@@ -807,13 +806,6 @@ class PasteInterceptor:
                         except Exception:
                             pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)
-
-                if self._memo_vk and vk_code == self._memo_vk:  # 임시 진단(hotkey_diag 참고)
-                    hotkey_diag.log(
-                        f"hook key ctrl={ctrl_pressed} shift={shift_pressed} alt={alt_pressed}"
-                        f" alt_async={bool(_user32.GetAsyncKeyState(VK_MENU) & 0x8000)}"
-                        f" matched={ctrl_pressed == self._memo_need_ctrl and shift_pressed == self._memo_need_shift and alt_pressed == self._memo_need_alt}"
-                        f" fg={hotkey_diag.foreground_class()}")
 
                 # 새 메모 단축키 감지 (기본 Alt+`)
                 if (self._memo_vk and vk_code == self._memo_vk

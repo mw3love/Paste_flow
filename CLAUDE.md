@@ -45,7 +45,6 @@ pasteflow/
 ├── clipboard_monitor.py    # 클립보드 감시 (WM_CLIPBOARDUPDATE)
 ├── paste_queue.py          # 순차 붙여넣기 큐 & 포인터 관리 (핵심)
 ├── paste_interceptor.py    # Ctrl+Shift+V 감지 + 패널 토글 단축키 감지 (핵심)
-├── hotkey_diag.py          # 임시 진단 — 새 메모 단축키(Alt+`)가 가끔 안 먹는 원인 추적용 로그(`logs\memo_hotkey.log`). 원인을 찾으면 이 모듈과 호출부(훅·main `_on_new_memo_hotkey`)를 지운다
 ├── hotkey_manager.py       # `_SPECIAL_KEY_MAP`(특수 키 이름 → VK 코드 표)만 남음 — paste_interceptor가 import. 옛 RegisterHotKey `HotkeyManager`는 2026-10-03 제거
 ├── database.py             # SQLite CRUD (clipboard_items, settings)
 ├── models.py               # ClipboardItem 데이터 모델
@@ -136,7 +135,7 @@ docs/
 - **`image_preview.py`** — 이미지 미리보기·핀 창(다중 창, `native=True`면 1:1, `place_rect`로 제자리 덮기). 우클릭: 복사·경로 복사·OCR·Gemini 질문·복제·주석 편집·닫기 — 주석이 있으면 `_effective_item()` 평탄화본 대상. Space로 인라인 주석 편집, 툴바는 하단 예약 strip(토글 시 창 크기 불변).
 - **`image_annotator.py`** — 주석 편집기(`_EditorMixin`·`_AnnotatorView`·도형 아이템 + `_HandleResizeMixin`). 도구 1~8(수식키 없이), 도구별 우클릭 미니패널(색·크기·화살표 머리/방향, DB `annot_tool_defaults`), 3차 베지어 화살표 + 도형 테두리 스냅, 크기조절(우하단)·회전(좌상단) 핸들(잡기 판정 24px), `flatten_scene_to_png`.
 - **`text_preview.py`** — 평문 미리보기(`QPlainTextEdit`, 스크롤 없이 전부 보이게 크기 계산, 우클릭 전체 복사·수정(→메모창)·닫기).
-- **`memo_window.py`** — 빠른 메모창(일반 창). 0.5초 멈추면 저장, 닫을 때 저장, 빈 채로 닫으면 삭제. Esc·Ctrl+W 닫기, Ctrl+T·오른쪽 위 핀 버튼 항상 위(창마다, 저장 안 함 — 전용 WinDLL `SetWindowPos`), 우클릭은 `make_menu`(Qt 기본 메뉴는 창 배경을 물려받아 글자가 묻혔음), Ctrl+휠·Ctrl+0 글자 크기. 글자 크기·마지막 창 자리(`saveGeometry`)는 DB `memo_window_prefs`(JSON)에 저장돼 다음에도 그대로 연다(`set_prefs`/`prefs_saver`) — 단, 마지막 자리는 마우스가 있는 모니터로 옮겨 쓴다(그 모니터 안 상대 위치·크기 유지, `_move_to_cursor_screen`). 열 때 `AttachThreadInput`으로 포그라운드 잠금을 우회해 맨 앞에 뜨고, Windows 열림 효과(~0.3초)는 `DWMWA_TRANSITIONS_FORCEDISABLED`로 끈다. DB는 시그널로 main에 넘김. `_quit`에서 `close_all()`을 `db.close()`보다 먼저.
+- **`memo_window.py`** — 빠른 메모창(일반 창). 0.5초 멈추면 저장, 닫을 때 저장, 빈 채로 닫으면 삭제. Esc·Ctrl+W 닫기, Ctrl+T·오른쪽 위 핀 버튼 항상 위(창마다, 저장 안 함 — 전용 WinDLL `SetWindowPos`), 우클릭은 `make_menu`(Qt 기본 메뉴는 창 배경을 물려받아 글자가 묻혔음), Ctrl+휠·Ctrl+0 글자 크기. 글자 크기·마지막 창 자리(`saveGeometry`)는 DB `memo_window_prefs`(JSON)에 저장돼 다음에도 그대로 연다(`set_prefs`/`prefs_saver`) — 단, 마지막 자리는 마우스가 있는 모니터로 옮겨 쓴다(그 모니터 안 상대 위치·크기 유지, `_move_to_cursor_screen`). 열 때 `AttachThreadInput`으로 포그라운드 잠금을 우회한 뒤 `BringWindowToTop`으로 맨 위에 올리고, Windows 열림 효과(~0.3초)는 `DWMWA_TRANSITIONS_FORCEDISABLED`로 끈다. DB는 시그널로 main에 넘김. `_quit`에서 `close_all()`을 `db.close()`보다 먼저.
 - **`toast.py`** — 우하단 스택 토스트(주 모니터, 최대 5개, 클릭 시 빠른 닫기 — `on_click`을 주면 클릭 때 한 번 호출), `image_path`/`image_bytes` 썸네일, 커서 앵커·중앙 칩(`anchor`, `center=True`, 클릭 통과), 지속형(`duration_ms=0` + `set_message`/`dismiss`). 복사 알림은 `Q{n}` 배지 + 썸네일(원본 `image_data` 우선), 아이콘 없음.
 - **`paste_hud.py`** — 순차 붙여넣기 진행 HUD(비활성 창, ✓▶·, ✕ 취소 → `_on_cancel_paste_queue`).
 - **`settings_dialog.py`** — 왼쪽 목록 내비(`일반`/`붙여넣기`/`캡처·녹화`/`AI`, 실제 페이지는 탭 바를 숨긴 `QTabWidget`), 기능 카드마다 그 기능의 단축키·옵션. AI 탭: `AI 연결 (OpenAI 호환 API)`(Base URL·API 키·모델조회·연결 테스트 = 연결+OCR 모델+크레딧), OCR, 음성 입력(STT 모델은 Gemini만, 마이크 테스트). 창-모달(`WindowModal`) + `_open_settings` 재진입 가드. 녹화 중 훅 정지는 `recording_active` → `done()`/`closeEvent`에서도 해제. 모델 콤보는 editable이라 표시 텍스트 = 저장값(계열 헤더는 비활성, 들여쓰기는 델리게이트로). 디자인 비교 하네스 `tools/settings_bakeoff.py`.
@@ -161,6 +160,7 @@ docs/
 - **`QWidget` 서브클래스에 배경·테두리 QSS를 주려면 `WA_StyledBackground`를 켠다.** 설정창은 부모 패널의 선택자 없는 배경 규칙을 물려받으므로 `DIALOG_STYLE` 맨 앞의 투명 규칙을 지우지 말고, 확인 렌더도 패널 스타일 부모 아래에서 한다.
 - **설정창 모델 콤보는 표시 텍스트가 곧 저장값** — 헤더는 비활성, 텍스트에 공백·배지·불릿을 넣지 않는다.
 - **비활성(`WA_ShowWithoutActivating`) TOPMOST 창은 `raise_()`만으로 다른 TOPMOST(패널)를 못 이긴다** — 캡처 오버레이처럼 `SetWindowPos(HWND_TOPMOST)`를 명시하고 한 번 더 재확인한다.
+- **단축키로 여는 일반 창은 포커스와 Z 순서를 따로 확인한다** — 다른 앱이 포그라운드일 때 `raise_()`는 무시되고, `AttachThreadInput`+`SetForegroundWindow`만 하면 포커스는 오는데(`GetForegroundWindow`==자기) 창은 그 앱 밑에 깔린다(2026-10-05 메모창 실측). 잠금을 푼 직후 `BringWindowToTop`까지 한다. 테스트도 포커스만 보지 말고 위를 덮은 창이 있는지 본다.
 - **떠 있는 보조 패널은 `Qt.Popup`이 아니라 `Tool` + `WA_ShowWithoutActivating`** — Popup은 휠 등 마우스를 그랩한다.
 - **캡처 세션의 Space·ESC 억제 훅으로 삼킨 키는 `GetAsyncKeyState`에 안 잡힌다** — 판정은 훅 콜백에서 한다.
 - **`explorer /select,` 경로는 `os.path.normpath`로 정규화** — 슬래시가 섞이면 엉뚱한 폴더가 열린다.

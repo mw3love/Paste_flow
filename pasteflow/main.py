@@ -24,7 +24,6 @@ from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.image_annotator import _EditorMixin
 from pasteflow.ui.text_preview import TextPreviewPopup
 from pasteflow.ui.memo_window import MemoWindow
-from pasteflow import hotkey_diag
 from pasteflow.ui.tray import TrayIcon
 from pasteflow.ui.paste_hud import PasteHud
 from pasteflow.ui.settings_dialog import SettingsDialog
@@ -974,7 +973,7 @@ class PasteFlowApp:
         self._bridge.bulk_paste.connect(self._on_bulk_paste_hotkey)
         self._bridge.bulk_path_paste.connect(self._on_bulk_path_paste_hotkey)
         self._bridge.pin_image.connect(self._on_pin_hotkey)
-        self._bridge.new_memo.connect(self._on_new_memo_hotkey)
+        self._bridge.new_memo.connect(lambda: self._open_memo())
         self._bridge.capture_requested.connect(self._on_capture_requested)
         self._bridge.record.connect(self._on_record_hotkey)
         self._bridge.gif_saved.connect(self._on_gif_saved)
@@ -2590,24 +2589,6 @@ class PasteFlowApp:
         popup.edit_requested.connect(self._open_memo)
         self._text_preview_windows[item_id] = popup
         popup.destroyed.connect(lambda _=None, iid=item_id: self._text_preview_windows.pop(iid, None))
-
-    def _on_new_memo_hotkey(self):
-        """새 메모 단축키 — 임시 진단 로그(hotkey_diag)를 앞뒤로 남기고 새 메모창을 연다."""
-        hotkey_diag.log("main received")
-        t = time.perf_counter()
-        self._open_memo()
-        win = max(MemoWindow._instances.values(), key=lambda w: w.item_id, default=None)
-        if win is None:
-            hotkey_diag.log("main shown: no window")
-            return
-        hwnd = int(win.winId())
-        hotkey_diag.log(
-            f"main shown {(time.perf_counter() - t) * 1000:.0f}ms id={win.item_id} open={len(MemoWindow._instances)}"
-            f" {hotkey_diag.describe(hwnd)}")
-        # 처음엔 앞이었다가 뒤로 밀리는 경우를 잡으려고 0.5초 뒤 한 번 더
-        QTimer.singleShot(500, lambda: hotkey_diag.log(
-            f"main +500ms id={win.item_id} {hotkey_diag.describe(hwnd)}")
-            if MemoWindow.get(win.item_id) is win else None)
 
     def _open_memo(self, item_id: int | None = None):
         """메모창 열기 — item_id가 없으면 메모장 맨 위에 새 메모를 만들어 연다.
