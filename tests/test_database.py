@@ -409,3 +409,16 @@ class TestMemo:
             assert not db.get_pinned_items()[0].is_locked
         finally:
             db.close()
+
+    def test_restore_memos_after_clear(self, db):
+        """비우기 직전 항목을 되살리면 내용·순서가 돌아온다(잠긴 것과 섞여도)"""
+        a = db.create_memo("a")
+        b = db.create_memo("b")
+        c = db.create_memo("c")
+        db.set_locked(b.id, True)
+        before = [it for it in db.get_pinned_items() if not it.is_locked]
+        db.clear_memos()
+        db.restore_memos(before)
+        texts = [it.text_content for it in db.get_pinned_items_summary()]
+        assert texts == ["c", "b", "a"]
+        assert all(it.is_pinned for it in db.get_pinned_items())

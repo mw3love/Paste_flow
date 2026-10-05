@@ -1153,6 +1153,14 @@ class PasteFlowApp:
 
         self.interceptor.set_memo_hotkey(self.db.get_setting("hotkey_new_memo", "alt+`"))
 
+        # 메모창 글자 크기·마지막 창 자리 — 메모창이 바꿀 때마다 저장, 시작 시 되살림
+        try:
+            MemoWindow.set_prefs(json.loads(self.db.get_setting("memo_window_prefs", "{}")))
+        except (ValueError, TypeError):
+            pass
+        MemoWindow.prefs_saver = lambda prefs: self.db.set_setting(
+            "memo_window_prefs", json.dumps(prefs))
+
         capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         self.interceptor.set_capture_hotkey(capture_hotkey)
 
@@ -2455,12 +2463,15 @@ class PasteFlowApp:
         dlg = QMessageBox(self.panel)
         dlg.setStyleSheet(_MSGBOX_DARK_STYLE)
         dlg.setWindowTitle("메모장 비우기")
-        dlg.setText(body + "\n\n지우면 되돌릴 수 없어요.")
+        dlg.setText(body + "\n\n지운 직후 뜨는 알림을 누르면 되돌릴 수 있어요.")
         yes = dlg.addButton("지우기", QMessageBox.ButtonRole.DestructiveRole)
         dlg.addButton("취소", QMessageBox.ButtonRole.RejectRole)
         dlg.exec()
         if dlg.clickedButton() is not yes:
             return
+        # 되돌리기용 스냅샷 — 열린 메모창의 아직 저장 안 된 글자까지 먼저 저장하고 읽는다
+        MemoWindow.flush_all()
+        snapshot = [it for it in self.db.get_pinned_items() if not it.is_locked]
         for item_id in self.db.clear_memos():
             win = MemoWindow.get(item_id)
             if win is not None:
@@ -2473,6 +2484,14 @@ class PasteFlowApp:
             self.paste_hud.show_progress(self.queue.get_items(), pointer)
         else:
             self.paste_hud.dismiss()
+        self._refresh_panel()
+        from pasteflow.ui.toast import ToastNotification
+        ToastNotification(f"메모 {len(snapshot)}개를 지웠어요 — 눌러서 되돌리기", icon="↶",
+                          duration_ms=8000,
+                          on_click=lambda: self._undo_clear_memos(snapshot))
+
+    def _undo_clear_memos(self, snapshot: list):
+        self.db.restore_memos(snapshot)
         self._refresh_panel()
 
     def _on_preview_image(self, item_id: int):

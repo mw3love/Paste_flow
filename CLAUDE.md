@@ -62,7 +62,7 @@ pasteflow/
     ├── image_preview.py    # 이미지 미리보기 팝업 (다중 창 지원, Space로 인라인 주석 편집 진입)
     ├── image_annotator.py  # 이미지 주석 편집기 (QGraphicsScene — 도형·선·화살표·펜·텍스트·번호)
     ├── text_preview.py     # 텍스트 미리보기 팝업
-    ├── memo_window.py      # 빠른 메모창 — 메모장 텍스트 항목을 쓰는 동안 자동 저장(일반 창, Esc=닫기, Ctrl+휠=글자 크기)
+    ├── memo_window.py      # 빠른 메모창 — 메모장 텍스트 항목을 쓰는 동안 자동 저장(일반 창, Esc·Ctrl+W=닫기, Ctrl+T=항상 위, Ctrl+휠/Ctrl+0=글자 크기)
     ├── toast.py            # 우하단 스택형 토스트 (복사 알림·시작·OCR)
     ├── paste_hud.py        # 순차 붙여넣기 진행 HUD (큐 목록·포인터 실시간)
     ├── settings_dialog.py  # 설정 화면
@@ -108,7 +108,7 @@ docs/
 - **`clipboard_monitor.py`** — `WM_CLIPBOARDUPDATE` 감시 → `_read_clipboard()`가 항상 리스트 반환(탐색기 다중 이미지 파일은 파일마다 항목). 자체 쓰기는 `mark_self_write`(0.5초 시간창 + `SELF_WRITE_BACKSTOP_SEC` 2초 해시). 직전과 같은 내용은 `DUPLICATE_WINDOW_SEC`(1.5초) 안에서만 중복으로 거른다. OLE·HWP 네이티브 포맷은 `extra_formats`에서 제외(한글→한글 붙여넣기 실패 방지). 썸네일은 PIL 우선, 실패 시 raw DIB로 보고 `_dib_to_bmp`. `is_encoded_image`는 인터셉터와 공유.
 - **`paste_queue.py`** — 순차 큐·포인터. 리셋 트리거: 일반 Ctrl+V(`mark_plain_paste`) / idle 만료(`idle_reset_sec`, 기본 10초) / `pointer>0`인 상태의 새 복사. `set_queue`·`clear`·`remove_item`·`undo_last`(테스트만 사용). TDD 대상.
 - **`paste_interceptor.py`** — `WH_KEYBOARD_LL` 훅 하나로 모든 전역 단축키 감지(표는 아래 「단축키 체계」). Ctrl+Shift+V는 클립보드 교체 → `_send_clean_key(VK_V)`(수정키 해제·복원 + `VK_MASK` 입력기 전환 방지). 일반 Ctrl+V는 통과시키며 물리 키만 `on_plain_paste`로 알림. suppress한 키는 짝 **물리** keyup도 막음. STT는 keydown·keyup 푸시투토크(`_stt_mod_only`면 Ctrl+Win처럼 수식키만). 설정창 녹화 중엔 `suspend()`로 전부 통과. `_set_clipboard`는 텍스트·HTML·RTF·이미지(PNG면 PNG+DIB, 그 밖의 파일 포맷은 DIB로 변환, raw DIB는 그대로)·`extra_formats` 전부 복원.
-- **`database.py`** — SQLite(`clipboard_items` FIFO 50개·고정 제외 / `settings` / 사용 안 하는 `ai_history`). 단일 커넥션 + `_lock`(RLock). `history_order`(DB 전용)로 표시 순서, `bump_history_to_top`으로 복사한 항목을 최상단에(패널 Enter·드래그 붙여넣기는 순서 안 바꿈). summary 쿼리는 컬럼을 명시 나열하므로 새 컬럼은 거기에도 추가할 것. 열 때 빈 페이지가 절반 넘고 5MB 이상이면 `VACUUM`(`_compact_if_bloated`). 메모장: `create_memo`(맨 위)·`set_locked`·`count_memos`·`clear_memos`(잠긴 것 제외, 지운 id 반환) — 잠긴 항목은 `delete_item`/`unpin_item`이 False로 거부. TDD 대상.
+- **`database.py`** — SQLite(`clipboard_items` FIFO 50개·고정 제외 / `settings` / 사용 안 하는 `ai_history`). 단일 커넥션 + `_lock`(RLock). `history_order`(DB 전용)로 표시 순서, `bump_history_to_top`으로 복사한 항목을 최상단에(패널 Enter·드래그 붙여넣기는 순서 안 바꿈). summary 쿼리는 컬럼을 명시 나열하므로 새 컬럼은 거기에도 추가할 것. 열 때 빈 페이지가 절반 넘고 5MB 이상이면 `VACUUM`(`_compact_if_bloated`). 메모장: `create_memo`(맨 위)·`set_locked`·`count_memos`·`clear_memos`(잠긴 것 제외, 지운 id 반환)·`restore_memos`(비우기 되돌리기) — 잠긴 항목은 `delete_item`/`unpin_item`이 False로 거부. TDD 대상.
 - **`models.py`** — `ClipboardItem`(… `extra_formats` dict, `saved_image_path` = Alt+F2 캡처 파일 경로, `is_locked` = 메모장 삭제 방지). TDD 대상.
 - **`hotkey_manager.py`** — `_SPECIAL_KEY_MAP`(특수 키 이름 → VK) 단일 정의만 남음.
 - **`crypto.py`** — DPAPI `protect`/`unprotect`(`enc:v1:` 접두, 멱등, 실패 시 `""`).
@@ -130,13 +130,13 @@ docs/
 
 **UI (`pasteflow/ui/`)**
 
-- **`panel.py`** — 메모장(고정) + 히스토리 패널(검색 없음). 메모장 제목 옆 `+`=새 메모, 제목 우클릭=새 메모·메모장 비우기(확인은 main). 텍스트 `수정`은 메모창으로 연다. 잠긴 항목은 글자 칸 안 자물쇠 표시, `l`로 잠금 토글, `Del`·`p`는 막고 토스트. 클릭=선택(코랄), 키(`Ctrl+C`·`c` 큐 토글·`Space`·`Enter` 붙여넣기·`p`·`l`·`s`·`o`·`g`·`Del`·`↑↓`). 단축키 대상 `_kbd_focus_id`는 클릭·방향키로만 정함(hover 금지). 더블클릭 붙여넣기 없음. fake drag로 외부 앱 붙여넣기(Alt+드래그 이미지=경로 텍스트) 및 재정렬. 자동 닫기 📌(기본 OFF). 항목 최대 5줄(높이 공식은 「설계 규칙」).
+- **`panel.py`** — 메모장(고정) + 히스토리 패널(검색 없음). 메모장 제목 옆 `+`=새 메모, 제목 우클릭=새 메모·메모장 비우기(확인은 main). 텍스트 `수정`과 메모장 텍스트 항목의 `Space`는 메모창으로 연다(히스토리 `Space`는 미리보기). 메모장 비우기 직후 토스트를 누르면 되돌린다(`db.restore_memos`, 토스트 `on_click`). 잠긴 항목은 글자 칸 안 자물쇠 표시, `l`로 잠금 토글, `Del`·`p`는 막고 토스트. 클릭=선택(코랄), 키(`Ctrl+C`·`c` 큐 토글·`Space`·`Enter` 붙여넣기·`p`·`l`·`s`·`o`·`g`·`Del`·`↑↓`). 단축키 대상 `_kbd_focus_id`는 클릭·방향키로만 정함(hover 금지). 더블클릭 붙여넣기 없음. fake drag로 외부 앱 붙여넣기(Alt+드래그 이미지=경로 텍스트) 및 재정렬. 자동 닫기 📌(기본 OFF). 항목 최대 5줄(높이 공식은 「설계 규칙」).
 - **`menu_style.py`** / **`menu_icons.py`** — 우클릭 메뉴 공통: `make_menu()`·`menu.add(이름\t단축키, 아이콘, danger=)`. 조건부 항목은 숨기지 말고 비활성. 묶음 순서: 보기·큐 | 꺼내기 | 다루기 | 고정 | 삭제·닫기.
 - **`image_preview.py`** — 이미지 미리보기·핀 창(다중 창, `native=True`면 1:1, `place_rect`로 제자리 덮기). 우클릭: 복사·경로 복사·OCR·Gemini 질문·복제·주석 편집·닫기 — 주석이 있으면 `_effective_item()` 평탄화본 대상. Space로 인라인 주석 편집, 툴바는 하단 예약 strip(토글 시 창 크기 불변).
 - **`image_annotator.py`** — 주석 편집기(`_EditorMixin`·`_AnnotatorView`·도형 아이템 + `_HandleResizeMixin`). 도구 1~8(수식키 없이), 도구별 우클릭 미니패널(색·크기·화살표 머리/방향, DB `annot_tool_defaults`), 3차 베지어 화살표 + 도형 테두리 스냅, 크기조절(우하단)·회전(좌상단) 핸들(잡기 판정 24px), `flatten_scene_to_png`.
 - **`text_preview.py`** — 평문 미리보기(`QPlainTextEdit`, 스크롤 없이 전부 보이게 크기 계산, 우클릭 전체 복사·수정(→메모창)·닫기).
-- **`memo_window.py`** — 빠른 메모창(일반 창). 0.5초 멈추면 저장, 닫을 때 저장, 빈 채로 닫으면 삭제. Ctrl+휠 글자 크기(앱 실행 중에만 기억). DB는 시그널로 main에 넘김. `_quit`에서 `close_all()`을 `db.close()`보다 먼저.
-- **`toast.py`** — 우하단 스택 토스트(주 모니터, 최대 5개, 클릭 시 빠른 닫기), `image_path`/`image_bytes` 썸네일, 커서 앵커·중앙 칩(`anchor`, `center=True`, 클릭 통과), 지속형(`duration_ms=0` + `set_message`/`dismiss`). 복사 알림은 `Q{n}` 배지 + 썸네일(원본 `image_data` 우선), 아이콘 없음.
+- **`memo_window.py`** — 빠른 메모창(일반 창). 0.5초 멈추면 저장, 닫을 때 저장, 빈 채로 닫으면 삭제. Esc·Ctrl+W 닫기, Ctrl+T 항상 위(창마다, 저장 안 함 — 전용 WinDLL `SetWindowPos`), Ctrl+휠·Ctrl+0 글자 크기. 글자 크기·마지막 창 자리(`saveGeometry`)는 DB `memo_window_prefs`(JSON)에 저장돼 다음에도 그대로 연다(`set_prefs`/`prefs_saver`). DB는 시그널로 main에 넘김. `_quit`에서 `close_all()`을 `db.close()`보다 먼저.
+- **`toast.py`** — 우하단 스택 토스트(주 모니터, 최대 5개, 클릭 시 빠른 닫기 — `on_click`을 주면 클릭 때 한 번 호출), `image_path`/`image_bytes` 썸네일, 커서 앵커·중앙 칩(`anchor`, `center=True`, 클릭 통과), 지속형(`duration_ms=0` + `set_message`/`dismiss`). 복사 알림은 `Q{n}` 배지 + 썸네일(원본 `image_data` 우선), 아이콘 없음.
 - **`paste_hud.py`** — 순차 붙여넣기 진행 HUD(비활성 창, ✓▶·, ✕ 취소 → `_on_cancel_paste_queue`).
 - **`settings_dialog.py`** — 왼쪽 목록 내비(`일반`/`붙여넣기`/`캡처·녹화`/`AI`, 실제 페이지는 탭 바를 숨긴 `QTabWidget`), 기능 카드마다 그 기능의 단축키·옵션. AI 탭: `AI 연결 (OpenAI 호환 API)`(Base URL·API 키·모델조회·연결 테스트 = 연결+OCR 모델+크레딧), OCR, 음성 입력(STT 모델은 Gemini만, 마이크 테스트). 창-모달(`WindowModal`) + `_open_settings` 재진입 가드. 녹화 중 훅 정지는 `recording_active` → `done()`/`closeEvent`에서도 해제. 모델 콤보는 editable이라 표시 텍스트 = 저장값(계열 헤더는 비활성, 들여쓰기는 델리게이트로). 디자인 비교 하네스 `tools/settings_bakeoff.py`.
 - **`nav_icons.py`** — 설정창 아이콘(SVG 문자열 내장 — spec datas 불필요).

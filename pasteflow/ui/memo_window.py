@@ -6,11 +6,17 @@ UX 정책:
 - 비어 있는 채로 닫으면 그 메모를 지워 달라고 요청한다(잠긴 메모는 main/DB가 거른다).
 - DB는 직접 만지지 않고 시그널로 main에 넘긴다. 클립보드·순차 큐와는 무관하다.
 - 같은 메모를 다시 열면 새 창 대신 열려 있는 창을 앞으로 가져온다.
-- Ctrl+휠로 글자 크기를 바꾼다(윈도우 메모장처럼). 앱이 켜져 있는 동안 새 메모창도 그 크기로 열린다.
+- Ctrl+휠로 글자 크기를 바꾸고 Ctrl+0으로 되돌린다(윈도우 메모장처럼).
+- 글자 크기와 마지막 창 크기·위치는 main이 DB에 저장해 다음에도 그대로 연다(set_prefs/prefs_saver).
+- Esc·Ctrl+W = 닫기, Ctrl+T = 항상 위 켜기/끄기(창마다, 저장 안 함).
 """
+import base64
+import ctypes
+import ctypes.wintypes
+
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QFrame, QApplication
-from PyQt6.QtCore import Qt, QTimer, QRect, QPoint, QEvent, pyqtSignal
-from PyQt6.QtGui import QFont, QCursor
+from PyQt6.QtCore import Qt, QTimer, QRect, QPoint, QEvent, QByteArray, pyqtSignal
+from PyQt6.QtGui import QFont, QCursor, QKeySequence, QShortcut
 
 from pasteflow.ui.theme import BASE as _BG, TEXT as _TEXT, PEACH as _PEACH
 from pasteflow.ui.image_preview import compute_preview_pos, _CASCADE_STEP
@@ -24,12 +30,49 @@ _FONT_PX_MIN = 8
 _FONT_PX_MAX = 72
 _ZOOM_STEP = 1.1  # 휠 한 칸당 ~10%
 
+# 항상 위 — Qt 플래그를 바꾸면 창이 다시 만들어지며 깜빡여서 SetWindowPos로 TOPMOST만 바꾼다.
+# 공유 windll.user32에 argtypes를 걸지 않도록 전용 인스턴스를 쓴다(CLAUDE.md 함정).
+_user32 = ctypes.WinDLL("user32")
+# argtypes 없이 -1을 넘기면 64비트 HWND로 부호 확장이 안 돼 TOPMOST가 안 걸린다(2026-10-05 실측)
+_user32.SetWindowPos.argtypes = [
+    ctypes.wintypes.HWND, ctypes.wintypes.HWND,
+    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.wintypes.UINT,
+]
+_HWND_TOPMOST = -1
+_HWND_NOTOPMOST = -2
+_SWP_FLAGS = 0x0001 | 0x0002 | 0x0010  # NOSIZE | NOMOVE | NOACTIVATE
+
 
 class MemoWindow(QWidget):
     """메모 하나를 편집하는 창 — item_id 하나당 창 하나"""
 
     _instances: dict[int, "MemoWindow"] = {}
     _font_px: int = _FONT_PX  # 마지막으로 맞춘 글자 크기 — 새 메모창도 이 크기로 연다
+    _last_geometry: QByteArray | None = None  # 마지막으로 닫은 창의 saveGeometry() — 다음 창 자리
+    prefs_saver = None  # main이 넣는 콜백(dict) — 글자 크기·창 자리가 바뀌면 DB에 저장
+
+    @classmethod
+    def set_prefs(cls, prefs: dict):
+        """시작 시 main이 DB에서 읽은 값으로 글자 크기·마지막 창 자리를 되살린다."""
+        px = prefs.get("font_px")
+        if isinstance(px, int):
+            cls._font_px = max(_FONT_PX_MIN, min(_FONT_PX_MAX, px))
+        geom = prefs.get("geometry")
+        if isinstance(geom, str) and geom:
+            try:
+                cls._last_geometry = QByteArray(base64.b64decode(geom))
+            except Exception:
+                cls._last_geometry = None
+
+    @classmethod
+    def _save_prefs(cls):
+        if cls.prefs_saver is None:
+            return
+        geom = cls._last_geometry
+        cls.prefs_saver({
+            "font_px": cls._font_px,
+            "geometry": base64.b64encode(bytes(geom)).decode("ascii") if geom else "",
+        })
 
     save_requested = pyqtSignal(int, str)   # (item_id, text) — 내용이 바뀌었을 때만
     discard_requested = pyqtSignal(int)     # item_id — 빈 채로 닫힘
@@ -38,6 +81,12 @@ class MemoWindow(QWidget):
     @classmethod
     def get(cls, item_id: int) -> "MemoWindow | None":
         return cls._instances.get(item_id)
+
+    @classmethod
+    def flush_all(cls):
+        """열린 모든 메모창의 저장 대기 중인 변경을 지금 저장한다(메모장 비우기 스냅샷 직전)."""
+        for win in list(cls._instances.values()):
+            win._flush()
 
     @classmethod
     def close_all(cls):
@@ -82,6 +131,11 @@ class MemoWindow(QWidget):
         self._save_timer.timeout.connect(self._flush)
         self._editor.textChanged.connect(self._on_text_changed)
 
+        self._topmost = False
+        for keys, slot in (("Ctrl+W", self.close), ("Ctrl+T", self._toggle_topmost),
+                           ("Ctrl+0", self._reset_zoom)):
+            QShortcut(QKeySequence(keys), self, slot)
+
         self._update_title()
         self.resize(_DEFAULT_W, _DEFAULT_H)
         type(self)._instances[item_id] = self
@@ -91,9 +145,15 @@ class MemoWindow(QWidget):
         return self._item_id
 
     def show_near(self, panel_geom: QRect | None):
-        """패널이 보이면 그 옆에, 아니면 커서가 있는 화면 가운데에 띄우고 포커스를 준다."""
+        """마지막으로 닫은 메모창 자리(있으면)에, 없으면 패널 옆이나 커서 화면 가운데에 띄운다.
+
+        다른 메모창이 열려 있으면 그만큼 비켜 놓아 완전히 겹치지 않게 한다.
+        """
         cascade = (len(type(self)._instances) - 1) * _CASCADE_STEP
-        if panel_geom is not None:
+        if type(self)._last_geometry is not None and self.restoreGeometry(type(self)._last_geometry):
+            if cascade:  # 표시 전엔 pos()에 제목 표시줄이 안 잡혀 → 안쪽 영역(geometry) 기준으로 비킨다
+                self.setGeometry(self.geometry().translated(cascade, cascade))
+        elif panel_geom is not None:
             screen = QApplication.screenAt(panel_geom.center()) or QApplication.primaryScreen()
             self.move(compute_preview_pos(panel_geom, self.size(), screen, cascade))
         else:
@@ -126,10 +186,24 @@ class MemoWindow(QWidget):
                 if new == cur:  # 작은 크기에서 10%가 반올림으로 사라지지 않게 최소 1px
                     new = cur + (1 if delta > 0 else -1)
                 new = max(_FONT_PX_MIN, min(_FONT_PX_MAX, new))
-                self._apply_font_px(new)
-                type(self)._font_px = new
+                self._set_zoom(new)
             return True
         return super().eventFilter(obj, event)
+
+    def _set_zoom(self, px: int):
+        self._apply_font_px(px)
+        type(self)._font_px = px
+        type(self)._save_prefs()
+
+    def _reset_zoom(self):
+        self._set_zoom(_FONT_PX)
+
+    def _toggle_topmost(self):
+        self._topmost = not self._topmost
+        _user32.SetWindowPos(int(self.winId()),
+                             _HWND_TOPMOST if self._topmost else _HWND_NOTOPMOST,
+                             0, 0, 0, 0, _SWP_FLAGS)
+        self._update_title()
 
     def _on_text_changed(self):
         self._update_title()
@@ -146,7 +220,10 @@ class MemoWindow(QWidget):
         first = self._editor.toPlainText().strip().split("\n", 1)[0].strip()
         if len(first) > 30:
             first = first[:30] + "…"
-        self.setWindowTitle(f"{first} — 메모" if first else "새 메모")
+        title = f"{first} — 메모" if first else "새 메모"
+        if getattr(self, "_topmost", False):
+            title += "  [항상 위]"
+        self.setWindowTitle(title)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
@@ -156,6 +233,8 @@ class MemoWindow(QWidget):
 
     def closeEvent(self, event):
         self._flush()
+        type(self)._last_geometry = self.saveGeometry()
+        type(self)._save_prefs()
         type(self)._instances.pop(self._item_id, None)
         if not self._editor.toPlainText().strip():
             self.discard_requested.emit(self._item_id)

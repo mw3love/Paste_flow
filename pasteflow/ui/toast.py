@@ -89,8 +89,10 @@ class ToastNotification(QWidget):
                  icon: str = "✓", badge: str = None,
                  badge_position: str = "trailing",
                  image_path: str = None, image_bytes: bytes = None,
-                 anchor: QPoint = None, center: bool = False):
+                 anchor: QPoint = None, center: bool = False,
+                 on_click=None):
         """
+        on_click: 주어지면 클릭 시 이 함수를 한 번 부른 뒤 닫는다(예: 메모장 비우기 되돌리기).
         badge_position: "leading"(아이콘과 본문 사이) | "trailing"(본문 뒤, 기본)
         image_path: 주어지면 아이콘과 본문 사이에 그 이미지의 썸네일을 표시
                     (이미지→경로 붙여넣기 시 "의도한 이미지 맞나" 시각 확인용).
@@ -115,6 +117,7 @@ class ToastNotification(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
         self._closing = False
+        self._on_click = on_click
         self._pos_anim = None
         self._anchor = anchor  # None=우하단 스택, QPoint=앵커 기준 배치
         self._center = center  # True면 앵커 모니터 정중앙, False면 앵커 옆 +16px
@@ -275,6 +278,9 @@ class ToastNotification(QWidget):
         커서 앵커 모드(OCR·AI 진행 칩)는 WindowTransparentForInput이라 이 이벤트
         자체를 받지 않으므로, 실제로는 우하단 스택 토스트(복사·붙여넣기 알림)에만 적용된다.
         """
+        if self._on_click is not None and not self._closing:
+            cb, self._on_click = self._on_click, None  # 두 번 눌러도 한 번만
+            cb()
         self._start_fade_out(duration_ms=_CLICK_FADE_MS)
         super().mousePressEvent(event)
 

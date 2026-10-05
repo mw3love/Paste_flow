@@ -1073,6 +1073,11 @@ class ClipboardPanel(QWidget):
             preview_action.triggered.connect(
                 lambda: self.preview_image_requested.emit(item_id)
             )
+        elif item.is_pinned:
+            preview_action = menu.add("메모 열기	Space", "pencil-simple")
+            preview_action.triggered.connect(
+                lambda: self.open_memo_requested.emit(item_id)
+            )
         else:
             preview_action = menu.add("미리보기	Space", "eye")
             preview_action.triggered.connect(
@@ -1600,7 +1605,7 @@ class ClipboardPanel(QWidget):
             self.paste_item_requested.emit(item)
 
     def _kbd_preview(self):
-        """Space: 포커스 항목 미리보기"""
+        """Space: 포커스 항목 미리보기 — 메모장 텍스트 항목은 메모창으로 바로 연다"""
         if self._kbd_focus_id is None:
             return
         item = self._find_item(self._kbd_focus_id)
@@ -1608,6 +1613,8 @@ class ClipboardPanel(QWidget):
             return
         if item.content_type == "image":
             self.preview_image_requested.emit(item.id)
+        elif item.is_pinned:
+            self.open_memo_requested.emit(item.id)
         else:
             self.preview_text_requested.emit(item.id)
 

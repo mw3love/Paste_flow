@@ -269,6 +269,13 @@ class Database:
             self.conn.commit()
         return ids
 
+    def restore_memos(self, items: list[ClipboardItem]):
+        """메모장 비우기 되돌리기 — 지우기 전에 읽어 둔 전체 항목을 같은 순서(pin_order)로 다시 넣는다.
+        id는 새로 받는다(옛 id는 이미 지워짐)."""
+        for item in items:
+            item.is_pinned = True
+            self.save_item(item)
+
     def pin_item(self, item_id: int):
         """항목 고정 — pin_order는 현재 최대값+1"""
         with self._lock:
