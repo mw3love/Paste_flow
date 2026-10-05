@@ -16,13 +16,13 @@ import ctypes
 import ctypes.wintypes
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QFrame, QApplication, QToolButton
-from PyQt6.QtCore import Qt, QTimer, QRect, QRectF, QPoint, QPointF, QSize, QEvent, QByteArray, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QEvent, QByteArray, pyqtSignal
 from PyQt6.QtGui import QFont, QCursor, QKeySequence, QShortcut, QIcon, QPixmap, QPainter, QColor
 
 from pasteflow.ui.theme import BASE as _BG, TEXT as _TEXT, PEACH as _PEACH, COLORS
 from pasteflow.ui.menu_style import make_menu
 from pasteflow.ui.menu_icons import menu_icon
-from pasteflow.ui.image_preview import compute_preview_pos, _CASCADE_STEP
+from pasteflow.ui.image_preview import _CASCADE_STEP
 
 _SAVE_DELAY_MS = 500
 _DEFAULT_W = 420
@@ -243,43 +243,28 @@ class MemoWindow(QWidget):
     def item_id(self) -> int:
         return self._item_id
 
-    def show_near(self, panel_geom: QRect | None):
-        """마지막으로 닫은 메모창 자리(있으면)에, 없으면 패널 옆이나 커서 화면 가운데에 띄운다.
+    def show_centered(self):
+        """마우스가 있는 모니터 정중앙에 띄운다 — 크기만 마지막으로 닫은 창 것을 쓴다.
 
-        마지막 자리는 마우스가 있는 모니터로 옮겨 쓴다 — 그 모니터 안에서의 상대 위치·크기는
-        그대로(여러 모니터에서 엉뚱한 화면에 뜨지 않게, 2026-10-05 사용자 결정).
-        다른 메모창이 열려 있으면 그만큼 비켜 놓아 완전히 겹치지 않게 한다.
+        가로·세로·해상도가 제각각인 모니터를 같이 쓰므로 위치는 기억하지 않고 늘 같은 기준으로
+        (2026-10-05 사용자 결정 — 옛 '마지막 자리를 모니터 왼쪽 위 기준으로 옮기기'는 세로
+        모니터에서 가장자리로 밀려 모니터마다 자리가 달라 보였다). 다른 메모창이 열려 있으면
+        그만큼 오른쪽 아래로 비켜 완전히 겹치지 않게 한다.
         """
-        cascade = (len(type(self)._instances) - 1) * _CASCADE_STEP
         if type(self)._last_geometry is not None and self.restoreGeometry(type(self)._last_geometry):
-            self._move_to_cursor_screen()
-            if cascade:  # 표시 전엔 pos()에 제목 표시줄이 안 잡혀 → 안쪽 영역(geometry) 기준으로 비킨다
-                self.setGeometry(self.geometry().translated(cascade, cascade))
-        elif panel_geom is not None:
-            screen = QApplication.screenAt(panel_geom.center()) or QApplication.primaryScreen()
-            self.move(compute_preview_pos(panel_geom, self.size(), screen, cascade))
-        else:
-            screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
-            center = screen.availableGeometry().center()
-            self.move(center - QPoint(self.width() // 2 - cascade, self.height() // 2 - cascade))
-        self.bring_to_front()
-
-    def _move_to_cursor_screen(self):
-        """복원한 자리를 마우스가 있는 모니터로 옮긴다(모니터 안 상대 위치 유지, 화면 밖으로 안 나가게)."""
-        g = self.geometry()
-        src = QApplication.screenAt(g.center()) or QApplication.primaryScreen()
-        dst = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
-        if dst is None:
-            return
-        avail = dst.availableGeometry()
-        top_left = g.topLeft()
-        if src is not None and src is not dst:
-            top_left = avail.topLeft() + (g.topLeft() - src.availableGeometry().topLeft())
-        w = min(g.width(), avail.width())
-        h = min(g.height(), avail.height() - _TITLE_BAR_H)
-        x = max(avail.left(), min(top_left.x(), avail.right() + 1 - w))
-        y = max(avail.top() + _TITLE_BAR_H, min(top_left.y(), avail.bottom() + 1 - h))
+            self.setWindowState(Qt.WindowState.WindowNoState)  # 최대화로 닫았어도 크기만 쓴다
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        w = min(self.width(), avail.width())
+        h = min(self.height(), avail.height() - _TITLE_BAR_H)
+        cascade = (len(type(self)._instances) - 1) * _CASCADE_STEP
+        # 표시 전엔 제목 표시줄이 geometry에 안 잡혀 → 안쪽 영역 기준, 위쪽은 제목 표시줄만큼 내린다
+        x = avail.left() + (avail.width() - w) // 2 + cascade
+        y = avail.top() + _TITLE_BAR_H + (avail.height() - _TITLE_BAR_H - h) // 2 + cascade
+        x = max(avail.left(), min(x, avail.right() + 1 - w))
+        y = max(avail.top() + _TITLE_BAR_H, min(y, avail.bottom() + 1 - h))
         self.setGeometry(x, y, w, h)
+        self.bring_to_front()
 
     def bring_to_front(self):
         if self.isMinimized():

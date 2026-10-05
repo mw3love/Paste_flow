@@ -2612,7 +2612,7 @@ class PasteFlowApp:
         win.save_requested.connect(self._on_memo_saved)
         win.discard_requested.connect(lambda iid: self._on_delete_item(iid, notify=False))
         win.closed.connect(lambda _id: self._refresh_panel())
-        win.show_near(self.panel.geometry() if self.panel.isVisible() else None)
+        win.show_centered()
 
     def _open_ai_dialog(self, initial_image_png: bytes | None = None):
         """이미지 우클릭 "Gemini에게 질문" — 질문 입력창을 **비모달로** 띄우고, 질문을
