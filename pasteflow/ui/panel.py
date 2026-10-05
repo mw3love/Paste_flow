@@ -28,7 +28,7 @@ from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.text_preview import TextPreviewPopup
 from pasteflow.ui.menu_style import make_menu
 from pasteflow.ui.menu_icons import menu_icon
-from pasteflow.ui.theme import COLORS
+from pasteflow.ui.theme import COLORS, PEACH_HOVER
 
 PANEL_WIDTH = 320
 PANEL_HEIGHT = 420
@@ -60,12 +60,30 @@ def _crisp_plus_icon(color: str, size: int) -> QIcon:
     return QIcon(pm)
 
 
+class _HoverIconButton(QPushButton):
+    """배경 없이 아이콘 색만 바꿔 호버를 알리는 버튼(메모장 + 버튼)."""
+
+    def __init__(self, icon: QIcon, hover_icon: QIcon, parent=None):
+        super().__init__(parent)
+        self._icon, self._hover_icon = icon, hover_icon
+        self.setIcon(icon)
+
+    def enterEvent(self, event):
+        self.setIcon(self._hover_icon)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.setIcon(self._icon)
+        super().leaveEvent(event)
+
+
 class PanelItemWidget(QWidget):
     """패널 내 개별 항목 위젯"""
 
     clicked = pyqtSignal(int, object)
     context_menu_requested = pyqtSignal(int, object)
     external_drag_paste = pyqtSignal(int, QPoint, bool)  # (item_id, cursor_pos, alt_held)
+    double_clicked = pyqtSignal(int)  # item_id — Space와 같은 '열기'(붙여넣기 아님)
 
     def __init__(
         self,
@@ -369,6 +387,22 @@ class PanelItemWidget(QWidget):
         self._drag_start_pos = None
         self._did_drag = False
         event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        # 열기만 한다 — 옛 더블클릭-붙여넣기(직전 포그라운드 창 오발동)와는 다른 동작
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit(self.item_id)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def set_preview_text(self, text: str):
+        """위젯을 다시 만들지 않고 글자만 바꾼다(메모창에서 쓰는 중인 내용을 실시간 반영)."""
+        if self._text_label is None:
+            return
+        lines = text.strip().split("\n")[:5]
+        self._text_label.setText("\n".join(line[:80] for line in lines))
+        self._adjust_text_height()
 
     def contextMenuEvent(self, event):
         if self.childAt(event.pos()) is None:
@@ -785,7 +819,7 @@ class ClipboardPanel(QWidget):
             _hf.setPixelSize(11)
             _hf.setWeight(QFont.Weight.DemiBold)
             fm = QFontMetrics(_hf)
-            text_width = fm.horizontalAdvance(pin_header_text) + 12  # 좌우 padding 4+4 + 여유 4
+            text_width = fm.horizontalAdvance(pin_header_text) + 6  # 왼쪽 padding 4 + 여유 2(오른쪽 padding 없음)
             pin_header_btn.setFixedWidth(text_width)
             pin_header_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             pin_header_btn.setStyleSheet(f"""
@@ -796,7 +830,7 @@ class ClipboardPanel(QWidget):
                     font-size: 11px;
                     font-weight: 600;
                     text-align: left;
-                    padding: 0 4px;
+                    padding: 0 0 0 4px;
                 }}
                 QPushButton:hover {{
                     color: {COLORS['peach']};
@@ -805,15 +839,14 @@ class ClipboardPanel(QWidget):
             pin_header_btn.clicked.connect(self._toggle_pinned)
             pin_header_row.addWidget(pin_header_btn)
 
-            new_memo_btn = QPushButton()
-            new_memo_btn.setIcon(_crisp_plus_icon(COLORS['peach'], 9))
+            new_memo_btn = _HoverIconButton(_crisp_plus_icon(COLORS['peach'], 9),
+                                            _crisp_plus_icon(PEACH_HOVER, 9))
             new_memo_btn.setIconSize(QSize(9, 9))
             new_memo_btn.setFixedSize(14, 16)
             new_memo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             new_memo_btn.setToolTip("새 메모")
-            new_memo_btn.setStyleSheet(f"""
-                QPushButton {{ background: transparent; border: none; }}
-            """)
+            # padding-top: 십자 가운데를 글자 높이 가운데에 맞춘다(실측 1.5px 위로 떠 있었음)
+            new_memo_btn.setStyleSheet("QPushButton { background: transparent; border: none; padding-top: 3px; }")
             new_memo_btn.clicked.connect(self.new_memo_requested.emit)
             pin_header_row.addWidget(new_memo_btn)
             pin_header_row.addStretch()
@@ -993,6 +1026,7 @@ class ClipboardPanel(QWidget):
         widget.clicked.connect(self._on_item_clicked)
         widget.context_menu_requested.connect(self._on_item_context_menu)
         widget.external_drag_paste.connect(self._on_item_external_drag_paste)
+        widget.double_clicked.connect(self._open_item)
 
     def _on_item_external_drag_paste(self, item_id: int, cursor_pos: QPoint, alt_held: bool):
         self.drag_to_app_requested.emit(item_id, cursor_pos, alt_held)
@@ -1605,10 +1639,26 @@ class ClipboardPanel(QWidget):
             self.paste_item_requested.emit(item)
 
     def _kbd_preview(self):
-        """Space: 포커스 항목 미리보기 — 메모장 텍스트 항목은 메모창으로 바로 연다"""
-        if self._kbd_focus_id is None:
+        """Space: 포커스 항목 열기"""
+        if self._kbd_focus_id is not None:
+            self._open_item(self._kbd_focus_id)
+
+    def update_item_text(self, item_id: int, text: str):
+        """메모창에서 쓰는 중인 내용을 패널 그 한 줄에만 반영한다(전체 refresh는 깜빡임)."""
+        item = self._find_item(item_id)
+        if item is None:
             return
-        item = self._find_item(self._kbd_focus_id)
+        item.text_content = text
+        item.preview_text = text.replace("\n", " ")[:200]
+        for i in range(self._items_layout.count()):
+            w = self._items_layout.itemAt(i).widget()
+            if isinstance(w, PanelItemWidget) and w.item_id == item_id:
+                w.set_preview_text(text)
+                break
+
+    def _open_item(self, item_id: int):
+        """Space·더블클릭 공용 — 메모장 텍스트는 메모창, 그 밖엔 미리보기"""
+        item = self._find_item(item_id)
         if not item:
             return
         if item.content_type == "image":

@@ -62,7 +62,7 @@ pasteflow/
     ├── image_preview.py    # 이미지 미리보기 팝업 (다중 창 지원, Space로 인라인 주석 편집 진입)
     ├── image_annotator.py  # 이미지 주석 편집기 (QGraphicsScene — 도형·선·화살표·펜·텍스트·번호)
     ├── text_preview.py     # 텍스트 미리보기 팝업
-    ├── memo_window.py      # 빠른 메모창 — 메모장 텍스트 항목을 쓰는 동안 자동 저장(일반 창, Esc·Ctrl+W=닫기, Ctrl+T=항상 위, Ctrl+휠/Ctrl+0=글자 크기)
+    ├── memo_window.py      # 빠른 메모창 — 메모장 텍스트 항목을 쓰는 동안 자동 저장(일반 창, Esc·Ctrl+W=닫기, Ctrl+T·오른쪽 위 핀=항상 위, Ctrl+휠/Ctrl+0=글자 크기, 우클릭=공통 메뉴)
     ├── toast.py            # 우하단 스택형 토스트 (복사 알림·시작·OCR)
     ├── paste_hud.py        # 순차 붙여넣기 진행 HUD (큐 목록·포인터 실시간)
     ├── settings_dialog.py  # 설정 화면
@@ -130,12 +130,12 @@ docs/
 
 **UI (`pasteflow/ui/`)**
 
-- **`panel.py`** — 메모장(고정) + 히스토리 패널(검색 없음). 메모장 제목 옆 `+`=새 메모, 제목 우클릭=새 메모·메모장 비우기(확인은 main). 텍스트 `수정`과 메모장 텍스트 항목의 `Space`는 메모창으로 연다(히스토리 `Space`는 미리보기). 메모장 비우기 직후 토스트를 누르면 되돌린다(`db.restore_memos`, 토스트 `on_click`). 잠긴 항목은 글자 칸 안 자물쇠 표시, `l`로 잠금 토글, `Del`·`p`는 막고 토스트. 클릭=선택(코랄), 키(`Ctrl+C`·`c` 큐 토글·`Space`·`Enter` 붙여넣기·`p`·`l`·`s`·`o`·`g`·`Del`·`↑↓`). 단축키 대상 `_kbd_focus_id`는 클릭·방향키로만 정함(hover 금지). 더블클릭 붙여넣기 없음. fake drag로 외부 앱 붙여넣기(Alt+드래그 이미지=경로 텍스트) 및 재정렬. 자동 닫기 📌(기본 OFF). 항목 최대 5줄(높이 공식은 「설계 규칙」).
+- **`panel.py`** — 메모장(고정) + 히스토리 패널(검색 없음). 메모장 제목 옆 `+`=새 메모, 제목 우클릭=새 메모·메모장 비우기(확인은 main). 텍스트 `수정`과 메모장 텍스트 항목의 `Space`·더블클릭은 메모창으로 연다(히스토리는 미리보기 — 열기만 하고 붙여넣지 않음). 메모창에서 쓰는 내용은 `update_item_text`로 그 한 줄만 실시간 반영(전체 refresh는 깜빡임). 메모 삭제·메모장 비우기 직후 토스트(2초, 복사 알림과 같음)를 누르면 되돌린다(`db.restore_memos`, 토스트 `on_click`) — 빈 메모창을 닫아 저절로 지울 때는 안 띄움. 잠긴 항목은 글자 칸 안 자물쇠 표시, `l`로 잠금 토글, `Del`·`p`는 막고 토스트. 클릭=선택(코랄), 키(`Ctrl+C`·`c` 큐 토글·`Space`·`Enter` 붙여넣기·`p`·`l`·`s`·`o`·`g`·`Del`·`↑↓`). 단축키 대상 `_kbd_focus_id`는 클릭·방향키로만 정함(hover 금지). 더블클릭 붙여넣기 없음(더블클릭은 열기). fake drag로 외부 앱 붙여넣기(Alt+드래그 이미지=경로 텍스트) 및 재정렬. 자동 닫기 📌(기본 OFF). 항목 최대 5줄(높이 공식은 「설계 규칙」). 항목 더블클릭=열기(붙여넣기는 여전히 없음).
 - **`menu_style.py`** / **`menu_icons.py`** — 우클릭 메뉴 공통: `make_menu()`·`menu.add(이름\t단축키, 아이콘, danger=)`. 조건부 항목은 숨기지 말고 비활성. 묶음 순서: 보기·큐 | 꺼내기 | 다루기 | 고정 | 삭제·닫기.
 - **`image_preview.py`** — 이미지 미리보기·핀 창(다중 창, `native=True`면 1:1, `place_rect`로 제자리 덮기). 우클릭: 복사·경로 복사·OCR·Gemini 질문·복제·주석 편집·닫기 — 주석이 있으면 `_effective_item()` 평탄화본 대상. Space로 인라인 주석 편집, 툴바는 하단 예약 strip(토글 시 창 크기 불변).
 - **`image_annotator.py`** — 주석 편집기(`_EditorMixin`·`_AnnotatorView`·도형 아이템 + `_HandleResizeMixin`). 도구 1~8(수식키 없이), 도구별 우클릭 미니패널(색·크기·화살표 머리/방향, DB `annot_tool_defaults`), 3차 베지어 화살표 + 도형 테두리 스냅, 크기조절(우하단)·회전(좌상단) 핸들(잡기 판정 24px), `flatten_scene_to_png`.
 - **`text_preview.py`** — 평문 미리보기(`QPlainTextEdit`, 스크롤 없이 전부 보이게 크기 계산, 우클릭 전체 복사·수정(→메모창)·닫기).
-- **`memo_window.py`** — 빠른 메모창(일반 창). 0.5초 멈추면 저장, 닫을 때 저장, 빈 채로 닫으면 삭제. Esc·Ctrl+W 닫기, Ctrl+T 항상 위(창마다, 저장 안 함 — 전용 WinDLL `SetWindowPos`), Ctrl+휠·Ctrl+0 글자 크기. 글자 크기·마지막 창 자리(`saveGeometry`)는 DB `memo_window_prefs`(JSON)에 저장돼 다음에도 그대로 연다(`set_prefs`/`prefs_saver`). DB는 시그널로 main에 넘김. `_quit`에서 `close_all()`을 `db.close()`보다 먼저.
+- **`memo_window.py`** — 빠른 메모창(일반 창). 0.5초 멈추면 저장, 닫을 때 저장, 빈 채로 닫으면 삭제. Esc·Ctrl+W 닫기, Ctrl+T·오른쪽 위 핀 버튼 항상 위(창마다, 저장 안 함 — 전용 WinDLL `SetWindowPos`), 우클릭은 `make_menu`(Qt 기본 메뉴는 창 배경을 물려받아 글자가 묻혔음), Ctrl+휠·Ctrl+0 글자 크기. 글자 크기·마지막 창 자리(`saveGeometry`)는 DB `memo_window_prefs`(JSON)에 저장돼 다음에도 그대로 연다(`set_prefs`/`prefs_saver`). DB는 시그널로 main에 넘김. `_quit`에서 `close_all()`을 `db.close()`보다 먼저.
 - **`toast.py`** — 우하단 스택 토스트(주 모니터, 최대 5개, 클릭 시 빠른 닫기 — `on_click`을 주면 클릭 때 한 번 호출), `image_path`/`image_bytes` 썸네일, 커서 앵커·중앙 칩(`anchor`, `center=True`, 클릭 통과), 지속형(`duration_ms=0` + `set_message`/`dismiss`). 복사 알림은 `Q{n}` 배지 + 썸네일(원본 `image_data` 우선), 아이콘 없음.
 - **`paste_hud.py`** — 순차 붙여넣기 진행 HUD(비활성 창, ✓▶·, ✕ 취소 → `_on_cancel_paste_queue`).
 - **`settings_dialog.py`** — 왼쪽 목록 내비(`일반`/`붙여넣기`/`캡처·녹화`/`AI`, 실제 페이지는 탭 바를 숨긴 `QTabWidget`), 기능 카드마다 그 기능의 단축키·옵션. AI 탭: `AI 연결 (OpenAI 호환 API)`(Base URL·API 키·모델조회·연결 테스트 = 연결+OCR 모델+크레딧), OCR, 음성 입력(STT 모델은 Gemini만, 마이크 테스트). 창-모달(`WindowModal`) + `_open_settings` 재진입 가드. 녹화 중 훅 정지는 `recording_active` → `done()`/`closeEvent`에서도 해제. 모델 콤보는 editable이라 표시 텍스트 = 저장값(계열 헤더는 비활성, 들여쓰기는 델리게이트로). 디자인 비교 하네스 `tools/settings_bakeoff.py`.

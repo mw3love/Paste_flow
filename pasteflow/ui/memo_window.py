@@ -8,17 +8,20 @@ UX 정책:
 - 같은 메모를 다시 열면 새 창 대신 열려 있는 창을 앞으로 가져온다.
 - Ctrl+휠로 글자 크기를 바꾸고 Ctrl+0으로 되돌린다(윈도우 메모장처럼).
 - 글자 크기와 마지막 창 크기·위치는 main이 DB에 저장해 다음에도 그대로 연다(set_prefs/prefs_saver).
-- Esc·Ctrl+W = 닫기, Ctrl+T = 항상 위 켜기/끄기(창마다, 저장 안 함).
+- Esc·Ctrl+W = 닫기, Ctrl+T·오른쪽 위 핀 버튼 = 항상 위 켜기/끄기(창마다, 저장 안 함).
+- 우클릭은 공통 메뉴(make_menu) — Qt 기본 메뉴는 창의 어두운 배경을 물려받아 글자가 묻혔다.
 """
 import base64
 import ctypes
 import ctypes.wintypes
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QFrame, QApplication
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QFrame, QApplication, QToolButton
 from PyQt6.QtCore import Qt, QTimer, QRect, QPoint, QEvent, QByteArray, pyqtSignal
 from PyQt6.QtGui import QFont, QCursor, QKeySequence, QShortcut
 
-from pasteflow.ui.theme import BASE as _BG, TEXT as _TEXT, PEACH as _PEACH
+from pasteflow.ui.theme import BASE as _BG, TEXT as _TEXT, PEACH as _PEACH, COLORS
+from pasteflow.ui.menu_style import make_menu
+from pasteflow.ui.menu_icons import menu_icon
 from pasteflow.ui.image_preview import compute_preview_pos, _CASCADE_STEP
 
 _SAVE_DELAY_MS = 500
@@ -107,7 +110,7 @@ class MemoWindow(QWidget):
 
         self._editor = QPlainTextEdit()
         self._editor.setFrameShape(QFrame.Shape.NoFrame)
-        self._editor.setViewportMargins(10, 10, 10, 10)
+        self._editor.setViewportMargins(10, 10, 30, 10)  # 오른쪽 30 = 핀 버튼 자리
         self._editor.document().setDocumentMargin(0)
         self._apply_font_px(type(self)._font_px)
         self._editor.setStyleSheet(f"""
@@ -124,6 +127,17 @@ class MemoWindow(QWidget):
         layout.addWidget(self._editor)
         # 편집 가능한 QPlainTextEdit은 Ctrl+휠 확대를 스스로 하지 않는다(읽기 전용일 때만) → 직접 처리
         self._editor.viewport().installEventFilter(self)
+        self._editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._editor.customContextMenuRequested.connect(self._show_context_menu)
+
+        self._pin_btn = QToolButton(self)
+        self._pin_btn.setFixedSize(24, 24)
+        self._pin_btn.setIconSize(self._pin_btn.size() * 0.66)
+        self._pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pin_btn.setStyleSheet(
+            f"QToolButton {{ background: transparent; border: none; border-radius: 4px; }}"
+            f"QToolButton:hover {{ background: {COLORS['surface1']}; }}")
+        self._pin_btn.clicked.connect(self._toggle_topmost)
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -132,6 +146,7 @@ class MemoWindow(QWidget):
         self._editor.textChanged.connect(self._on_text_changed)
 
         self._topmost = False
+        self._update_pin_btn()
         for keys, slot in (("Ctrl+W", self.close), ("Ctrl+T", self._toggle_topmost),
                            ("Ctrl+0", self._reset_zoom)):
             QShortcut(QKeySequence(keys), self, slot)
@@ -204,6 +219,46 @@ class MemoWindow(QWidget):
                              _HWND_TOPMOST if self._topmost else _HWND_NOTOPMOST,
                              0, 0, 0, 0, _SWP_FLAGS)
         self._update_title()
+        self._update_pin_btn()
+
+    def _update_pin_btn(self):
+        # 켜짐 = 코랄(주목), 꺼짐 = 흐린 회색 — 테마의 2톤 규칙
+        color = _PEACH if self._topmost else COLORS['overlay0']
+        self._pin_btn.setIcon(menu_icon("push-pin", color, color))
+        self._pin_btn.setToolTip("항상 위 끄기 (Ctrl+T)" if self._topmost else "항상 위 (Ctrl+T)")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._pin_btn.move(self.width() - self._pin_btn.width() - 6, 6)
+        self._pin_btn.raise_()
+
+    def _show_context_menu(self, pos):
+        """패널과 같은 공통 메뉴 — 부모 없이 만들어 창 배경 스타일을 물려받지 않는다."""
+        ed = self._editor
+        has_sel = ed.textCursor().hasSelection()
+        menu = make_menu()
+        for label, slot, enabled, icon in (
+            ("실행 취소\tCtrl+Z", ed.undo, ed.document().isUndoAvailable(), None),
+            ("다시 실행\tCtrl+Y", ed.redo, ed.document().isRedoAvailable(), None),
+            (None, None, None, None),
+            ("잘라내기\tCtrl+X", ed.cut, has_sel, None),
+            ("복사\tCtrl+C", ed.copy, has_sel, "copy"),
+            ("붙여넣기\tCtrl+V", ed.paste, ed.canPaste(), None),
+            ("삭제\tDel", lambda: ed.textCursor().removeSelectedText(), has_sel, None),
+            (None, None, None, None),
+            ("모두 선택\tCtrl+A", ed.selectAll, not ed.document().isEmpty(), None),
+            (None, None, None, None),
+            ("항상 위 끄기\tCtrl+T" if self._topmost else "항상 위\tCtrl+T",
+             self._toggle_topmost, True, "push-pin"),
+            ("닫기\tCtrl+W", self.close, True, "x"),
+        ):
+            if label is None:
+                menu.addSeparator()
+                continue
+            action = menu.add(label, icon)
+            action.triggered.connect(slot)
+            action.setEnabled(bool(enabled))
+        menu.exec(ed.viewport().mapToGlobal(pos))
 
     def _on_text_changed(self):
         self._update_title()

@@ -2417,9 +2417,22 @@ class PasteFlowApp:
         self.db.unpin_item(item_id)
         self._refresh_panel()
 
-    def _on_delete_item(self, item_id: int):
+    def _on_memo_saved(self, item_id: int, text: str):
+        """메모창 자동 저장 — DB에 쓰고 패널의 그 한 줄만 바로 바꾼다(전체 refresh는 깜빡임)."""
+        self.db.update_item_text(item_id, text)
+        self.panel.update_item_text(item_id, text)
+
+    def _on_delete_item(self, item_id: int, notify: bool = True):
+        """notify: 메모장 항목이면 '되돌리기' 토스트를 띄운다. 빈 메모창을 닫아 저절로
+        지우는 경우(notify=False)는 매번 뜨면 거슬려서 띄우지 않는다."""
+        snapshot = self.db.get_item(item_id) if notify else None
         if not self.db.delete_item(item_id):
             return  # 잠긴 메모장 항목 — 지우지 않았으니 큐도 그대로
+        if snapshot is not None and snapshot.is_pinned:
+            from pasteflow.ui.toast import ToastNotification, COPY_TOAST_DURATION_MS
+            ToastNotification("메모를 지웠어요 — 눌러서 되돌리기", icon="↶",
+                              duration_ms=COPY_TOAST_DURATION_MS,
+                              on_click=lambda: self._undo_clear_memos([snapshot]))
         # 큐가 이 항목을 들고 있으면(캡처 스냅샷은 DB와 별개로 큐에 살아있다) 함께
         # 제거 — 안 그러면 히스토리에서 지운 항목이 진행 HUD·순차 붙여넣기에는
         # 그대로 남아 "몇 개가 남았는지"가 어긋난다(2026-08-01 사용자 리포트).
@@ -2485,9 +2498,9 @@ class PasteFlowApp:
         else:
             self.paste_hud.dismiss()
         self._refresh_panel()
-        from pasteflow.ui.toast import ToastNotification
+        from pasteflow.ui.toast import ToastNotification, COPY_TOAST_DURATION_MS
         ToastNotification(f"메모 {len(snapshot)}개를 지웠어요 — 눌러서 되돌리기", icon="↶",
-                          duration_ms=8000,
+                          duration_ms=COPY_TOAST_DURATION_MS,
                           on_click=lambda: self._undo_clear_memos(snapshot))
 
     def _undo_clear_memos(self, snapshot: list):
@@ -2596,8 +2609,8 @@ class PasteFlowApp:
             text = ""
             self._refresh_panel()
         win = MemoWindow(item_id, text)
-        win.save_requested.connect(self.db.update_item_text)
-        win.discard_requested.connect(self._on_delete_item)
+        win.save_requested.connect(self._on_memo_saved)
+        win.discard_requested.connect(lambda iid: self._on_delete_item(iid, notify=False))
         win.closed.connect(lambda _id: self._refresh_panel())
         win.show_near(self.panel.geometry() if self.panel.isVisible() else None)
 
