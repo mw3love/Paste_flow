@@ -303,3 +303,109 @@ class TestCompactOnOpen:
         before = os.path.getsize(path)
         Database(path).close()
         assert os.path.getsize(path) == before
+
+
+class TestMemo:
+    """메모장(고정 섹션) — 새 메모 만들기·잠금·비우기"""
+
+    def test_create_memo_is_pinned_text(self, db):
+        """새 메모는 고정된 텍스트 항목으로 만들어진다"""
+        memo = db.create_memo("첫 줄")
+        loaded = db.get_item(memo.id)
+        assert loaded.is_pinned
+        assert loaded.content_type == "text"
+        assert loaded.text_content == "첫 줄"
+
+    def test_create_memo_goes_to_top(self, db):
+        """새 메모는 메모장 맨 위에 생긴다"""
+        old = db.create_memo("예전")
+        new = db.create_memo("새것")
+        ids = [it.id for it in db.get_pinned_items_summary()]
+        assert ids == [new.id, old.id]
+
+    def test_create_memo_does_not_touch_history(self, db):
+        """메모를 만들어도 히스토리는 그대로"""
+        db.save_item(ClipboardItem(content_type="text", text_content="복사한 것"))
+        db.create_memo("메모")
+        assert [it.text_content for it in db.get_recent_items()] == ["복사한 것"]
+
+    def test_lock_and_unlock(self, db):
+        """잠금을 켜고 끄면 요약 조회에도 반영된다"""
+        memo = db.create_memo("x")
+        db.set_locked(memo.id, True)
+        assert db.get_pinned_items_summary()[0].is_locked
+        db.set_locked(memo.id, False)
+        assert not db.get_pinned_items_summary()[0].is_locked
+
+    def test_lock_ignored_for_history_item(self, db):
+        """히스토리 항목은 잠글 수 없다"""
+        saved = db.save_item(ClipboardItem(content_type="text", text_content="h"))
+        db.set_locked(saved.id, True)
+        assert not db.get_item(saved.id).is_locked
+
+    def test_locked_item_cannot_be_deleted(self, db):
+        """잠긴 항목은 단일 삭제로 지워지지 않는다"""
+        memo = db.create_memo("x")
+        db.set_locked(memo.id, True)
+        assert db.delete_item(memo.id) is False
+        assert db.get_item(memo.id) is not None
+
+    def test_unlocked_item_delete_returns_true(self, db):
+        memo = db.create_memo("x")
+        assert db.delete_item(memo.id) is True
+        assert db.get_item(memo.id) is None
+
+    def test_locked_item_cannot_be_unpinned(self, db):
+        """잠긴 항목은 고정 해제(히스토리로 내리기)도 막힌다"""
+        memo = db.create_memo("x")
+        db.set_locked(memo.id, True)
+        assert db.unpin_item(memo.id) is False
+        assert db.get_item(memo.id).is_pinned
+
+    def test_clear_memos_keeps_locked(self, db):
+        """메모장 비우기는 잠긴 것만 남기고, 지운 id를 돌려준다"""
+        a = db.create_memo("a")
+        b = db.create_memo("b")
+        db.set_locked(b.id, True)
+        hist = db.save_item(ClipboardItem(content_type="text", text_content="h"))
+        deleted = db.clear_memos()
+        assert deleted == [a.id]
+        assert [it.id for it in db.get_pinned_items_summary()] == [b.id]
+        assert db.get_item(hist.id) is not None
+
+    def test_count_unlocked_memos(self, db):
+        db.create_memo("a")
+        b = db.create_memo("b")
+        db.set_locked(b.id, True)
+        assert db.count_memos() == (1, 1)  # (지워질 것, 잠긴 것)
+
+    def test_existing_pinned_items_locked_on_upgrade(self, tmp_path):
+        """잠금 칸이 없던 옛 DB를 열면, 기존 고정 항목은 자동으로 잠긴다"""
+        import sqlite3
+        path = str(tmp_path / "old.db")
+        conn = sqlite3.connect(path)
+        conn.execute("""CREATE TABLE clipboard_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, content_type TEXT NOT NULL,
+            text_content TEXT, image_data BLOB, html_content TEXT, rtf_content TEXT,
+            preview_text TEXT, thumbnail BLOB, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_pinned BOOLEAN DEFAULT 0, pin_order INTEGER DEFAULT 0)""")
+        conn.execute("INSERT INTO clipboard_items (content_type, text_content, is_pinned, pin_order)"
+                     " VALUES ('text', '고정', 1, 1)")
+        conn.execute("INSERT INTO clipboard_items (content_type, text_content) VALUES ('text', '히스토리')")
+        conn.commit()
+        conn.close()
+
+        db = Database(path)
+        try:
+            pinned = db.get_pinned_items()
+            assert len(pinned) == 1 and pinned[0].is_locked
+            assert not db.get_recent_items()[0].is_locked
+            # 두 번째로 열 때는 다시 잠그지 않는다(사용자가 푼 잠금 유지)
+            db.set_locked(pinned[0].id, False)
+        finally:
+            db.close()
+        db = Database(path)
+        try:
+            assert not db.get_pinned_items()[0].is_locked
+        finally:
+            db.close()

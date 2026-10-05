@@ -2400,7 +2400,8 @@ class PasteFlowApp:
         self._refresh_panel()
 
     def _on_delete_item(self, item_id: int):
-        self.db.delete_item(item_id)
+        if not self.db.delete_item(item_id):
+            return  # 잠긴 메모장 항목 — 지우지 않았으니 큐도 그대로
         # 큐가 이 항목을 들고 있으면(캡처 스냅샷은 DB와 별개로 큐에 살아있다) 함께
         # 제거 — 안 그러면 히스토리에서 지운 항목이 진행 HUD·순차 붙여넣기에는
         # 그대로 남아 "몇 개가 남았는지"가 어긋난다(2026-08-01 사용자 리포트).

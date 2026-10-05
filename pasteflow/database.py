@@ -76,6 +76,13 @@ class Database:
             cur.execute("ALTER TABLE clipboard_items ADD COLUMN saved_image_path TEXT")
         except sqlite3.OperationalError:
             pass  # 이미 존재
+        # 기존 DB에 is_locked 컬럼이 없으면 추가 — 처음 한 번만, 기존 고정 항목을 잠가
+        # 메모장 비우기에 오래 둔 고정 항목이 쓸려 나가지 않게 한다.
+        try:
+            cur.execute("ALTER TABLE clipboard_items ADD COLUMN is_locked INTEGER DEFAULT 0")
+            cur.execute("UPDATE clipboard_items SET is_locked = 1 WHERE is_pinned = 1")
+        except sqlite3.OperationalError:
+            pass  # 이미 존재
         cur.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
@@ -169,7 +176,7 @@ class Database:
                 """SELECT id, content_type, text_content, NULL AS image_data,
                           html_content, rtf_content, preview_text, thumbnail,
                           created_at, is_pinned, pin_order, NULL AS extra_formats,
-                          saved_image_path
+                          saved_image_path, is_locked
                    FROM clipboard_items
                    WHERE is_pinned = 0
                    ORDER BY history_order ASC
@@ -199,7 +206,7 @@ class Database:
                 """SELECT id, content_type, text_content, NULL AS image_data,
                           html_content, rtf_content, preview_text, thumbnail,
                           created_at, is_pinned, pin_order, NULL AS extra_formats,
-                          saved_image_path
+                          saved_image_path, is_locked
                    FROM clipboard_items
                    WHERE is_pinned = 1
                    ORDER BY pin_order ASC"""
@@ -207,12 +214,60 @@ class Database:
             rows = cur.fetchall()
         return [self._row_to_item(row) for row in rows]
 
-    def delete_item(self, item_id: int):
-        """항목 삭제"""
+    def delete_item(self, item_id: int) -> bool:
+        """항목 삭제 — 잠긴 항목은 지우지 않고 False"""
         with self._lock:
             cur = self.conn.cursor()
-            cur.execute("DELETE FROM clipboard_items WHERE id = ?", (item_id,))
+            cur.execute(
+                "DELETE FROM clipboard_items WHERE id = ? AND COALESCE(is_locked, 0) = 0",
+                (item_id,),
+            )
             self.conn.commit()
+            return cur.rowcount > 0
+
+    def create_memo(self, text: str = "") -> ClipboardItem:
+        """메모장(고정 섹션) 맨 위에 새 텍스트 메모를 만든다 — 히스토리·FIFO와 무관"""
+        item = ClipboardItem(content_type="text", text_content=text, is_pinned=True)
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("SELECT MIN(pin_order) FROM clipboard_items WHERE is_pinned = 1")
+            min_order = cur.fetchone()[0]
+            item.pin_order = 0 if min_order is None else min_order - 1
+        return self.save_item(item)
+
+    def set_locked(self, item_id: int, locked: bool):
+        """메모장 항목 잠금 켜기/끄기 — 히스토리(비고정) 항목은 대상 아님"""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "UPDATE clipboard_items SET is_locked = ? WHERE id = ? AND is_pinned = 1",
+                (1 if locked else 0, item_id),
+            )
+            self.conn.commit()
+
+    def count_memos(self) -> tuple[int, int]:
+        """메모장 항목 수 — (비우기로 지워질 것, 잠겨서 남을 것)"""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """SELECT COALESCE(SUM(COALESCE(is_locked, 0) = 0), 0),
+                          COALESCE(SUM(COALESCE(is_locked, 0) = 1), 0)
+                   FROM clipboard_items WHERE is_pinned = 1"""
+            )
+            unlocked, locked = cur.fetchone()
+        return unlocked, locked
+
+    def clear_memos(self) -> list[int]:
+        """메모장 비우기 — 잠기지 않은 고정 항목을 모두 지우고 지운 id 목록을 돌려준다"""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "SELECT id FROM clipboard_items WHERE is_pinned = 1 AND COALESCE(is_locked, 0) = 0"
+            )
+            ids = [row[0] for row in cur.fetchall()]
+            cur.executemany("DELETE FROM clipboard_items WHERE id = ?", [(i,) for i in ids])
+            self.conn.commit()
+        return ids
 
     def pin_item(self, item_id: int):
         """항목 고정 — pin_order는 현재 최대값+1"""
@@ -226,15 +281,17 @@ class Database:
             )
             self.conn.commit()
 
-    def unpin_item(self, item_id: int):
-        """항목 고정 해제"""
+    def unpin_item(self, item_id: int) -> bool:
+        """항목 고정 해제 — 잠긴 항목은 히스토리로 내리지 않고 False"""
         with self._lock:
             cur = self.conn.cursor()
             cur.execute(
-                "UPDATE clipboard_items SET is_pinned = 0, pin_order = 0 WHERE id = ?",
+                """UPDATE clipboard_items SET is_pinned = 0, pin_order = 0
+                   WHERE id = ? AND COALESCE(is_locked, 0) = 0""",
                 (item_id,),
             )
             self.conn.commit()
+            return cur.rowcount > 0
 
     def update_pin_orders(self, id_order_list: list[tuple[int, int]]):
         """고정 항목 순서 일괄 업데이트 — [(item_id, new_order), ...]"""
@@ -385,6 +442,7 @@ class Database:
             pin_order=row["pin_order"],
             extra_formats=self._deserialize_extra_formats(extra_json),
             saved_image_path=row["saved_image_path"] if "saved_image_path" in row.keys() else None,
+            is_locked=bool(row["is_locked"]) if "is_locked" in row.keys() else False,
         )
 
     @staticmethod
