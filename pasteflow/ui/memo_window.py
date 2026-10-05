@@ -55,6 +55,22 @@ _user32.AttachThreadInput.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.DWO
 _user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
 _TITLE_BAR_H = 32  # 화면 위로 제목 표시줄이 잘리지 않게 남기는 여유(px)
 
+# 일반 창이라 Windows가 열 때 ~0.2초 확대·페이드 효과를 넣어 둔하게 느껴졌다 → 이 창만 끈다
+_dwmapi = ctypes.WinDLL("dwmapi")
+_dwmapi.DwmSetWindowAttribute.argtypes = [
+    ctypes.wintypes.HWND, ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.wintypes.DWORD,
+]
+_DWMWA_TRANSITIONS_FORCEDISABLED = 3
+
+
+def _disable_open_animation(hwnd: int):
+    try:
+        on = ctypes.c_int(1)
+        _dwmapi.DwmSetWindowAttribute(hwnd, _DWMWA_TRANSITIONS_FORCEDISABLED,
+                                      ctypes.byref(on), ctypes.sizeof(on))
+    except Exception:
+        pass
+
 
 def _force_foreground(hwnd: int):
     try:
@@ -216,6 +232,7 @@ class MemoWindow(QWidget):
 
         self._update_title()
         self.resize(_DEFAULT_W, _DEFAULT_H)
+        _disable_open_animation(int(self.winId()))
         type(self)._instances[item_id] = self
 
     @property
