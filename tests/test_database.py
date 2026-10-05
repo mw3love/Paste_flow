@@ -305,6 +305,18 @@ class TestCompactOnOpen:
         assert os.path.getsize(path) == before
 
 
+class TestMmapRead:
+    """큰 이미지 행 뒤 칸을 읽을 때 페이지를 한 장씩 read()하지 않게 mmap으로 연다
+    (실측: 119MB DB에서 목록 조회 140ms → 1ms)"""
+
+    def test_file_db_uses_mmap(self, tmp_path):
+        d = Database(str(tmp_path / "t.db"))
+        try:
+            assert d.conn.execute("PRAGMA mmap_size").fetchone()[0] > 0
+        finally:
+            d.close()
+
+
 class TestMemo:
     """메모장(고정 섹션) — 새 메모 만들기·잠금·비우기"""
 

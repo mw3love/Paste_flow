@@ -22,6 +22,11 @@ class Database:
         self._lock = threading.RLock()
         self._create_tables()
         self._compact_if_bloated()
+        # image_data(수 MB) 뒤 칸을 읽으려면 그 오버플로 페이지를 끝까지 건너가야 해서, 목록
+        # 조회가 페이지마다 read()하며 매번 140ms 걸렸다(119MB DB 실측) — mmap이면 ~1ms.
+        self.conn.execute(f"PRAGMA mmap_size={self._MMAP_BYTES}")
+
+    _MMAP_BYTES = 512 * 1024 * 1024  # 주소 공간만 잡는다 — 실제 메모리는 OS 파일 캐시가 쓴다
 
     # 빈 페이지가 이만큼 넘게 쌓였을 때만 열 때 VACUUM한다(작은 낭비로 매번 시작을 늦추지 않음).
     _COMPACT_MIN_FREE_BYTES = 5_000_000
