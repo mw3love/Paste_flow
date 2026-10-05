@@ -45,6 +45,31 @@ _HWND_TOPMOST = -1
 _HWND_NOTOPMOST = -2
 _SWP_FLAGS = 0x0001 | 0x0002 | 0x0010  # NOSIZE | NOMOVE | NOACTIVATE
 
+# 단축키(Alt+`)로 열 때 다른 앱이 포그라운드라 activateWindow()만으론 뒤에 뜰 수 있다 →
+# AttachThreadInput으로 포그라운드 잠금을 우회한다(record_chooser와 같은 기법).
+_kernel32 = ctypes.WinDLL("kernel32")
+_user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
+_user32.GetWindowThreadProcessId.argtypes = [ctypes.wintypes.HWND, ctypes.POINTER(ctypes.wintypes.DWORD)]
+_user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
+_user32.AttachThreadInput.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.DWORD, ctypes.wintypes.BOOL]
+_user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
+_TITLE_BAR_H = 32  # 화면 위로 제목 표시줄이 잘리지 않게 남기는 여유(px)
+
+
+def _force_foreground(hwnd: int):
+    try:
+        fg = _user32.GetForegroundWindow()
+        if fg == hwnd:
+            return
+        fg_tid = _user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        my_tid = _kernel32.GetCurrentThreadId()
+        attached = bool(fg_tid) and fg_tid != my_tid and _user32.AttachThreadInput(my_tid, fg_tid, True)
+        _user32.SetForegroundWindow(hwnd)
+        if attached:
+            _user32.AttachThreadInput(my_tid, fg_tid, False)
+    except Exception:
+        pass
+
 
 _PIN_CHIP = 22  # 핀 버튼(호버 칩) 한 변
 _PIN_ICON = 14  # 그 안 핀 아이콘
@@ -200,10 +225,13 @@ class MemoWindow(QWidget):
     def show_near(self, panel_geom: QRect | None):
         """마지막으로 닫은 메모창 자리(있으면)에, 없으면 패널 옆이나 커서 화면 가운데에 띄운다.
 
+        마지막 자리는 마우스가 있는 모니터로 옮겨 쓴다 — 그 모니터 안에서의 상대 위치·크기는
+        그대로(여러 모니터에서 엉뚱한 화면에 뜨지 않게, 2026-10-05 사용자 결정).
         다른 메모창이 열려 있으면 그만큼 비켜 놓아 완전히 겹치지 않게 한다.
         """
         cascade = (len(type(self)._instances) - 1) * _CASCADE_STEP
         if type(self)._last_geometry is not None and self.restoreGeometry(type(self)._last_geometry):
+            self._move_to_cursor_screen()
             if cascade:  # 표시 전엔 pos()에 제목 표시줄이 안 잡혀 → 안쪽 영역(geometry) 기준으로 비킨다
                 self.setGeometry(self.geometry().translated(cascade, cascade))
         elif panel_geom is not None:
@@ -215,11 +243,29 @@ class MemoWindow(QWidget):
             self.move(center - QPoint(self.width() // 2 - cascade, self.height() // 2 - cascade))
         self.bring_to_front()
 
+    def _move_to_cursor_screen(self):
+        """복원한 자리를 마우스가 있는 모니터로 옮긴다(모니터 안 상대 위치 유지, 화면 밖으로 안 나가게)."""
+        g = self.geometry()
+        src = QApplication.screenAt(g.center()) or QApplication.primaryScreen()
+        dst = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        if dst is None:
+            return
+        avail = dst.availableGeometry()
+        top_left = g.topLeft()
+        if src is not None and src is not dst:
+            top_left = avail.topLeft() + (g.topLeft() - src.availableGeometry().topLeft())
+        w = min(g.width(), avail.width())
+        h = min(g.height(), avail.height() - _TITLE_BAR_H)
+        x = max(avail.left(), min(top_left.x(), avail.right() + 1 - w))
+        y = max(avail.top() + _TITLE_BAR_H, min(top_left.y(), avail.bottom() + 1 - h))
+        self.setGeometry(x, y, w, h)
+
     def bring_to_front(self):
         if self.isMinimized():
             self.showNormal()
         self.show()
         self.raise_()
+        _force_foreground(int(self.winId()))
         self.activateWindow()
         self._editor.setFocus()
 
