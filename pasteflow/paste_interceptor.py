@@ -258,6 +258,7 @@ class PasteInterceptor:
         on_bulk_paste: Optional[Callable[[], None]] = None,
         on_bulk_path_paste: Optional[Callable[[], None]] = None,
         on_pin_image: Optional[Callable[[], None]] = None,
+        on_new_memo: Optional[Callable[[], None]] = None,
         on_capture: Optional[Callable[[], None]] = None,
         on_record: Optional[Callable[[], None]] = None,
         on_stt_start: Optional[Callable[[], None]] = None,
@@ -274,6 +275,7 @@ class PasteInterceptor:
         self.on_bulk_paste = on_bulk_paste
         self.on_bulk_path_paste = on_bulk_path_paste
         self.on_pin_image = on_pin_image
+        self.on_new_memo = on_new_memo
         self.on_capture = on_capture
         self.on_record = on_record
         self.on_stt_start = on_stt_start
@@ -324,6 +326,11 @@ class PasteInterceptor:
         self._pin_need_ctrl: bool = False
         self._pin_need_shift: bool = False
         self._pin_need_alt: bool = False
+        # 새 메모 단축키 (기본 Alt+`) — 메모장 맨 위에 새 메모를 만들어 메모창을 연다
+        self._memo_vk: int = 0
+        self._memo_need_ctrl: bool = False
+        self._memo_need_shift: bool = False
+        self._memo_need_alt: bool = False
         # 영역 캡처 단축키 (패널 토글과 동일 구조)
         self._capture_vk: int = 0
         self._capture_need_ctrl: bool = False
@@ -436,6 +443,19 @@ class PasteInterceptor:
             self._pin_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._pin_vk = 0
+
+    def set_memo_hotkey(self, hotkey_str: str):
+        """새 메모 단축키 설정 — 메모장에 새 메모를 만들고 메모창을 연다."""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._memo_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._memo_need_shift = "shift" in parts
+        self._memo_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._memo_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._memo_vk = 0
 
     def set_capture_hotkey(self, hotkey_str: str):
         """영역 캡처 단축키 설정 — 캡처 오버레이를 띄워 드래그 영역을 클립보드·파일로 저장."""
@@ -783,6 +803,20 @@ class PasteInterceptor:
                     if self.on_pin_image:
                         try:
                             self.on_pin_image()
+                        except Exception:
+                            pass
+                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
+
+                # 새 메모 단축키 감지 (기본 Alt+`)
+                if (self._memo_vk and vk_code == self._memo_vk
+                        and ctrl_pressed  == self._memo_need_ctrl
+                        and shift_pressed == self._memo_need_shift
+                        and alt_pressed   == self._memo_need_alt):
+                    # 메모창이 포그라운드를 잡을 수 있도록 잠금 해제 (핀과 동일)
+                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
+                    if self.on_new_memo:
+                        try:
+                            self.on_new_memo()
                         except Exception:
                             pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)

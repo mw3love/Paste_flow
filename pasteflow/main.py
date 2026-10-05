@@ -928,6 +928,7 @@ class _SignalBridge(QObject):
     bulk_paste         = pyqtSignal()        # 훅 스레드 → 메인: 큐 전체를 간격 두고 순차 자동주입(Ctrl+Shift+V 벌크 버전)
     bulk_path_paste    = pyqtSignal()        # 훅 스레드 → 메인: 큐 전체를 경로 텍스트로 간격 두고 순차 자동주입(Ctrl+Shift+[ 벌크 버전)
     pin_image          = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 화면에 핀(떠 있는 창)으로 띄우기
+    new_memo           = pyqtSignal()        # 훅 스레드 → 메인: 메모장에 새 메모를 만들고 메모창 열기
     capture_requested  = pyqtSignal()        # 훅 스레드 → 메인: 영역 캡처 오버레이 띄우기
     record             = pyqtSignal()        # 훅 스레드 → 메인: 녹화 영역 선택 오버레이 띄우기(GIF/영상은 선택 뒤 고름)
     gif_saved          = pyqtSignal(str)     # 인코딩 워커 → 메인: 저장된 GIF 경로
@@ -972,6 +973,7 @@ class PasteFlowApp:
         self._bridge.bulk_paste.connect(self._on_bulk_paste_hotkey)
         self._bridge.bulk_path_paste.connect(self._on_bulk_path_paste_hotkey)
         self._bridge.pin_image.connect(self._on_pin_hotkey)
+        self._bridge.new_memo.connect(lambda: self._open_memo())
         self._bridge.capture_requested.connect(self._on_capture_requested)
         self._bridge.record.connect(self._on_record_hotkey)
         self._bridge.gif_saved.connect(self._on_gif_saved)
@@ -1023,6 +1025,7 @@ class PasteFlowApp:
             on_bulk_paste=self._bridge.bulk_paste.emit,
             on_bulk_path_paste=self._bridge.bulk_path_paste.emit,
             on_pin_image=self._bridge.pin_image.emit,
+            on_new_memo=self._bridge.new_memo.emit,
             on_capture=self._bridge.capture_requested.emit,
             on_record=self._bridge.record.emit,
             on_stt_start=self._bridge.stt_start.emit,
@@ -1147,6 +1150,8 @@ class PasteFlowApp:
 
         pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
         self.interceptor.set_pin_hotkey(pin_hotkey)
+
+        self.interceptor.set_memo_hotkey(self.db.get_setting("hotkey_new_memo", "alt+`"))
 
         capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         self.interceptor.set_capture_hotkey(capture_hotkey)
@@ -2935,6 +2940,7 @@ class PasteFlowApp:
             "hotkey_bulk_paste": self.db.get_setting("hotkey_bulk_paste", "ctrl+shift+a"),
             "hotkey_bulk_path_paste": self.db.get_setting("hotkey_bulk_path_paste", "ctrl+shift+["),
             "hotkey_pin_image": self.db.get_setting("hotkey_pin_image", "alt+f3"),
+            "hotkey_new_memo": self.db.get_setting("hotkey_new_memo", "alt+`"),
             "hotkey_capture": self.db.get_setting("hotkey_capture", "alt+f2"),
             "hotkey_record": self.db.get_setting("hotkey_record", "ctrl+shift+r"),
             "gif_show_cursor": self.db.get_setting("gif_show_cursor", "1"),
@@ -2991,6 +2997,7 @@ class PasteFlowApp:
         old_bulk_paste_hotkey = self.db.get_setting("hotkey_bulk_paste", "ctrl+shift+a")
         old_bulk_path_paste_hotkey = self.db.get_setting("hotkey_bulk_path_paste", "ctrl+shift+[")
         old_pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
+        old_memo_hotkey = self.db.get_setting("hotkey_new_memo", "alt+`")
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
         old_capture_use_printscreen = self.db.get_setting("capture_use_printscreen", "1")
         old_record_hotkey = self.db.get_setting("hotkey_record", "ctrl+shift+r")
@@ -3031,6 +3038,9 @@ class PasteFlowApp:
         new_pin_hotkey = new_settings.get("hotkey_pin_image", "alt+f3")
         if old_pin_hotkey != new_pin_hotkey:
             self.interceptor.set_pin_hotkey(new_pin_hotkey)
+        new_memo_hotkey = new_settings.get("hotkey_new_memo", "alt+`")
+        if old_memo_hotkey != new_memo_hotkey:
+            self.interceptor.set_memo_hotkey(new_memo_hotkey)
 
         # 영역 캡처 단축키 재설정
         new_capture_hotkey = new_settings.get("hotkey_capture", "alt+f2")

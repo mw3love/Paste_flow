@@ -478,6 +478,7 @@ class SettingsDialog(QDialog):
     KEY_BULK_PASTE_HOTKEY = "hotkey_bulk_paste"
     KEY_BULK_PATH_PASTE_HOTKEY = "hotkey_bulk_path_paste"
     KEY_PIN_IMAGE_HOTKEY = "hotkey_pin_image"
+    KEY_NEW_MEMO_HOTKEY = "hotkey_new_memo"
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
     KEY_CAPTURE_USE_PRINTSCREEN = "capture_use_printscreen"
     KEY_RECORD_HOTKEY = "hotkey_record"  # GIF/영상 공용(영역 선택 뒤 방식 선택)
@@ -764,6 +765,12 @@ class SettingsDialog(QDialog):
         panel_group, panel_form = _group("패널·히스토리", tab_general)
         self._panel_toggle_hotkey = HotkeyEdit()
         panel_form.addRow("•  패널 불러오기", self._panel_toggle_hotkey)
+        self._new_memo_hotkey = HotkeyEdit()
+        self._new_memo_hotkey.setToolTip(
+            "패널을 열지 않고 바로 새 메모창을 띄웁니다.\n"
+            "메모는 패널의 메모장 맨 위에 생기고, 쓰는 동안 자동 저장됩니다."
+        )
+        panel_form.addRow("•  새 메모", self._new_memo_hotkey)
         self._history_max_spin = QSpinBox()
         self._history_max_spin.setRange(10, 500)
         self._history_max_spin.setValue(50)
@@ -1116,7 +1123,7 @@ class SettingsDialog(QDialog):
             self._seq_image_to_path_hotkey, self._bulk_paste_hotkey,
             self._bulk_path_paste_hotkey, self._capture_hotkey,
             self._pin_image_hotkey, self._record_hotkey,
-            self._ocr_hotkey, self._stt_hotkey,
+            self._ocr_hotkey, self._stt_hotkey, self._new_memo_hotkey,
         ):
             _hk.listening_changed.connect(self.recording_active.emit)
 
@@ -1322,6 +1329,9 @@ class SettingsDialog(QDialog):
         )
         self._pin_image_hotkey.set_value(
             self._settings.get(self.KEY_PIN_IMAGE_HOTKEY, "alt+f3")
+        )
+        self._new_memo_hotkey.set_value(
+            self._settings.get(self.KEY_NEW_MEMO_HOTKEY, "alt+`")
         )
         self._capture_hotkey.set_value(
             self._settings.get(self.KEY_CAPTURE_HOTKEY, "alt+f2")
@@ -1658,6 +1668,7 @@ class SettingsDialog(QDialog):
             self.KEY_BULK_PASTE_HOTKEY: self._bulk_paste_hotkey.value() or "ctrl+shift+a",
             self.KEY_BULK_PATH_PASTE_HOTKEY: self._bulk_path_paste_hotkey.value() or "ctrl+shift+[",
             self.KEY_PIN_IMAGE_HOTKEY: self._pin_image_hotkey.value() or "alt+f3",
+            self.KEY_NEW_MEMO_HOTKEY: self._new_memo_hotkey.value() or "alt+`",
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
             self.KEY_CAPTURE_USE_PRINTSCREEN: "1" if self._capture_printscreen_check.isChecked() else "0",
             self.KEY_RECORD_HOTKEY: self._record_hotkey.value() or "ctrl+shift+r",
