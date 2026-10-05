@@ -18,7 +18,7 @@ from pasteflow.paste_queue import PasteQueue
 from pasteflow.clipboard_monitor import ClipboardMonitor
 from pasteflow.paste_interceptor import PasteInterceptor
 from pasteflow.ui.panel import (
-    ClipboardPanel, EditItemDialog, PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT,
+    ClipboardPanel, PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT,
 )
 from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.image_annotator import _EditorMixin
@@ -1111,7 +1111,11 @@ class PasteFlowApp:
         self.panel.delete_item_requested.connect(self._on_delete_item)
         self.panel.pin_reorder_requested.connect(self._on_pin_reorder)
         self.panel.history_reorder_requested.connect(self._on_hist_reorder)
-        self.panel.edit_item_requested.connect(self._on_edit_item)
+        self.panel.open_memo_requested.connect(self._open_memo)
+        self.panel.new_memo_requested.connect(lambda: self._open_memo())
+        self.panel.toggle_lock_requested.connect(self._on_toggle_lock)
+        self.panel.clear_memos_requested.connect(self._on_clear_memos)
+        self.panel.locked_notice.connect(self._on_locked_notice)
         self.panel.preview_image_requested.connect(self._on_preview_image)
         self.panel.preview_text_requested.connect(self._on_preview_text)
         self.panel.copy_image_as_path_requested.connect(self._on_copy_image_as_path)
@@ -2424,8 +2428,46 @@ class PasteFlowApp:
         self.db.update_history_orders(id_order_list)
         # 패널 레이아웃은 이미 라이브 스왑으로 반영됨 — refresh 불필요
 
-    def _on_edit_item(self, item_id: int, new_text: str):
-        self.db.update_item_text(item_id, new_text)
+    def _on_toggle_lock(self, item_id: int):
+        item = self.db.get_item(item_id)
+        if item:
+            self.db.set_locked(item_id, not item.is_locked)
+            self._refresh_panel()
+
+    def _on_locked_notice(self):
+        from pasteflow.ui.toast import ToastNotification
+        ToastNotification("잠긴 메모예요 — L로 잠금을 풀면 지울 수 있어요", icon="🔒")
+
+    def _on_clear_memos(self):
+        """메모장 비우기 — 확인 후 잠기지 않은 메모장 항목을 지운다(열린 메모창도 닫음)"""
+        from PyQt6.QtWidgets import QMessageBox
+        unlocked, locked = self.db.count_memos()
+        if unlocked == 0:
+            return
+        body = f"메모 {unlocked}개를 지울까요?"
+        if locked:
+            body += f"\n(잠긴 {locked}개는 남아요)"
+        dlg = QMessageBox(self.panel)
+        dlg.setStyleSheet(_MSGBOX_DARK_STYLE)
+        dlg.setWindowTitle("메모장 비우기")
+        dlg.setText(body + "\n\n지우면 되돌릴 수 없어요.")
+        yes = dlg.addButton("지우기", QMessageBox.ButtonRole.DestructiveRole)
+        dlg.addButton("취소", QMessageBox.ButtonRole.RejectRole)
+        dlg.exec()
+        if dlg.clickedButton() is not yes:
+            return
+        for item_id in self.db.clear_memos():
+            win = MemoWindow.get(item_id)
+            if win is not None:
+                win.blockSignals(True)  # 이미 지운 메모 — 닫으며 다시 저장하지 않게
+                win.close()
+            self.queue.remove_item(item_id)
+        pointer, total = self.queue.get_status()
+        self.tray.update_queue_status(pointer, total)
+        if total > 0:
+            self.paste_hud.show_progress(self.queue.get_items(), pointer)
+        else:
+            self.paste_hud.dismiss()
         self._refresh_panel()
 
     def _on_preview_image(self, item_id: int):
@@ -2507,7 +2549,7 @@ class PasteFlowApp:
             return
         popup = TextPreviewPopup.open_new(item, self.panel.geometry())
         popup.copy_requested.connect(self._on_copy_item)
-        popup.edit_requested.connect(self._on_preview_edit_request)
+        popup.edit_requested.connect(self._open_memo)
         self._text_preview_windows[item_id] = popup
         popup.destroyed.connect(lambda _=None, iid=item_id: self._text_preview_windows.pop(iid, None))
 
@@ -2534,18 +2576,6 @@ class PasteFlowApp:
         win.discard_requested.connect(self._on_delete_item)
         win.closed.connect(lambda _id: self._refresh_panel())
         win.show_near(self.panel.geometry() if self.panel.isVisible() else None)
-
-    def _on_preview_edit_request(self, item_id: int):
-        """텍스트 미리보기 우클릭 메뉴 `수정` → 편집 다이얼로그 → 변경 시 기존 _on_edit_item으로 위임."""
-        from PyQt6.QtWidgets import QDialog
-        item = self.db.get_item(item_id)
-        if not item:
-            return
-        dialog = EditItemDialog(item.text_content or "", self.panel)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            new_text = dialog.get_text()
-            if new_text != (item.text_content or ""):
-                self._on_edit_item(item_id, new_text)
 
     def _open_ai_dialog(self, initial_image_png: bytes | None = None):
         """이미지 우클릭 "Gemini에게 질문" — 질문 입력창을 **비모달로** 띄우고, 질문을

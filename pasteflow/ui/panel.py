@@ -8,7 +8,7 @@ from typing import Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QApplication, QGraphicsOpacityEffect,
-    QSizePolicy, QDialog, QPlainTextEdit,
+    QSizePolicy,
 )
 import ctypes
 import ctypes.wintypes
@@ -27,7 +27,8 @@ from pasteflow.ui.ai_query import AiQueryDialog
 from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.text_preview import TextPreviewPopup
 from pasteflow.ui.menu_style import make_menu
-from pasteflow.ui.theme import COLORS, PEACH_HOVER
+from pasteflow.ui.menu_icons import menu_icon
+from pasteflow.ui.theme import COLORS
 
 PANEL_WIDTH = 320
 PANEL_HEIGHT = 420
@@ -130,6 +131,22 @@ class PanelItemWidget(QWidget):
             text_label.setFixedHeight(_label_h)
             self.setFixedHeight(_label_h + 12)  # 12 = 상하 패딩(6+6)
 
+        # 잠긴 메모장 항목 — 오른쪽에 작은 자물쇠(지우기·비우기·고정 해제가 막힘)
+        # 텍스트는 테두리가 글자 칸(QLabel)에 그려지므로 그 안쪽 오른쪽 위에 얹고 글자 자리를 비워 둔다.
+        self._lock_label: Optional[QLabel] = None
+        if item.is_locked:
+            host = self._text_label
+            lock_label = QLabel(host) if host is not None else QLabel()
+            lock_label.setPixmap(menu_icon("lock", COLORS['subtext0'], COLORS['surface2']).pixmap(14, 14))
+            lock_label.setFixedSize(14, 14)
+            lock_label.setStyleSheet("background: transparent; border: none;")
+            lock_label.setToolTip("잠김 — L로 풀기")
+            if host is not None:
+                host.setContentsMargins(0, 0, 18, 0)
+                self._lock_label = lock_label
+            else:
+                layout.addWidget(lock_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
         # 바는 레이아웃이 행 높이에 맞춰 자동 조정 (타이머 불필요)
 
         self._apply_bg_style()
@@ -137,11 +154,14 @@ class PanelItemWidget(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._adjust_text_height()
+        if self._lock_label is not None and self._text_label is not None:
+            self._lock_label.move(self.width() - 16 - 19, 5)  # 글자 칸 폭 = 위젯 폭 - 좌우 여백(8+8)
 
     def _adjust_text_height(self):
         if self._text_label is None:
             return
-        avail_w = self.width() - 16  # lmargin(8) + rmargin(8)
+        # lmargin(8) + rmargin(8) + 자물쇠 자리(잠긴 항목만)
+        avail_w = self.width() - 16 - self._text_label.contentsMargins().right()
         if avail_w <= 0:
             return
         fm = self._text_label.fontMetrics()
@@ -373,79 +393,6 @@ class PinDropZone(QWidget):
         event.acceptProposedAction()
 
 
-class EditItemDialog(QDialog):
-    """고정 항목 텍스트 수정 다이얼로그"""
-
-    def __init__(self, current_text: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("항목 수정")
-        self.setMinimumSize(360, 200)
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: {COLORS['base']};
-                color: {COLORS['text']};
-            }}
-            QLabel {{
-                color: {COLORS['subtext0']};
-                font-size: 11px;
-            }}
-            QPlainTextEdit {{
-                background-color: {COLORS['surface0']};
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['surface2']};
-                border-radius: 6px;
-                padding: 6px;
-                font-size: 13px;
-            }}
-            QPlainTextEdit:focus {{
-                border: 1px solid {COLORS['peach']};
-            }}
-            QPushButton {{
-                background-color: {COLORS['surface1']};
-                color: {COLORS['text']};
-                border: none;
-                border-radius: 6px;
-                padding: 6px 16px;
-                font-size: 12px;
-            }}
-            QPushButton:hover {{
-                background-color: {COLORS['surface2']};
-            }}
-            QPushButton[text="저장"] {{
-                background-color: {COLORS['peach']};
-                color: {COLORS['base']};
-            }}
-            QPushButton[text="저장"]:hover {{
-                background-color: {PEACH_HOVER};
-            }}
-        """)
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(8)
-        layout.setContentsMargins(12, 12, 12, 12)
-
-        layout.addWidget(QLabel("내용을 수정하세요. 저장 시 원본 서식(HTML/RTF)은 제거됩니다."))
-
-        self._editor = QPlainTextEdit()
-        self._editor.setPlainText(current_text)
-        self._editor.setFocus()
-        layout.addWidget(self._editor, 1)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        cancel_btn = QPushButton("취소")
-        cancel_btn.clicked.connect(self.reject)
-        save_btn = QPushButton("저장")
-        save_btn.setProperty("text", "저장")
-        save_btn.clicked.connect(self.accept)
-        btn_row.addWidget(cancel_btn)
-        btn_row.addWidget(save_btn)
-        layout.addLayout(btn_row)
-
-    def get_text(self) -> str:
-        return self._editor.toPlainText()
-
-
 class ClipboardPanel(QWidget):
     """전체 클립보드 패널"""
 
@@ -457,7 +404,11 @@ class ClipboardPanel(QWidget):
     delete_item_requested = pyqtSignal(int)
     pin_reorder_requested = pyqtSignal(list)
     history_reorder_requested = pyqtSignal(list)
-    edit_item_requested = pyqtSignal(int, str)  # (item_id, new_text)
+    open_memo_requested = pyqtSignal(int)      # item_id — 텍스트 항목을 메모창으로 열기(수정)
+    new_memo_requested = pyqtSignal()          # 메모장 + 버튼 — 새 메모
+    toggle_lock_requested = pyqtSignal(int)    # item_id — 메모장 항목 잠금 켜기/끄기
+    clear_memos_requested = pyqtSignal()       # 메모장 비우기(잠긴 것 제외) — 확인은 main이
+    locked_notice = pyqtSignal()               # 잠긴 항목을 지우거나 고정 해제하려 함 → main이 토스트
     preview_image_requested = pyqtSignal(int)  # item_id — 위치는 main이 panel.geometry()로 계산
     preview_text_requested = pyqtSignal(int)   # item_id — 동상
     copy_image_as_path_requested = pyqtSignal(int)  # item_id — 이미지를 임시 PNG로 저장 후 경로를 클립보드에 텍스트로 복사
@@ -801,7 +752,7 @@ class ClipboardPanel(QWidget):
             filtered_pinned = self._pinned_items
 
             arrow = "\u25BC" if not self._pinned_collapsed else "\u25B6"
-            pin_header_text = f"{arrow} 고정메모"
+            pin_header_text = f"{arrow} 메모장"
 
             pin_header_row = QHBoxLayout()
             pin_header_row.setContentsMargins(4, 0, 0, 0)
@@ -829,11 +780,28 @@ class ClipboardPanel(QWidget):
             """)
             pin_header_btn.clicked.connect(self._toggle_pinned)
             pin_header_row.addWidget(pin_header_btn)
+
+            new_memo_btn = QPushButton()
+            new_memo_btn.setIcon(menu_icon("plus", COLORS['peach'], COLORS['surface2']))
+            new_memo_btn.setFixedSize(22, 22)
+            new_memo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            new_memo_btn.setToolTip("새 메모")
+            new_memo_btn.setStyleSheet(f"""
+                QPushButton {{ background: transparent; border: none; border-radius: 4px; }}
+                QPushButton:hover {{ background: {COLORS['surface1']}; }}
+            """)
+            new_memo_btn.clicked.connect(self.new_memo_requested.emit)
+            pin_header_row.addWidget(new_memo_btn)
             pin_header_row.addStretch()
 
             pin_header_wrapper = QWidget(sc)
             pin_header_wrapper.setLayout(pin_header_row)
             pin_header_wrapper.setStyleSheet("background: transparent;")
+            # 제목 줄 우클릭 → 새 메모 / 메모장 비우기
+            for w in (pin_header_wrapper, pin_header_btn, new_memo_btn):
+                w.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                w.customContextMenuRequested.connect(
+                    lambda _pos: self._show_memo_header_menu(QCursor.pos()))
             self._items_layout.addWidget(pin_header_wrapper)
 
             drop_zone = PinDropZone(sc)
@@ -1055,6 +1023,10 @@ class ClipboardPanel(QWidget):
             self._selected_ids.add(ids[idx])
 
     def _on_item_delete(self, item_id: int):
+        item = self._find_item(item_id)
+        if item and item.is_locked:
+            self.locked_notice.emit()
+            return
         for i in range(self._items_layout.count()):
             widget = self._items_layout.itemAt(i).widget()
             if isinstance(widget, PanelItemWidget) and widget.item_id == item_id:
@@ -1116,30 +1088,42 @@ class ClipboardPanel(QWidget):
             ask_ai_action.triggered.connect(lambda: self.ask_ai_item_requested.emit(item_id))
         else:
             edit_action = menu.add("수정", "pencil-simple")
-            edit_action.triggered.connect(lambda: self._on_edit_item(item))
+            edit_action.triggered.connect(lambda: self.open_memo_requested.emit(item_id))
 
         menu.addSeparator()
 
         if item.is_pinned:
             unpin_action = menu.add("고정 해제	P", "push-pin-slash")
             unpin_action.triggered.connect(lambda: self.unpin_item_requested.emit(item_id))
+            unpin_action.setEnabled(not item.is_locked)
         else:
             pin_action = menu.add("고정	P", "push-pin")
             pin_action.triggered.connect(lambda: self.pin_item_requested.emit(item_id))
+        if item.is_locked:
+            lock_action = menu.add("잠금 해제	L", "lock-open")
+        else:
+            lock_action = menu.add("잠금	L", "lock")
+        lock_action.triggered.connect(lambda: self.toggle_lock_requested.emit(item_id))
+        lock_action.setEnabled(item.is_pinned)
 
         menu.addSeparator()
 
         delete_action = menu.add("삭제	Del", "trash", danger=True)
         delete_action.triggered.connect(lambda: self.delete_item_requested.emit(item_id))
+        delete_action.setEnabled(not item.is_locked)
 
         menu.exec(pos)
 
-    def _on_edit_item(self, item: ClipboardItem):
-        dialog = EditItemDialog(item.text_content or "", self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            new_text = dialog.get_text()
-            if new_text != (item.text_content or ""):
-                self.edit_item_requested.emit(item.id, new_text)
+    def _show_memo_header_menu(self, pos: QPoint):
+        """메모장 제목 줄 우클릭 — 새 메모 / 메모장 비우기(잠긴 것은 남음)"""
+        menu = make_menu()
+        new_action = menu.add("새 메모", "plus")
+        new_action.triggered.connect(self.new_memo_requested.emit)
+        menu.addSeparator()
+        clear_action = menu.add("메모장 비우기", "broom", danger=True)
+        clear_action.triggered.connect(self.clear_memos_requested.emit)
+        clear_action.setEnabled(any(not it.is_locked for it in self._pinned_items))
+        menu.exec(pos)
 
     def _do_copy(self, item: ClipboardItem):
         """우클릭 복사 — copy_item_requested로 전체 포맷 복사 + self_triggered 처리"""
@@ -1523,6 +1507,12 @@ class ClipboardPanel(QWidget):
             event.accept()
             return
 
+        # ── L: 포커스한 메모장 항목 잠금 토글 ──
+        if key == Qt.Key.Key_L and not mods & Qt.KeyboardModifier.ControlModifier:
+            self._kbd_lock_toggle()
+            event.accept()
+            return
+
         # ── S: 포커스 항목(이미지)을 파일로 저장 후 경로 복사 (2026-08-03 사용자 요청) ──
         if key == Qt.Key.Key_S and not mods & Qt.KeyboardModifier.ControlModifier:
             self._kbd_copy_path()
@@ -1625,9 +1615,20 @@ class ClipboardPanel(QWidget):
         if not item:
             return
         if item.is_pinned:
+            if item.is_locked:
+                self.locked_notice.emit()
+                return
             self.unpin_item_requested.emit(self._kbd_focus_id)
         else:
             self.pin_item_requested.emit(self._kbd_focus_id)
+
+    def _kbd_lock_toggle(self):
+        """L: 포커스한 메모장 항목 잠금 켜기/끄기(히스토리 항목은 대상 아님)"""
+        if self._kbd_focus_id is None:
+            return
+        item = self._find_item(self._kbd_focus_id)
+        if item and item.is_pinned:
+            self.toggle_lock_requested.emit(self._kbd_focus_id)
 
     def _kbd_copy_path(self):
         """S: 포커스 항목이 이미지면 파일로 저장 후 경로 복사(우클릭 메뉴와 동일 동작)"""
@@ -1664,6 +1665,10 @@ class ClipboardPanel(QWidget):
         if self._kbd_focus_id is None:
             return
         del_id = self._kbd_focus_id
+        item = self._find_item(del_id)
+        if item and item.is_locked:
+            self.locked_notice.emit()
+            return
         items = self._kbd_get_ordered_items()
         ids = [item_id for item_id, _ in items]
         if del_id in ids:
