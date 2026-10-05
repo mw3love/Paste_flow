@@ -112,7 +112,11 @@ class MemoWindow(QWidget):
         self._editor.setFrameShape(QFrame.Shape.NoFrame)
         self._editor.setViewportMargins(10, 10, 30, 10)  # 오른쪽 30 = 핀 버튼 자리
         self._editor.document().setDocumentMargin(0)
+        # 줄은 항상 자동으로 바뀌는데, 창이 좁거나 글자가 크면 계산 오차로 몇 px(실측 3px)
+        # 넘쳐 흰 가로 스크롤바가 생겼다 → 가로는 끈다(text_preview와 같은 방식).
+        self._editor.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._apply_font_px(type(self)._font_px)
+        # 세로 스크롤바는 패널과 같은 얇은 어두운 모양(기본 흰 스크롤바가 튀지 않게)
         self._editor.setStyleSheet(f"""
             QPlainTextEdit {{
                 background: {_BG};
@@ -121,6 +125,13 @@ class MemoWindow(QWidget):
                 selection-background-color: {_PEACH};
                 selection-color: {_BG};
             }}
+            QScrollBar:vertical {{ background: transparent; width: 5px; margin: 2px 0; }}
+            QScrollBar::handle:vertical {{
+                background: {COLORS['surface2']}; border-radius: 2px; min-height: 30px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: {COLORS['overlay0']}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
         """)
         self._editor.setPlainText(text)
         self._editor.moveCursor(self._editor.textCursor().MoveOperation.End)

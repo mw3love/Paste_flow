@@ -14,7 +14,7 @@ import ctypes
 import ctypes.wintypes
 import os
 
-from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QRect, QSize, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QRect, QRectF, QSize, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QPixmap, QCursor, QFontMetrics, QFont, QIcon, QPainter, QColor
 
 _HWND_TOPMOST = ctypes.wintypes.HWND(-1)
@@ -28,7 +28,7 @@ from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.text_preview import TextPreviewPopup
 from pasteflow.ui.menu_style import make_menu
 from pasteflow.ui.menu_icons import menu_icon
-from pasteflow.ui.theme import COLORS, PEACH_HOVER
+from pasteflow.ui.theme import COLORS
 
 PANEL_WIDTH = 320
 PANEL_HEIGHT = 420
@@ -40,21 +40,32 @@ RESIZE_MARGIN = 6
 MIME_ITEM_TO_PIN = "application/x-pasteflow-item-id"
 
 
-def _crisp_plus_icon(color: str, size: int) -> QIcon:
-    """픽셀 격자에 맞춘 십자 — 작은 크기에서 SVG 십자는 선이 번져 흐릿하다(2026-10-05 실측)."""
+_PLUS_CHIP = 14   # 호버 칩 한 변(px)
+_PLUS_ARM = 7     # 십자 길이(px)
+_PLUS_THICK = 1.5  # 십자 두께(px)
+
+
+def _plus_icon(hover: bool) -> QIcon:
+    """메모장 + 버튼 — 평소: 작은 코랄 십자(시안 B), 호버: 코랄 둥근 칩 안 어두운 십자(시안 E).
+
+    2026-10-05 사용자가 시안 7종 중 고름. 9px·두께 2 십자는 제목만큼 진해 커 보였다.
+    """
     screen = QApplication.primaryScreen()
     ratio = screen.devicePixelRatio() if screen else 1.0
-    n = round(size * ratio)
-    t = max(2, round(2 * ratio))          # 선 두께(물리 픽셀)
-    if (n - t) % 2:                        # 가운데 정렬이 반 픽셀로 어긋나지 않게
-        n += 1
+    n = round(_PLUS_CHIP * ratio)
     pm = QPixmap(n, n)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
-    c = QColor(color)
-    off = (n - t) // 2
-    p.fillRect(0, off, n, t, c)
-    p.fillRect(off, 0, t, n, c)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.scale(ratio, ratio)
+    p.setPen(Qt.PenStyle.NoPen)
+    if hover:
+        p.setBrush(QColor(COLORS['peach']))
+        p.drawRoundedRect(QRectF(0, 0, _PLUS_CHIP, _PLUS_CHIP), 4, 4)
+    p.setBrush(QColor(COLORS['base'] if hover else COLORS['peach']))
+    c, h, t = _PLUS_CHIP / 2, _PLUS_ARM / 2, _PLUS_THICK
+    p.drawRect(QRectF(c - h, c - t / 2, _PLUS_ARM, t))
+    p.drawRect(QRectF(c - t / 2, c - h, t, _PLUS_ARM))
     p.end()
     pm.setDevicePixelRatio(ratio)
     return QIcon(pm)
@@ -839,14 +850,13 @@ class ClipboardPanel(QWidget):
             pin_header_btn.clicked.connect(self._toggle_pinned)
             pin_header_row.addWidget(pin_header_btn)
 
-            new_memo_btn = _HoverIconButton(_crisp_plus_icon(COLORS['peach'], 9),
-                                            _crisp_plus_icon(PEACH_HOVER, 9))
-            new_memo_btn.setIconSize(QSize(9, 9))
-            new_memo_btn.setFixedSize(14, 16)
+            new_memo_btn = _HoverIconButton(_plus_icon(False), _plus_icon(True))
+            new_memo_btn.setIconSize(QSize(_PLUS_CHIP, _PLUS_CHIP))
+            new_memo_btn.setFixedSize(_PLUS_CHIP + 3, 16)
             new_memo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             new_memo_btn.setToolTip("새 메모")
             # padding-top: 십자 가운데를 글자 높이 가운데에 맞춘다(실측 1.5px 위로 떠 있었음)
-            new_memo_btn.setStyleSheet("QPushButton { background: transparent; border: none; padding-top: 3px; }")
+            new_memo_btn.setStyleSheet("QPushButton { background: transparent; border: none; padding-top: 2px; }")
             new_memo_btn.clicked.connect(self.new_memo_requested.emit)
             pin_header_row.addWidget(new_memo_btn)
             pin_header_row.addStretch()
