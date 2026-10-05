@@ -2295,14 +2295,11 @@ class PasteFlowApp:
     def _on_panel_paste(self, item: ClipboardItem):
         """패널 항목 붙여넣기(드래그·Enter) — auto_close 설정에 따라 패널 닫기 여부 결정.
 
-        direct_paste가 클립보드를 그 항목으로 교체하므로, 복사와 동일하게 비고정 항목을
-        히스토리 최상단으로 올려 "최상단 = 현재 클립보드" 불변식을 지킨다.
+        붙여넣기만 하고 히스토리 순서는 건드리지 않는다(맥판과 같음). 클립보드는
+        direct_paste가 그 항목으로 바꾸지만, 최상단 이동은 복사(_on_copy_item)에서만 한다.
         """
         full_item = self.db.get_item(item.id) or item
         target_hwnd = self._prev_foreground_hwnd
-
-        if not full_item.is_pinned and full_item.id is not None:
-            self.db.bump_history_to_top(full_item.id)
 
         if self.panel._auto_close:
             # 자동 닫기 ON: 즉시 숨기고 붙여넣기 (fade 대기 시 포그라운드 잠금 문제 발생)
@@ -2331,11 +2328,6 @@ class PasteFlowApp:
                     self._bridge.panel_paste_done.emit()
 
         threading.Thread(target=_do_paste, daemon=True).start()
-
-        # 패널이 열린 채 유지되면(auto_close OFF) 최상단으로 올라간 순서를 즉시 반영.
-        # ON이면 이미 숨겨졌으므로 다음에 열 때 DB 순서로 새로 그려진다.
-        if not self.panel._auto_close:
-            self._refresh_panel()
 
     def _on_copy_item(self, item: ClipboardItem):
         """고정/히스토리 항목 복사 → 클립보드 + 큐 추가 + (히스토리는) 최상단 이동 + 토스트.
@@ -2762,12 +2754,8 @@ class PasteFlowApp:
                     return  # 저장 성공 시에만 반환; 실패 시 클립보드 경로로 fall-through
 
         # 기존 붙여넣기 경로 (텍스트/기타 항목, 또는 이미지→일반 앱)
-        # 클립보드를 항목 그 자체로 교체하므로 복사·Enter와 동일하게 최상단으로 올린다
-        # ("최상단 = 현재 클립보드"). Alt+드래그(경로 텍스트)·탐색기 저장(PNG)은 위에서
-        # 먼저 return하므로 클립보드=항목인 이 경로에만 적용된다.
+        # Enter와 같이 붙여넣기만 하고 히스토리 순서는 건드리지 않는다(맥판과 같음).
         self.interceptor._set_clipboard(full_item)
-        if not full_item.is_pinned:
-            self.db.bump_history_to_top(full_item.id)
 
         target = _find_deepest_child(hwnd, screen_pt)
         class_name = ""
@@ -2788,10 +2776,6 @@ class PasteFlowApp:
         else:
             # Win32 / WinUI3: WM_PASTE 직접 전송
             win32gui.SendMessage(target, win32con.WM_PASTE, 0, 0)
-
-        # 최상단으로 올라간 순서를 패널에 반영 (드래그 소스라 패널은 열려 있음)
-        if self.panel.isVisible():
-            self._refresh_panel()
 
     def _position_dropped_desktop_icon(self, filename: str, screen_pt: tuple, attempt: int = 0):
         """바탕화면에 방금 저장한 파일의 아이콘을 드롭 지점(screen_pt)에 배치한다.
