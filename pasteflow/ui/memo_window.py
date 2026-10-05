@@ -53,6 +53,7 @@ _user32.GetWindowThreadProcessId.argtypes = [ctypes.wintypes.HWND, ctypes.POINTE
 _user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
 _user32.AttachThreadInput.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.DWORD, ctypes.wintypes.BOOL]
 _user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
+_user32.BringWindowToTop.argtypes = [ctypes.wintypes.HWND]
 _TITLE_BAR_H = 32  # 화면 위로 제목 표시줄이 잘리지 않게 남기는 여유(px)
 
 # 일반 창이라 Windows가 열 때 ~0.2초 확대·페이드 효과를 넣어 둔하게 느껴졌다 → 이 창만 끈다
@@ -81,6 +82,9 @@ def _force_foreground(hwnd: int):
         my_tid = _kernel32.GetCurrentThreadId()
         attached = bool(fg_tid) and fg_tid != my_tid and _user32.AttachThreadInput(my_tid, fg_tid, True)
         _user32.SetForegroundWindow(hwnd)
+        # 포커스만 넘어오고 Z 순서는 다른 앱 창 밑에 남는 경우가 있었다(fg=self인데 탐색기가
+        # 덮음 — 2026-10-05 진단 로그 실측). 잠금이 풀린 지금 맨 위로도 올린다.
+        _user32.BringWindowToTop(hwnd)
         if attached:
             _user32.AttachThreadInput(my_tid, fg_tid, False)
     except Exception:
