@@ -16,8 +16,8 @@ import ctypes
 import ctypes.wintypes
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QFrame, QApplication, QToolButton
-from PyQt6.QtCore import Qt, QTimer, QRect, QPoint, QEvent, QByteArray, pyqtSignal
-from PyQt6.QtGui import QFont, QCursor, QKeySequence, QShortcut
+from PyQt6.QtCore import Qt, QTimer, QRect, QRectF, QPoint, QPointF, QSize, QEvent, QByteArray, pyqtSignal
+from PyQt6.QtGui import QFont, QCursor, QKeySequence, QShortcut, QIcon, QPixmap, QPainter, QColor
 
 from pasteflow.ui.theme import BASE as _BG, TEXT as _TEXT, PEACH as _PEACH, COLORS
 from pasteflow.ui.menu_style import make_menu
@@ -44,6 +44,33 @@ _user32.SetWindowPos.argtypes = [
 _HWND_TOPMOST = -1
 _HWND_NOTOPMOST = -2
 _SWP_FLAGS = 0x0001 | 0x0002 | 0x0010  # NOSIZE | NOMOVE | NOACTIVATE
+
+
+_PIN_CHIP = 22  # 핀 버튼(호버 칩) 한 변
+_PIN_ICON = 14  # 그 안 핀 아이콘
+
+
+def _pin_icon(on: bool, hover: bool) -> QIcon:
+    """항상 위 핀 아이콘 — 칩 크기 캔버스에 그려 호버 전환 때 크기가 흔들리지 않게 한다."""
+    screen = QApplication.primaryScreen()
+    ratio = screen.devicePixelRatio() if screen else 1.0
+    pm = QPixmap(round(_PIN_CHIP * ratio), round(_PIN_CHIP * ratio))
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.scale(ratio, ratio)
+    if hover:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(_PEACH))
+        p.drawRoundedRect(QRectF(0, 0, _PIN_CHIP, _PIN_CHIP), 5, 5)
+        color = _BG
+    else:
+        color = _PEACH if on else COLORS['overlay0']
+    off = (_PIN_CHIP - _PIN_ICON) / 2
+    p.drawPixmap(QPointF(off, off), menu_icon("push-pin", color, color).pixmap(_PIN_ICON, _PIN_ICON))
+    p.end()
+    pm.setDevicePixelRatio(ratio)
+    return QIcon(pm)
 
 
 class MemoWindow(QWidget):
@@ -142,13 +169,13 @@ class MemoWindow(QWidget):
         self._editor.customContextMenuRequested.connect(self._show_context_menu)
 
         self._pin_btn = QToolButton(self)
-        self._pin_btn.setFixedSize(24, 24)
-        self._pin_btn.setIconSize(self._pin_btn.size() * 0.66)
+        self._pin_btn.setFixedSize(_PIN_CHIP, _PIN_CHIP)
+        self._pin_btn.setIconSize(QSize(_PIN_CHIP, _PIN_CHIP))
         self._pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._pin_btn.setStyleSheet(
-            f"QToolButton {{ background: transparent; border: none; border-radius: 4px; }}"
-            f"QToolButton:hover {{ background: {COLORS['surface1']}; }}")
+        self._pin_btn.setStyleSheet("QToolButton { background: transparent; border: none; padding: 0; }")
         self._pin_btn.clicked.connect(self._toggle_topmost)
+        self._pin_hover = False
+        self._pin_btn.installEventFilter(self)  # 호버 시 코랄 칩으로 바꾸려고 Enter/Leave를 본다
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -203,6 +230,10 @@ class MemoWindow(QWidget):
         self._editor.document().setDocumentMargin(0)  # setFont가 여백을 되돌리는 경우 대비
 
     def eventFilter(self, obj, event):
+        if obj is getattr(self, "_pin_btn", None) and event.type() in (QEvent.Type.Enter, QEvent.Type.Leave):
+            self._pin_hover = event.type() == QEvent.Type.Enter
+            self._update_pin_btn()
+            return False
         if (obj is self._editor.viewport() and event.type() == QEvent.Type.Wheel
                 and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
             delta = event.angleDelta().y()
@@ -233,9 +264,9 @@ class MemoWindow(QWidget):
         self._update_pin_btn()
 
     def _update_pin_btn(self):
-        # 켜짐 = 코랄(주목), 꺼짐 = 흐린 회색 — 테마의 2톤 규칙
-        color = _PEACH if self._topmost else COLORS['overlay0']
-        self._pin_btn.setIcon(menu_icon("push-pin", color, color))
+        # 평소: 켜짐 = 코랄 핀, 꺼짐 = 흐린 회색 핀(테마 2톤 규칙). 호버: 상태와 상관없이
+        # 코랄 칩 안 어두운 핀 — 패널 메모장 + 버튼과 같은 규칙(2026-10-05 사용자가 시안 1 선택).
+        self._pin_btn.setIcon(_pin_icon(self._topmost, self._pin_hover))
         self._pin_btn.setToolTip("항상 위 끄기 (Ctrl+T)" if self._topmost else "항상 위 (Ctrl+T)")
 
     def resizeEvent(self, event):
