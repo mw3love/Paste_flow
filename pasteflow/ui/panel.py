@@ -14,8 +14,8 @@ import ctypes
 import ctypes.wintypes
 import os
 
-from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QRect, QPropertyAnimation, QEasingCurve
-from PyQt6.QtGui import QPixmap, QCursor, QFontMetrics, QFont
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QRect, QSize, QPropertyAnimation, QEasingCurve
+from PyQt6.QtGui import QPixmap, QCursor, QFontMetrics, QFont, QIcon, QPainter, QColor
 
 _HWND_TOPMOST = ctypes.wintypes.HWND(-1)
 _SWP_NOMOVE = 0x0002
@@ -38,6 +38,26 @@ RESIZE_MARGIN = 6
 
 # 드래그 MIME 타입
 MIME_ITEM_TO_PIN = "application/x-pasteflow-item-id"
+
+
+def _crisp_plus_icon(color: str, size: int) -> QIcon:
+    """픽셀 격자에 맞춘 십자 — 작은 크기에서 SVG 십자는 선이 번져 흐릿하다(2026-10-05 실측)."""
+    screen = QApplication.primaryScreen()
+    ratio = screen.devicePixelRatio() if screen else 1.0
+    n = round(size * ratio)
+    t = max(2, round(2 * ratio))          # 선 두께(물리 픽셀)
+    if (n - t) % 2:                        # 가운데 정렬이 반 픽셀로 어긋나지 않게
+        n += 1
+    pm = QPixmap(n, n)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    c = QColor(color)
+    off = (n - t) // 2
+    p.fillRect(0, off, n, t, c)
+    p.fillRect(off, 0, t, n, c)
+    p.end()
+    pm.setDevicePixelRatio(ratio)
+    return QIcon(pm)
 
 
 class PanelItemWidget(QWidget):
@@ -760,8 +780,12 @@ class ClipboardPanel(QWidget):
 
             pin_header_btn = QPushButton(pin_header_text)
             pin_header_btn.setFixedHeight(24)
-            fm = QFontMetrics(pin_header_btn.font())
-            text_width = fm.horizontalAdvance(pin_header_text) + 16
+            # 스타일시트 글꼴(11px·600)로 잰다 — 버튼 기본 글꼴은 더 커서 폭이 넉넉히 잡혀 + 버튼이 멀어진다
+            _hf = QFont(pin_header_btn.font())
+            _hf.setPixelSize(11)
+            _hf.setWeight(QFont.Weight.DemiBold)
+            fm = QFontMetrics(_hf)
+            text_width = fm.horizontalAdvance(pin_header_text) + 12  # 좌우 padding 4+4 + 여유 4
             pin_header_btn.setFixedWidth(text_width)
             pin_header_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             pin_header_btn.setStyleSheet(f"""
@@ -782,13 +806,13 @@ class ClipboardPanel(QWidget):
             pin_header_row.addWidget(pin_header_btn)
 
             new_memo_btn = QPushButton()
-            new_memo_btn.setIcon(menu_icon("plus", COLORS['peach'], COLORS['surface2']))
-            new_memo_btn.setFixedSize(22, 22)
+            new_memo_btn.setIcon(_crisp_plus_icon(COLORS['peach'], 9))
+            new_memo_btn.setIconSize(QSize(9, 9))
+            new_memo_btn.setFixedSize(14, 16)
             new_memo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             new_memo_btn.setToolTip("새 메모")
             new_memo_btn.setStyleSheet(f"""
-                QPushButton {{ background: transparent; border: none; border-radius: 4px; }}
-                QPushButton:hover {{ background: {COLORS['surface1']}; }}
+                QPushButton {{ background: transparent; border: none; }}
             """)
             new_memo_btn.clicked.connect(self.new_memo_requested.emit)
             pin_header_row.addWidget(new_memo_btn)
