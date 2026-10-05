@@ -23,6 +23,7 @@ from pasteflow.ui.panel import (
 from pasteflow.ui.image_preview import ImagePreviewPopup
 from pasteflow.ui.image_annotator import _EditorMixin
 from pasteflow.ui.text_preview import TextPreviewPopup
+from pasteflow.ui.memo_window import MemoWindow
 from pasteflow.ui.tray import TrayIcon
 from pasteflow.ui.paste_hud import PasteHud
 from pasteflow.ui.settings_dialog import SettingsDialog
@@ -2510,6 +2511,30 @@ class PasteFlowApp:
         self._text_preview_windows[item_id] = popup
         popup.destroyed.connect(lambda _=None, iid=item_id: self._text_preview_windows.pop(iid, None))
 
+    def _open_memo(self, item_id: int | None = None):
+        """메모창 열기 — item_id가 없으면 메모장 맨 위에 새 메모를 만들어 연다.
+
+        이미 열린 메모면 그 창을 앞으로 가져온다. 클립보드·순차 큐는 건드리지 않는다.
+        """
+        if item_id is not None:
+            existing = MemoWindow.get(item_id)
+            if existing is not None:
+                existing.bring_to_front()
+                return
+            item = self.db.get_item(item_id)
+            if not item or item.content_type == "image":
+                return
+            text = item.text_content or ""
+        else:
+            item_id = self.db.create_memo("").id
+            text = ""
+            self._refresh_panel()
+        win = MemoWindow(item_id, text)
+        win.save_requested.connect(self.db.update_item_text)
+        win.discard_requested.connect(self._on_delete_item)
+        win.closed.connect(lambda _id: self._refresh_panel())
+        win.show_near(self.panel.geometry() if self.panel.isVisible() else None)
+
     def _on_preview_edit_request(self, item_id: int):
         """텍스트 미리보기 우클릭 메뉴 `수정` → 편집 다이얼로그 → 변경 시 기존 _on_edit_item으로 위임."""
         from PyQt6.QtWidgets import QDialog
@@ -3189,6 +3214,7 @@ class PasteFlowApp:
             ctypes.windll.user32.UnhookWinEvent(self._fg_hook)
             self._fg_hook = None
 
+        MemoWindow.close_all()  # DB가 닫히기 전에 — 쓰던 메모 저장·빈 메모 삭제
         self.interceptor.stop()
         self.monitor.stop()
         self.tray.hide()
