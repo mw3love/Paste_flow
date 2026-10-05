@@ -2597,9 +2597,17 @@ class PasteFlowApp:
         t = time.perf_counter()
         self._open_memo()
         win = max(MemoWindow._instances.values(), key=lambda w: w.item_id, default=None)
+        if win is None:
+            hotkey_diag.log("main shown: no window")
+            return
+        hwnd = int(win.winId())
         hotkey_diag.log(
-            f"main shown {(time.perf_counter() - t) * 1000:.0f}ms visible={win is not None and win.isVisible()}"
-            f" fg={hotkey_diag.foreground_class()}")
+            f"main shown {(time.perf_counter() - t) * 1000:.0f}ms id={win.item_id} open={len(MemoWindow._instances)}"
+            f" {hotkey_diag.describe(hwnd)}")
+        # 처음엔 앞이었다가 뒤로 밀리는 경우를 잡으려고 0.5초 뒤 한 번 더
+        QTimer.singleShot(500, lambda: hotkey_diag.log(
+            f"main +500ms id={win.item_id} {hotkey_diag.describe(hwnd)}")
+            if MemoWindow.get(win.item_id) is win else None)
 
     def _open_memo(self, item_id: int | None = None):
         """메모창 열기 — item_id가 없으면 메모장 맨 위에 새 메모를 만들어 연다.

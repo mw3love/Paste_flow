@@ -37,6 +37,51 @@ def foreground_class() -> str:
         return "?"
 
 
+class _RECT(ctypes.Structure):
+    _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long), ("r", ctypes.c_long), ("b", ctypes.c_long)]
+
+
+_user32.GetWindowRect.argtypes = [ctypes.wintypes.HWND, ctypes.POINTER(_RECT)]
+_user32.GetWindow.argtypes = [ctypes.wintypes.HWND, ctypes.c_uint]
+_user32.GetWindow.restype = ctypes.wintypes.HWND
+_user32.IsWindowVisible.argtypes = [ctypes.wintypes.HWND]
+_user32.IsIconic.argtypes = [ctypes.wintypes.HWND]
+_user32.GetWindowTextW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.LPWSTR, ctypes.c_int]
+_user32.GetWindowLongW.argtypes = [ctypes.wintypes.HWND, ctypes.c_int]
+_GW_HWNDPREV = 3
+
+
+def _name(hwnd) -> str:
+    c = ctypes.create_unicode_buffer(64)
+    _user32.GetClassNameW(hwnd, c, 64)
+    t = ctypes.create_unicode_buffer(40)
+    _user32.GetWindowTextW(hwnd, t, 40)
+    return f"{c.value}'{t.value}'"
+
+
+def describe(hwnd: int) -> str:
+    """창이 실제로 맨 앞인지 — 위치, 맨 앞 창이 이 창인지, 이 창을 덮는 위쪽 창들(Z 순서)"""
+    try:
+        r = _RECT()
+        _user32.GetWindowRect(hwnd, ctypes.byref(r))
+        fg = _user32.GetForegroundWindow()
+        covers = []
+        h = _user32.GetWindow(hwnd, _GW_HWNDPREV)
+        while h and len(covers) < 6:
+            if _user32.IsWindowVisible(h) and not _user32.IsIconic(h):
+                o = _RECT()
+                _user32.GetWindowRect(h, ctypes.byref(o))
+                if o.l < r.r and r.l < o.r and o.t < r.b and r.t < o.b:  # 겹치는 창만
+                    top = "T" if _user32.GetWindowLongW(h, -20) & 0x8 else ""
+                    covers.append(f"{_name(h)}{top}({o.l},{o.t},{o.r},{o.b})")
+            h = _user32.GetWindow(h, _GW_HWNDPREV)
+        fg_desc = "self" if fg == hwnd else _name(fg) if fg else "-"
+        return (f"rect=({r.l},{r.t},{r.r},{r.b}) iconic={bool(_user32.IsIconic(hwnd))}"
+                f" fg={fg_desc} covered_by=[{'; '.join(covers)}]")
+    except Exception as e:
+        return f"describe failed: {e}"
+
+
 def log(msg: str):
     try:
         path = _path()
