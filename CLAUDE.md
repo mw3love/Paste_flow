@@ -45,6 +45,7 @@ pasteflow/
 ├── clipboard_monitor.py    # 클립보드 감시 (WM_CLIPBOARDUPDATE)
 ├── paste_queue.py          # 순차 붙여넣기 큐 & 포인터 관리 (핵심)
 ├── paste_interceptor.py    # Ctrl+Shift+V 감지 + 패널 토글 단축키 감지 (핵심)
+├── hotkey_diag.py          # 임시 진단 — 새 메모 단축키(Alt+`)가 가끔 안 먹는 원인 추적용 로그(`logs\memo_hotkey.log`). 원인을 찾으면 이 모듈과 호출부(훅·main `_on_new_memo_hotkey`)를 지운다
 ├── hotkey_manager.py       # `_SPECIAL_KEY_MAP`(특수 키 이름 → VK 코드 표)만 남음 — paste_interceptor가 import. 옛 RegisterHotKey `HotkeyManager`는 2026-10-03 제거
 ├── database.py             # SQLite CRUD (clipboard_items, settings)
 ├── models.py               # ClipboardItem 데이터 모델
@@ -108,7 +109,7 @@ docs/
 - **`clipboard_monitor.py`** — `WM_CLIPBOARDUPDATE` 감시 → `_read_clipboard()`가 항상 리스트 반환(탐색기 다중 이미지 파일은 파일마다 항목). 자체 쓰기는 `mark_self_write`(0.5초 시간창 + `SELF_WRITE_BACKSTOP_SEC` 2초 해시). 직전과 같은 내용은 `DUPLICATE_WINDOW_SEC`(1.5초) 안에서만 중복으로 거른다. OLE·HWP 네이티브 포맷은 `extra_formats`에서 제외(한글→한글 붙여넣기 실패 방지). 썸네일은 PIL 우선, 실패 시 raw DIB로 보고 `_dib_to_bmp`. `is_encoded_image`는 인터셉터와 공유.
 - **`paste_queue.py`** — 순차 큐·포인터. 리셋 트리거: 일반 Ctrl+V(`mark_plain_paste`) / idle 만료(`idle_reset_sec`, 기본 10초) / `pointer>0`인 상태의 새 복사. `set_queue`·`clear`·`remove_item`·`undo_last`(테스트만 사용). TDD 대상.
 - **`paste_interceptor.py`** — `WH_KEYBOARD_LL` 훅 하나로 모든 전역 단축키 감지(표는 아래 「단축키 체계」). Ctrl+Shift+V는 클립보드 교체 → `_send_clean_key(VK_V)`(수정키 해제·복원 + `VK_MASK` 입력기 전환 방지). 일반 Ctrl+V는 통과시키며 물리 키만 `on_plain_paste`로 알림. suppress한 키는 짝 **물리** keyup도 막음. STT는 keydown·keyup 푸시투토크(`_stt_mod_only`면 Ctrl+Win처럼 수식키만). 설정창 녹화 중엔 `suspend()`로 전부 통과. `_set_clipboard`는 텍스트·HTML·RTF·이미지(PNG면 PNG+DIB, 그 밖의 파일 포맷은 DIB로 변환, raw DIB는 그대로)·`extra_formats` 전부 복원.
-- **`database.py`** — SQLite(`clipboard_items` FIFO 50개·고정 제외 / `settings` / 사용 안 하는 `ai_history`). 단일 커넥션 + `_lock`(RLock). `history_order`(DB 전용)로 표시 순서, `bump_history_to_top`으로 복사한 항목을 최상단에(패널 Enter·드래그 붙여넣기는 순서 안 바꿈). summary 쿼리는 컬럼을 명시 나열하므로 새 컬럼은 거기에도 추가할 것. 열 때 빈 페이지가 절반 넘고 5MB 이상이면 `VACUUM`(`_compact_if_bloated`). 메모장: `create_memo`(맨 위)·`set_locked`·`count_memos`·`clear_memos`(잠긴 것 제외, 지운 id 반환)·`restore_memos`(비우기 되돌리기) — 잠긴 항목은 `delete_item`/`unpin_item`이 False로 거부. TDD 대상.
+- **`database.py`** — SQLite(`clipboard_items` FIFO 50개·고정 제외 / `settings` / 사용 안 하는 `ai_history`). 단일 커넥션 + `_lock`(RLock). `history_order`(DB 전용)로 표시 순서, `bump_history_to_top`으로 복사한 항목을 최상단에(패널 Enter·드래그 붙여넣기는 순서 안 바꿈). summary 쿼리는 컬럼을 명시 나열하므로 새 컬럼은 거기에도 추가할 것. 열 때 빈 페이지가 절반 넘고 5MB 이상이면 `VACUUM`(`_compact_if_bloated`), 그다음 `PRAGMA mmap_size`로 연다(큰 이미지 행 뒤 칸 읽기 140ms → 1ms). 메모장: `create_memo`(맨 위)·`set_locked`·`count_memos`·`clear_memos`(잠긴 것 제외, 지운 id 반환)·`restore_memos`(비우기 되돌리기) — 잠긴 항목은 `delete_item`/`unpin_item`이 False로 거부. TDD 대상.
 - **`models.py`** — `ClipboardItem`(… `extra_formats` dict, `saved_image_path` = Alt+F2 캡처 파일 경로, `is_locked` = 메모장 삭제 방지). TDD 대상.
 - **`hotkey_manager.py`** — `_SPECIAL_KEY_MAP`(특수 키 이름 → VK) 단일 정의만 남음.
 - **`crypto.py`** — DPAPI `protect`/`unprotect`(`enc:v1:` 접두, 멱등, 실패 시 `""`).
