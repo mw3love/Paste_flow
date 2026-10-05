@@ -72,7 +72,7 @@ pasteflow/
     ├── stt_indicator.py    # 음성 입력 녹음 중 표시되는 음량 반응 이퀄라이저 pill (커서 옆, 클릭하면 녹음 종료)
     ├── nav_icons.py        # 설정창 왼쪽 목록 아이콘 4종 (Phosphor 듀오톤, SVG 문자열 내장 — spec datas 불필요)
     ├── menu_style.py       # 우클릭 메뉴 공통 모양 — make_menu()·menu.add(이름, 아이콘, danger=). 항목을 QSS 대신 프록시 스타일이 직접 그림(단축키 흐리게·위험 항목 호버 빨강)
-    ├── menu_icons.py       # 우클릭 메뉴 아이콘 19종 (Phosphor 듀오톤, SVG 문자열 내장)
+    ├── menu_icons.py       # 우클릭 메뉴 아이콘 22종 (Phosphor 듀오톤, SVG 문자열 내장)
     ├── record_chooser.py   # 녹화 영역 선택 직후 뜨는 [GIF] [영상] 선택 바 (G/V/Enter=지난 선택/ESC)
     └── tray.py             # 시스템 트레이
 
