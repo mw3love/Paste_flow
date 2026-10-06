@@ -210,6 +210,7 @@ class MemoWindow(QWidget):
         layout.addWidget(self._editor)
         # 편집 가능한 QPlainTextEdit은 Ctrl+휠 확대를 스스로 하지 않는다(읽기 전용일 때만) → 직접 처리
         self._editor.viewport().installEventFilter(self)
+        self._editor.installEventFilter(self)  # 한글 조합 중 글자도 제목에 보이게 InputMethod를 본다
         self._editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._editor.customContextMenuRequested.connect(self._show_context_menu)
 
@@ -286,6 +287,9 @@ class MemoWindow(QWidget):
         if obj is getattr(self, "_pin_btn", None) and event.type() in (QEvent.Type.Enter, QEvent.Type.Leave):
             self._pin_hover = event.type() == QEvent.Type.Enter
             self._update_pin_btn()
+            return False
+        if obj is self._editor and event.type() == QEvent.Type.InputMethod:
+            QTimer.singleShot(0, self._update_title)  # 편집기가 조합 글자를 반영한 뒤에 읽는다
             return False
         if (obj is self._editor.viewport() and event.type() == QEvent.Type.Wheel
                 and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
@@ -366,8 +370,19 @@ class MemoWindow(QWidget):
             self._saved_text = text
             self.save_requested.emit(self._item_id, text)
 
+    def _text_with_preedit(self) -> str:
+        """글 내용 + 한글 조합 중인 글자 — 조합 중 글자는 toPlainText()에 아직 안 들어 있다."""
+        text = self._editor.toPlainText()
+        block = self._editor.textCursor().block()
+        layout = block.layout()
+        preedit = layout.preeditAreaText() if layout is not None else ""
+        if preedit:
+            pos = block.position() + layout.preeditAreaPosition()
+            text = text[:pos] + preedit + text[pos:]
+        return text
+
     def _update_title(self):
-        first = self._editor.toPlainText().strip().split("\n", 1)[0].strip()
+        first = self._text_with_preedit().strip().split("\n", 1)[0].strip()
         if len(first) > 30:
             first = first[:30] + "…"
         title = f"{first} — 메모" if first else "새 메모"
