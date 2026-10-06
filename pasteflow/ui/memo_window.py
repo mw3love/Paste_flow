@@ -228,8 +228,9 @@ class MemoWindow(QWidget):
         self._save_timer.timeout.connect(self._flush)
         self._editor.textChanged.connect(self._on_text_changed)
 
+        # 메모는 포스트잇처럼 띄워 두고 보는 일이 많아 처음부터 항상 위로 연다(2026-10-06 사용자 결정)
         self._topmost = False
-        self._update_pin_btn()
+        self._toggle_topmost()
         for keys, slot in (("Ctrl+W", self.close), ("Ctrl+T", self._toggle_topmost),
                            ("Ctrl+0", self._reset_zoom)):
             QShortcut(QKeySequence(keys), self, slot)
