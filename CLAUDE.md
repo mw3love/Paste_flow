@@ -298,7 +298,7 @@ paste_queue_done → _on_paste_queue_done(): _clear_queue_ui() + PasteHud.finish
 2. **`_self_triggered` 플래그** — PasteFlow가 클립보드에 쓸 때 반드시 이 플래그를 설정하여 자체 모니터가 재감지하지 않도록 한다.
 3. **모든 클립보드 형식 보존** — 텍스트만이 아니라 HTML, RTF, 이미지 등 원본 형식을 그대로 클립보드에 복원해야 노션 등에서 서식이 유지된다.
 4. **패널 드래그 → 외부 앱 붙여넣기 방식 (앱 종류에 따라 분기)**
-   - **이미지 항목 + Explorer(`CabinetWClass`) / 바탕화면(`Progman`, `WorkerW`)**: `_save_image_to_folder()`로 PNG 파일 저장. 서브폴더 아이콘 위 드롭 시 해당 폴더에 저장(크로스 프로세스 `LVM_HITTEST`). 저장 성공 시 클립보드 경로 생략. 바탕화면은 저장 직후 `_position_dropped_desktop_icon()`이 `LVM_SETITEMPOSITION32`로 저장된 파일 아이콘을 드롭 좌표로 재배치(가짜 드래그라 Explorer가 실제 드롭 좌표를 몰라 기본 배치를 쓰던 문제 보완 — "아이콘 자동 정렬" 켜짐 시 무효, 자세한 내용은 `docs/architecture-notes.md`의 `main.py` 항목).
+   - **이미지 항목 + Explorer(`CabinetWClass`) / 바탕화면(`Progman`, `WorkerW`)**: `_save_image_to_folder()`로 PNG 파일 저장. 서브폴더 아이콘 위 드롭 시 해당 폴더에 저장(크로스 프로세스 `LVM_HITTEST`). 저장 성공 시 클립보드 경로 생략. 바탕화면은 저장 직후 `_position_dropped_desktop_icon()`이 `LVM_SETITEMPOSITION32`로 저장된 파일 아이콘을 드롭 좌표로 재배치(가짜 드래그라 Explorer가 실제 드롭 좌표를 몰라 기본 배치를 쓰던 문제 보완 — "아이콘 자동 정렬" 켜짐 시 무효, 자세한 내용은 `docs/architecture-notes.md`의 `main.py` 항목). **큐 묶음 저장**: 끌어 놓은 항목이 큐 안에 있고 큐에 이미지가 2개 이상이면 `_save_queue_images_to_folder()`가 큐의 이미지 전부를 `clip_{시각}_{01..}.png`(큐 순서)로 한 번에 저장한다 — 텍스트는 건너뛰고 토스트로 개수 알림, 큐는 그대로 둠, 바탕화면은 아이콘 한 칸씩 아래로.
    - **Win32/WinUI3 앱** (메모장 등): `SendMessage(hwnd, WM_PASTE, 0, 0)`. 흐름: fake drag(DragCopyCursor) → 마우스 업 시 `_set_clipboard` → 재귀적 `ChildWindowFromPoint`로 최하위 자식 컨트롤 탐색 → `SendMessage(WM_PASTE)`.
    - **Electron/Chromium 앱** (노션, Slack 등): `AttachThreadInput` + `SetForegroundWindow` + `SendInput(Ctrl+V)`. 창 클래스명(`Chrome_*`, `CEF*` 등)으로 판별. 금지 항목 4의 예외에 해당.
 5. **`_SPECIAL_KEY_MAP`은 `hotkey_manager.py`에 단일 정의** — `paste_interceptor.py`에서 import해 재사용. 중복 정의 금지.

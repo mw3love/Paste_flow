@@ -544,11 +544,14 @@ def _image_data_to_png_bytes(image_data: bytes) -> bytes:
     return buf.getvalue()
 
 
-def _save_image_to_folder(image_data: bytes, folder: str) -> str:
-    """image_data(PNG/JPEG/GIF/WebP/CF_DIB)를 folder에 PNG 파일로 저장. 저장 경로 반환."""
+def _save_image_to_folder(image_data: bytes, folder: str, seq: int = None) -> str:
+    """image_data(PNG/JPEG/GIF/WebP/CF_DIB)를 folder에 PNG 파일로 저장. 저장 경로 반환.
+    seq를 주면 clip_{시각}_{seq:02d}.png — 큐 묶음 저장이 탐색기에서 큐 순서대로 정렬되게."""
     from datetime import datetime
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if seq is not None:
+        ts = f"{ts}_{seq:02d}"
     base_path = os.path.join(folder, f"clip_{ts}.png")
     path = base_path
     suffix = 0
@@ -2834,6 +2837,9 @@ class PasteFlowApp:
                 folder = _get_explorer_folder(root_hwnd, screen_pt=screen_pt)
             elif is_desktop:
                 folder = _get_desktop_path()
+            # 끌어 놓은 항목이 큐 안에 있고 큐에 이미지가 2개 이상이면 큐 전체를 한 번에 저장
+            if folder and self._save_queue_images_to_folder(item_id, folder, is_desktop, screen_pt):
+                return
             if folder:
                 try:
                     saved_path = _save_image_to_folder(full_item.image_data, folder)
@@ -2869,6 +2875,50 @@ class PasteFlowApp:
         else:
             # Win32 / WinUI3: WM_PASTE 직접 전송
             win32gui.SendMessage(target, win32con.WM_PASTE, 0, 0)
+
+    def _save_queue_images_to_folder(self, item_id: int, folder: str,
+                                     is_desktop: bool, screen_pt: tuple) -> bool:
+        """큐 묶음 저장 — item_id가 큐 안에 있으면 큐의 이미지 전부를 큐 순서 번호를 붙여 저장.
+        텍스트 등 이미지가 아닌 항목은 건너뛴다. 큐는 건드리지 않는다(다른 폴더에 또 놓을 수 있게).
+        묶음 저장을 했으면 True, 해당 없으면(큐 밖 항목·이미지 1개 이하) False → 기존 단일 저장."""
+        queue_items = self.queue.get_items()
+        if item_id not in {it.id for it in queue_items}:
+            return False
+        image_ids = [it.id for it in queue_items if it.content_type == "image"]
+        if len(image_ids) < 2:
+            return False
+
+        from pasteflow.ui.toast import ToastNotification
+        saved_names = []
+        for seq, iid in enumerate(image_ids, 1):
+            full = self.db.get_item(iid)
+            if not full or not full.image_data:
+                continue
+            try:
+                saved_names.append(
+                    os.path.basename(_save_image_to_folder(full.image_data, folder, seq=seq)))
+            except Exception:
+                pass
+        if not saved_names:
+            return False
+
+        if is_desktop:
+            # 첫 파일은 놓은 자리, 나머지는 아이콘 한 칸씩 아래로
+            step = 100
+            lv_hwnd = _find_desktop_listview()
+            if lv_hwnd:
+                LVM_GETITEMSPACING = 0x1000 + 51
+                spacing = ctypes.windll.user32.SendMessageW(lv_hwnd, LVM_GETITEMSPACING, 0, 0)
+                step = ((spacing & 0xFFFFFFFF) >> 16) & 0xFFFF or step
+            for i, name in enumerate(saved_names):
+                self._position_dropped_desktop_icon(name, (screen_pt[0], screen_pt[1] + i * step))
+
+        skipped = len(queue_items) - len(saved_names)
+        msg = f"이미지 {len(saved_names)}개 저장"
+        if skipped:
+            msg += f" · {skipped}개 건너뜀"
+        ToastNotification(msg, icon="📁")
+        return True
 
     def _position_dropped_desktop_icon(self, filename: str, screen_pt: tuple, attempt: int = 0):
         """바탕화면에 방금 저장한 파일의 아이콘을 드롭 지점(screen_pt)에 배치한다.
