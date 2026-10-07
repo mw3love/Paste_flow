@@ -88,31 +88,44 @@ class _HoverIconButton(QPushButton):
         super().leaveEvent(event)
 
 
-def _elided_preview(full: str, fm: QFontMetrics, width: int) -> str:
-    """패널 항목에 보일 글자. 5줄(자동 줄넘김 포함)·한 줄 80자를 넘는 부분은 잘라 내고,
-    잘린 자리 끝에 …를 붙여 패널을 열기 전에도 뒤에 더 있음을 알 수 있게 한다."""
-    src = full.strip().split("\n")
-    text = "\n".join(line[:80] + ("…" if len(line) > 80 else "") for line in src[:5])
+_MORE_COUNT_CAP = 20000  # 남은 줄 수를 셀 때 원문을 이 글자 수까지만 잰다(큰 텍스트에서 패널이 굳지 않게)
+_MORE_FONT_PX = 10
+
+
+def _more_chip_font() -> QFont:
+    f = QFont()
+    f.setPixelSize(_MORE_FONT_PX)
+    return f
+
+
+def _preview_layout(full: str, fm: QFontMetrics, width: int) -> tuple[str, str]:
+    """패널 항목에 보일 글자와 '+N줄' 칩 글자(안 잘리면 "").
+
+    자동 줄넘김까지 쳐서 5줄을 넘으면 위 5줄만 남기고, 마지막 줄 오른쪽에 칩 자리를 비운다.
+    잘림 표시를 글자(…)로 붙이면 원문에 원래 있던 …와 구별이 안 돼서 모양이 다른 칩으로 알린다."""
+    text = full.strip()
+    measure = text[:_MORE_COUNT_CAP]
     flags = Qt.TextFlag.TextWordWrap | int(Qt.AlignmentFlag.AlignLeft)
     ls = fm.lineSpacing()
 
-    def fits(t: str) -> bool:
-        h = fm.boundingRect(QRect(0, 0, width, 10000), flags, t).height()
-        return (h + ls - 1) // ls <= 5
+    def lines(t: str) -> int:
+        h = fm.boundingRect(QRect(0, 0, width, 100000), flags, t).height()
+        return (h + ls - 1) // ls
 
-    if len(src) <= 5 and fits(text):
-        return text
-    base = text[:-1] if text.endswith("…") else text
-    if fits(base + "…"):
-        return base + "…"
-    lo, hi = 0, len(base)
-    while lo < hi:  # 5줄 안에 …까지 들어가는 가장 긴 앞부분
+    total = lines(measure)
+    if total <= 5 and len(text) <= _MORE_COUNT_CAP:
+        return text, ""
+    chip = f"+{total - 5}줄" + (" 이상" if len(text) > _MORE_COUNT_CAP else "")
+    chip_w = QFontMetrics(_more_chip_font()).horizontalAdvance(chip) + 14  # 좌우 padding + 글자와 간격
+    pad = "\u00a0" + "M" * (chip_w // max(1, fm.horizontalAdvance("M")) + 1)
+    lo, hi = 0, min(len(measure), 2000)
+    while lo < hi:  # 칩 자리까지 5줄 안에 들어가는 가장 긴 앞부분
         mid = (lo + hi + 1) // 2
-        if fits(base[:mid].rstrip() + "…"):
+        if lines(measure[:mid].rstrip() + pad) <= 5:
             lo = mid
         else:
             hi = mid - 1
-    return base[:lo].rstrip() + "…"
+    return measure[:lo].rstrip(), chip
 
 
 class PanelItemWidget(QWidget):
@@ -144,6 +157,7 @@ class PanelItemWidget(QWidget):
         self._ext_drag_active = False
         self._text_label: Optional[QLabel] = None
         self._full_text = ""
+        self._more_label: Optional[QLabel] = None  # 5줄 넘을 때 마지막 줄 오른쪽 '+N줄' 칩
 
         self._setup_ui(item, is_current, is_done, is_pinned, in_queue)
         self.setMouseTracking(True)
@@ -186,7 +200,7 @@ class PanelItemWidget(QWidget):
             # 실제 레이블 너비 ≈ PANEL_WIDTH - 패널마진(20) - 아이템내부(lmargin8+rmargin8) = PANEL_WIDTH - 36
             _f = QFont(); _f.setPixelSize(12)
             _fm = QFontMetrics(_f)
-            display_text = _elided_preview(preview, _fm, max(1, PANEL_WIDTH - 36))
+            display_text, _ = _preview_layout(preview, _fm, max(1, PANEL_WIDTH - 36))
 
             text_label = QLabel(display_text)
             text_label.setWordWrap(True)
@@ -241,9 +255,10 @@ class PanelItemWidget(QWidget):
         if avail_w <= 0:
             return
         fm = self._text_label.fontMetrics()
-        text = _elided_preview(self._full_text, fm, avail_w)
+        text, more = _preview_layout(self._full_text, fm, avail_w)
         if self._text_label.text() != text:
             self._text_label.setText(text)
+        self._place_more_chip(more, avail_w, fm.lineSpacing())
         rect = fm.boundingRect(
             QRect(0, 0, avail_w, 10000),
             Qt.TextFlag.TextWordWrap | int(Qt.AlignmentFlag.AlignLeft),
@@ -256,6 +271,29 @@ class PanelItemWidget(QWidget):
             self._text_label.setFixedHeight(label_h)
         if self.height() != new_h:
             self.setFixedHeight(new_h)
+
+    def _place_more_chip(self, more: str, avail_w: int, ls: int):
+        """잘렸으면 마지막(5번째) 줄 오른쪽 끝, _preview_layout이 비워 둔 자리에 칩을 놓는다."""
+        if not more:
+            if self._more_label is not None:
+                self._more_label.hide()
+            return
+        if self._more_label is None:
+            chip = QLabel(self._text_label)
+            chip.setFont(_more_chip_font())
+            chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            # 부모(항목·글자 칸)의 선택자 없는 배경·테두리·글자 규칙을 물려받으므로 전부 다시 지정
+            chip.setStyleSheet(
+                f"background-color: {COLORS['surface2']}; color: {COLORS['subtext0']};"
+                f" border: none; border-radius: 4px; padding: 0 5px; font-size: {_MORE_FONT_PX}px;"
+            )
+            self._more_label = chip
+        chip = self._more_label
+        chip.setText(more)
+        chip.adjustSize()
+        # 글자 칸 높이 = 5줄 + 8, 세로 가운데 정렬이라 첫 줄이 y=4에서 시작
+        chip.move(avail_w - chip.width(), 4 + 4 * ls + (ls - chip.height()) // 2)
+        chip.show()
 
     def _apply_bg_style(self):
         border_color = self._accent_color
