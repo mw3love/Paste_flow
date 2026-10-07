@@ -88,6 +88,33 @@ class _HoverIconButton(QPushButton):
         super().leaveEvent(event)
 
 
+def _elided_preview(full: str, fm: QFontMetrics, width: int) -> str:
+    """패널 항목에 보일 글자. 5줄(자동 줄넘김 포함)·한 줄 80자를 넘는 부분은 잘라 내고,
+    잘린 자리 끝에 …를 붙여 패널을 열기 전에도 뒤에 더 있음을 알 수 있게 한다."""
+    src = full.strip().split("\n")
+    text = "\n".join(line[:80] + ("…" if len(line) > 80 else "") for line in src[:5])
+    flags = Qt.TextFlag.TextWordWrap | int(Qt.AlignmentFlag.AlignLeft)
+    ls = fm.lineSpacing()
+
+    def fits(t: str) -> bool:
+        h = fm.boundingRect(QRect(0, 0, width, 10000), flags, t).height()
+        return (h + ls - 1) // ls <= 5
+
+    if len(src) <= 5 and fits(text):
+        return text
+    base = text[:-1] if text.endswith("…") else text
+    if fits(base + "…"):
+        return base + "…"
+    lo, hi = 0, len(base)
+    while lo < hi:  # 5줄 안에 …까지 들어가는 가장 긴 앞부분
+        mid = (lo + hi + 1) // 2
+        if fits(base[:mid].rstrip() + "…"):
+            lo = mid
+        else:
+            hi = mid - 1
+    return base[:lo].rstrip() + "…"
+
+
 class PanelItemWidget(QWidget):
     """패널 내 개별 항목 위젯"""
 
@@ -116,6 +143,7 @@ class PanelItemWidget(QWidget):
         self._did_drag = False
         self._ext_drag_active = False
         self._text_label: Optional[QLabel] = None
+        self._full_text = ""
 
         self._setup_ui(item, is_current, is_done, is_pinned, in_queue)
         self.setMouseTracking(True)
@@ -154,9 +182,11 @@ class PanelItemWidget(QWidget):
             self.setFixedHeight(86)
         else:
             preview = item.text_content or item.preview_text or ""
-            all_lines = preview.strip().split("\n")
-            lines = all_lines[:5]
-            display_text = "\n".join(line[:80] for line in lines)
+            self._full_text = preview
+            # 실제 레이블 너비 ≈ PANEL_WIDTH - 패널마진(20) - 아이템내부(lmargin8+rmargin8) = PANEL_WIDTH - 36
+            _f = QFont(); _f.setPixelSize(12)
+            _fm = QFontMetrics(_f)
+            display_text = _elided_preview(preview, _fm, max(1, PANEL_WIDTH - 36))
 
             text_label = QLabel(display_text)
             text_label.setWordWrap(True)
@@ -167,9 +197,6 @@ class PanelItemWidget(QWidget):
             layout.addWidget(text_label, 1)
             self._text_label = text_label
 
-            # 실제 레이블 너비 ≈ PANEL_WIDTH - 패널마진(20) - 아이템내부(lmargin8+rmargin8) = PANEL_WIDTH - 36
-            _f = QFont(); _f.setPixelSize(12)
-            _fm = QFontMetrics(_f)
             _rect = _fm.boundingRect(
                 QRect(0, 0, max(1, PANEL_WIDTH - 36), 10000),
                 Qt.TextFlag.TextWordWrap | int(Qt.AlignmentFlag.AlignLeft),
@@ -214,18 +241,17 @@ class PanelItemWidget(QWidget):
         if avail_w <= 0:
             return
         fm = self._text_label.fontMetrics()
+        text = _elided_preview(self._full_text, fm, avail_w)
+        if self._text_label.text() != text:
+            self._text_label.setText(text)
         rect = fm.boundingRect(
             QRect(0, 0, avail_w, 10000),
             Qt.TextFlag.TextWordWrap | int(Qt.AlignmentFlag.AlignLeft),
-            self._text_label.text(),
+            text,
         )
-        actual_lines = max(1, (rect.height() + fm.lineSpacing() - 1) // fm.lineSpacing())
-        visual_lines = min(5, actual_lines)
+        visual_lines = max(1, min(5, (rect.height() + fm.lineSpacing() - 1) // fm.lineSpacing()))
         label_h = visual_lines * fm.lineSpacing() + 8
         new_h = label_h + 12  # 12 = 상하 패딩(6+6)
-        align = (Qt.AlignmentFlag.AlignTop if actual_lines > 5
-                 else Qt.AlignmentFlag.AlignVCenter) | Qt.AlignmentFlag.AlignLeft
-        self._text_label.setAlignment(align)
         if self._text_label.height() != label_h:
             self._text_label.setFixedHeight(label_h)
         if self.height() != new_h:
@@ -411,8 +437,7 @@ class PanelItemWidget(QWidget):
         """위젯을 다시 만들지 않고 글자만 바꾼다(메모창에서 쓰는 중인 내용을 실시간 반영)."""
         if self._text_label is None:
             return
-        lines = text.strip().split("\n")[:5]
-        self._text_label.setText("\n".join(line[:80] for line in lines))
+        self._full_text = text
         self._adjust_text_height()
 
     def contextMenuEvent(self, event):
