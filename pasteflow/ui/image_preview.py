@@ -7,6 +7,9 @@
   우클릭 = 복사/OCR/주석 편집/닫기.
 - 편집 모드: 툴바·액션바 표시, 그리기/선택/크기조절, 창 이동은 상단 핸들로만. ESC = 편집 종료.
 """
+import ctypes
+import ctypes.wintypes
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QGraphicsScene, QGraphicsView, QFrame,
     QApplication, QToolButton,
@@ -28,6 +31,25 @@ PREVIEW_MAX_H = 480
 _PREVIEW_MARGIN = 8
 _CASCADE_STEP = 24
 _CASCADE_NEAR = 150  # 이 거리(px) 안에 있는 기존 창만 cascade 대상으로 셈
+
+# Windows 11은 프레임리스 창에도 둥근 모서리·1px 테두리·그림자를 그려, 투명한 하단 툴바 strip까지
+# 빈 상자처럼 감싸 보였다(2026-10-07). 이 창에만 둘 다 끈다 — 전용 WinDLL(argtypes 공유 금지).
+_dwmapi = ctypes.WinDLL("dwmapi")
+_dwmapi.DwmSetWindowAttribute.argtypes = [
+    ctypes.wintypes.HWND, ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.wintypes.DWORD]
+_dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+_DWMWA_WINDOW_CORNER_PREFERENCE = 33
+_DWMWCP_DONOTROUND = 1
+_DWMWA_BORDER_COLOR = 34
+_DWMWA_COLOR_NONE = 0xFFFFFFFE
+
+
+def _disable_dwm_frame(hwnd: int):
+    """둥근 모서리·테두리를 끈다(Windows 10에선 이 속성이 없어 실패하지만 그대로 무시)."""
+    for attr, value in ((_DWMWA_WINDOW_CORNER_PREFERENCE, _DWMWCP_DONOTROUND),
+                        (_DWMWA_BORDER_COLOR, _DWMWA_COLOR_NONE)):
+        v = ctypes.wintypes.DWORD(value)
+        _dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(v), ctypes.sizeof(v))
 
 # 팝업 본체·chrome strip은 투명(뒤 비침), 툴바만 Snipaste식 밝은 pill로 띄운다.
 # 공유 스타일시트의 `QWidget{background:_BG}`(검정)가 이것들까지 덮으므로 ID 선택자로 되돌린다.
@@ -129,6 +151,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         # chrome을 보였다/숨겼다 할 뿐이라 창 크기·위치가 안 바뀜 → 잔상 0, 이미지 안 가림.
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setObjectName("previewroot")
+        _disable_dwm_frame(int(self.winId()))
 
         self._edit_mode = False
         self._zoom = 1.0
