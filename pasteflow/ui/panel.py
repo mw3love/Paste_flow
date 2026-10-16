@@ -1481,6 +1481,7 @@ class ClipboardPanel(QWidget):
             else:
                 self._resize_edges = set()
                 self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                self._drag_origin = event.globalPosition().toPoint()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -1499,7 +1500,14 @@ class ClipboardPanel(QWidget):
                 g.setTop(new_top)
             self.setGeometry(g)
         elif self._drag_pos and event.buttons() & Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            gp = event.globalPosition().toPoint()
+            self.move(gp - self._drag_pos)
+            # 핀(image_preview._win_drag_move)과 같은 이유로 startDragDistance를 넘으면 Windows 기본 창
+            # 이동에 넘긴다 — 배율이 다른 모니터 경계에서 self.move()로 끌면 패널이 커서에서 떨어지고
+            # 크기가 7배 넘게 불어났다(2026-10-16 실측). 놓을 때까지 Windows가 옮긴다.
+            if ((gp - self._drag_origin).manhattanLength() >= QApplication.startDragDistance()
+                    and self.windowHandle().startSystemMove()):
+                self._drag_pos = None
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
