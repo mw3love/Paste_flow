@@ -162,6 +162,7 @@ docs/
 - **비활성(`WA_ShowWithoutActivating`) TOPMOST 창은 `raise_()`만으로 다른 TOPMOST(패널)를 못 이긴다** — 캡처 오버레이처럼 `SetWindowPos(HWND_TOPMOST)`를 명시하고 한 번 더 재확인한다.
 - **단축키로 여는 일반 창은 포커스와 Z 순서를 따로 확인한다** — 다른 앱이 포그라운드일 때 `raise_()`는 무시되고, `AttachThreadInput`+`SetForegroundWindow`만 하면 포커스는 오는데(`GetForegroundWindow`==자기) 창은 그 앱 밑에 깔린다(2026-10-05 메모창 실측). 잠금을 푼 직후 `BringWindowToTop`까지 한다. 테스트도 포커스만 보지 말고 위를 덮은 창이 있는지 본다.
 - **떠 있는 보조 패널은 `Qt.Popup`이 아니라 `Tool` + `WA_ShowWithoutActivating`** — Popup은 휠 등 마우스를 그랩한다.
+- **프레임리스 창을 마우스로 끌 때 `self.move()`로 따라가게 하지 말고 `windowHandle().startSystemMove()`로 Windows에 넘긴다** — 배율이 다른 모니터 경계에 걸치면 Qt가 창의 모니터를 잘못 알아 창이 커서에서 떨어지고 크기가 불어나다 `CreateDIBSection` qFatal로 꺼졌다(2026-10-16 핀 크래시). 가운데 버튼은 시스템 이동이 안 된다.
 - **캡처 세션의 Space·ESC 억제 훅으로 삼킨 키는 `GetAsyncKeyState`에 안 잡힌다** — 판정은 훅 콜백에서 한다.
 - **`explorer /select,` 경로는 `os.path.normpath`로 정규화** — 슬래시가 섞이면 엉뚱한 폴더가 열린다.
 - **`cv2.VideoWriter`는 실패해도 예외가 없다** — `isOpened()`를 확인한다.

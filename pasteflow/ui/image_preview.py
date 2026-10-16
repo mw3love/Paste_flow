@@ -156,6 +156,8 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
         self._edit_mode = False
         self._zoom = 1.0
         self._win_drag: QPoint | None = None
+        self._win_drag_origin = QPoint()
+        self._sys_moving = False  # 창 이동을 Windows(startSystemMove)에 넘긴 상태
 
         self._init_editor_state()
 
@@ -412,18 +414,34 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
     def _win_drag_start(self, global_pt: QPoint):
         self.activateWindow()
         self._win_drag = global_pt - self.frameGeometry().topLeft()
+        self._win_drag_origin = global_pt
+        self._sys_moving = False
 
     def _win_drag_move(self, global_pt: QPoint):
-        if self._win_drag is not None:
+        if self._win_drag is not None and not self._sys_moving:
             # 첫 실제 이동에서 툴바를 숨긴다 — 자식이라 창과 함께 딸려가 화면 밖으로 나갈 수
             # 있으므로(단순 클릭엔 이동이 없어 숨기지 않음 → 깜빡임 방지). 놓을 때 재배치·표시.
             if self._edit_mode and self._chrome.isVisible():
                 self._chrome.hide()
                 self._edit_close_btn.hide()
+            # 좌버튼 끌기는 startDragDistance를 넘는 순간 Windows 기본 창 이동에 넘긴다. 배율이 다른
+            # 모니터 경계에 걸친 채 self.move()로 옮기면 Qt가 창의 모니터를 Windows와 다르게 알아
+            # 창이 커서에서 떨어지고 (투명한) 창 크기가 경계를 넘을 때마다 불어나, 결국
+            # CreateDIBSection 실패 qFatal로 앱이 꺼졌다(2026-10-16 덤프 — 32767x32767 요청).
+            # 가운데 버튼은 Windows 이동이 좌버튼 전용이라(실측) 기존 방식 그대로.
+            # 넘기기 전에 이번 위치까지는 먼저 옮긴다 — Windows는 넘겨받은 순간의 커서·창 간격을 유지하므로.
             self.move(global_pt - self._win_drag)
+            buttons = QApplication.mouseButtons()
+            if (buttons & Qt.MouseButton.LeftButton
+                    and not buttons & Qt.MouseButton.MiddleButton
+                    and (global_pt - self._win_drag_origin).manhattanLength()
+                    >= QApplication.startDragDistance()
+                    and self.windowHandle().startSystemMove()):
+                self._sys_moving = True  # 놓을 때까지 Windows가 옮긴다 — release는 그대로 온다
 
     def _win_drag_end(self):
         self._win_drag = None
+        self._sys_moving = False
         # 놓은 위치 기준으로 빈 공간을 다시 찾아 배치한 뒤 표시(Snipaste식 — 이동 중엔 숨어 있다
         # 놓을 때 제 위치를 찾아간다). 클릭만이라 숨긴 적 없으면 show/layout은 무해(idempotent).
         if self._edit_mode:
