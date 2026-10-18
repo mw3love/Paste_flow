@@ -2394,7 +2394,7 @@ class PasteFlowApp:
         self.tray.update_queue_status(pointer, total)
         self.panel.update_queue_highlight(pointer, total, queue_item_ids)
         # 큐 지정에 쓴 클릭 선택은 여기서 바로 지운다 — 안 지우면 큐 진행 중 그 항목이
-        # 소진(done)돼 큐 강조가 회색으로 바뀌어도 선택 강조(코랄)가 남아 "첫 항목만
+        # 소진(done)돼 큐 강조가 회색으로 바뀌어도 선택 강조(흰·코랄 굵은 테두리)가 남아 "첫 항목만
         # 안 끝난 것처럼" 보인다(전체 큐가 다 끝나야 clear_selection이 불려 없어짐).
         self.panel.clear_selection()
 

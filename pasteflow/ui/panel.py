@@ -298,9 +298,10 @@ class PanelItemWidget(QWidget):
     def _apply_bg_style(self):
         border_color = self._accent_color
         if self._is_selected:
-            # 선택 = 코랄 강조(테마 규칙: 코랄=선택·주목). 회색 배경만 살짝 바뀌던 낮은
-            # 시인성을 개선 — 따뜻한 코랄 틴트 배경 + 코랄 테두리로 확실히 구분.
-            self.setStyleSheet(f"background-color: #4d3320; border-radius: 6px; border: 1px solid {COLORS['peach']};")
+            # 선택 = 밝은 회색 배경 + 굵은 테두리. 테두리 색은 큐 상태를 따른다(큐 안=코랄,
+            # 밖=흰색) — 선택을 코랄로 칠하면 큐 안 항목을 골랐을 때 큐 표시와 섞여 구분이 안 됐다.
+            sel_border = COLORS['peach'] if border_color == COLORS['peach'] else "#e0e0e0"
+            self.setStyleSheet(f"background-color: #3a3a3a; border-radius: 6px; border: 2px solid {sel_border};")
         elif self._is_hovered:
             self.setStyleSheet(f"background-color: {COLORS['surface1']}; border-radius: 6px; border: 1px solid {border_color};")
         else:
@@ -334,7 +335,7 @@ class PanelItemWidget(QWidget):
         self._is_hovered = True
         self._apply_bg_style()
         # hover는 시각 효과만 — 키보드 대상(_kbd_focus_id)은 클릭·방향키로만 정한다.
-        # hover로 대상을 바꾸면 선택(코랄)과 다른 항목에 Ctrl+C·Del 등이 먹는다.
+        # hover로 대상을 바꾸면 선택 표시와 다른 항목에 Ctrl+C·Del 등이 먹는다.
         super().enterEvent(event)
 
     def leaveEvent(self, event):
