@@ -550,6 +550,7 @@ class ClipboardPanel(QWidget):
     drag_to_app_requested = pyqtSignal(int, QPoint, bool)  # (item_id, cursor_pos, alt_held)
     queue_select_requested = pyqtSignal(int)    # item_id — 해당 항목부터 최신까지 큐 설정
     queue_deselect_requested = pyqtSignal(int)  # item_id — 큐 해제
+    queue_set_ids_requested = pyqtSignal(list)  # [item_id] — Ctrl·Shift로 고른 항목만 큐 설정
     panel_hidden = pyqtSignal()  # 패널 숨겨질 때 emit
     auto_close_changed = pyqtSignal(bool)  # 자동닫기 상태 변경 → main이 DB 저장
 
@@ -1192,7 +1193,11 @@ class ClipboardPanel(QWidget):
                 lambda: self.preview_text_requested.emit(item_id)
             )
 
-        if item_id in self._queue_item_ids:
+        if len(self._selected_ids) > 1 and item_id in self._selected_ids:
+            queue_action = menu.add(f"고른 {len(self._selected_ids)}개 큐에 추가	C", "list-numbers")
+            queue_action.triggered.connect(
+                lambda: self.queue_set_ids_requested.emit(list(self._selected_ids)))
+        elif item_id in self._queue_item_ids:
             queue_action = menu.add("큐 해제	C", "list-numbers")
             queue_action.triggered.connect(lambda: self.queue_deselect_requested.emit(item_id))
         else:
@@ -1766,7 +1771,11 @@ class ClipboardPanel(QWidget):
                 self._do_copy(item)
 
     def _kbd_queue_toggle(self):
-        """c: 포커스 항목 큐 추가/해제 토글 — 앵커 항목이면 해제, 아니면 교체"""
+        """c: 포커스 항목 큐 추가/해제 토글 — 앵커 항목이면 해제, 아니면 교체.
+        Ctrl·Shift로 여러 개 골랐으면 고른 항목만 큐로(이어지지 않아도 됨)."""
+        if len(self._selected_ids) > 1:
+            self.queue_set_ids_requested.emit(list(self._selected_ids))
+            return
         if self._kbd_focus_id is None:
             return
         if self._queue_item_ids and self._kbd_focus_id == self._queue_item_ids[0]:

@@ -1134,6 +1134,7 @@ class PasteFlowApp:
         self.panel.drag_to_app_requested.connect(self._on_drag_to_app)
         self.panel.queue_select_requested.connect(self._on_queue_select)
         self.panel.queue_deselect_requested.connect(self._on_queue_deselect)
+        self.panel.queue_set_ids_requested.connect(self._on_queue_set_ids)
         self.panel.auto_close_changed.connect(self._on_auto_close_changed)
 
         panel_hotkey = self.db.get_setting("hotkey_panel_toggle", "ctrl+space")
@@ -2389,6 +2390,20 @@ class PasteFlowApp:
             # pinned[0:i+1] = [pin1, ..., pinN] → reverse → [pinN, ..., pin1]
             queue_items = list(reversed(pinned[0 : i + 1]))
             self.queue.set_queue(queue_items)
+        self._show_queue_set()
+
+    def _on_queue_set_ids(self, item_ids: list):
+        """패널에서 Ctrl·Shift로 고른 항목만 큐로 — 순서는 c 한 개짜리와 같은 방향(화면 아래→위)."""
+        wanted = set(item_ids)
+        shown = self.panel.pinned_items + self.panel.history_items
+        queue_items = [item for item in reversed(shown) if item.id in wanted]
+        if not queue_items:
+            return
+        self.queue.set_queue(queue_items)
+        self._show_queue_set()
+
+    def _show_queue_set(self):
+        """큐를 새로 정한 뒤 트레이·패널 표시 갱신 + 클릭 선택 지우기."""
         pointer, total = self.queue.get_status()
         queue_item_ids = [item.id for item in self.queue.get_items()]
         self.tray.update_queue_status(pointer, total)
