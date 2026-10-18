@@ -1754,7 +1754,11 @@ class ClipboardPanel(QWidget):
         """Ctrl+C: 단일 복사, 다중 선택이면 결합 복사"""
         if len(self._selected_ids) > 1:
             combined = self._combine_selected_items()
-            if combined:
+            if combined and combined.id is not None:
+                # 전부 이미지 → 첫 이미지(기존 항목)를 단일 복사로. 패널 목록 항목은 image_data가
+                # 빠진 요약본이라 결합 복사로 새로 저장하면 원본 없는 껍데기 항목이 생겼다.
+                self._do_copy(combined)
+            elif combined:
                 self.combine_copy_requested.emit(combined)
         else:
             item = self._find_item(self._kbd_focus_id)
