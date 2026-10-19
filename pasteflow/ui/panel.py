@@ -1201,8 +1201,10 @@ class ClipboardPanel(QWidget):
             queue_action = menu.add("큐 해제	C", "list-numbers")
             queue_action.triggered.connect(lambda: self.queue_deselect_requested.emit(item_id))
         else:
-            queue_action = menu.add("큐에 추가	C", "list-numbers")
-            queue_action.triggered.connect(lambda: self.queue_select_requested.emit(item_id))
+            queue_action = menu.add("이것만 큐에	C", "list-numbers")
+            queue_action.triggered.connect(lambda: self.queue_set_ids_requested.emit([item_id]))
+            range_action = menu.add("여기부터 맨 위까지 큐	Shift+C", "list-numbers")
+            range_action.triggered.connect(lambda: self.queue_select_requested.emit(item_id))
 
         menu.addSeparator()
 
@@ -1643,6 +1645,13 @@ class ClipboardPanel(QWidget):
             event.accept()
             return
 
+        # ── Shift+C: 포커스 항목부터 맨 위(최신·첫 고정)까지 큐 ──
+        if key == Qt.Key.Key_C and mods == Qt.KeyboardModifier.ShiftModifier:
+            if self._kbd_focus_id is not None:
+                self.queue_select_requested.emit(self._kbd_focus_id)
+            event.accept()
+            return
+
         # ── c: 포커스 항목 큐에 추가/해제 토글 (수정자 없는 단일키) ──
         if key == Qt.Key.Key_C and not mods & (
                 Qt.KeyboardModifier.ControlModifier
@@ -1771,7 +1780,7 @@ class ClipboardPanel(QWidget):
                 self._do_copy(item)
 
     def _kbd_queue_toggle(self):
-        """c: 포커스 항목 큐 추가/해제 토글 — 앵커 항목이면 해제, 아니면 교체.
+        """c: 포커스 항목 하나만 큐로(앵커 항목이면 해제) — 여기부터 맨 위까지는 Shift+C.
         Ctrl·Shift로 여러 개 골랐으면 고른 항목만 큐로(이어지지 않아도 됨)."""
         if len(self._selected_ids) > 1:
             self.queue_set_ids_requested.emit(list(self._selected_ids))
@@ -1781,7 +1790,7 @@ class ClipboardPanel(QWidget):
         if self._queue_item_ids and self._kbd_focus_id == self._queue_item_ids[0]:
             self.queue_deselect_requested.emit(self._kbd_focus_id)
         else:
-            self.queue_select_requested.emit(self._kbd_focus_id)
+            self.queue_set_ids_requested.emit([self._kbd_focus_id])
 
     def _kbd_pin_toggle(self):
         """P: 포커스 항목 고정/해제 토글"""

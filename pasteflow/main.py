@@ -2393,7 +2393,8 @@ class PasteFlowApp:
         self._show_queue_set()
 
     def _on_queue_set_ids(self, item_ids: list):
-        """패널에서 Ctrl·Shift로 고른 항목만 큐로 — 순서는 c 한 개짜리와 같은 방향(화면 아래→위)."""
+        """패널에서 Ctrl·Shift로 고른 항목만 큐로 — 순서는 Shift+C(여기부터 맨 위까지)와 같은 방향(화면 아래→위).
+        c로 한 개만 큐에 넣을 때도 이 경로를 쓴다."""
         wanted = set(item_ids)
         shown = self.panel.pinned_items + self.panel.history_items
         queue_items = [item for item in reversed(shown) if item.id in wanted]
