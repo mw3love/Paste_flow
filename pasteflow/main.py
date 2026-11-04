@@ -3181,8 +3181,16 @@ class PasteFlowApp:
     # 2초는 로그온 초반 COM/WScript.Shell 초기화 여유만 남긴 값.
     _AUTOSTART_DRIVE_WAIT_SEC = 2
 
+    # 작업 관리자 → 시작프로그램 탭은 Run 명령이 가리키는 파일의 설명을 이름으로 보여준다.
+    # `wscript.exe "x.vbs"`로 등록하면 다른 VBS 자동시작과 똑같이 "Microsoft ® Windows Based
+    # Script Host"로 떠 구분이 안 되므로, Run 값이 .vbs를 직접 가리키게 하고 파일 이름으로
+    # 식별한다(2026-11-04 작업 관리자 실측: .vbs 직접 등록 시 파일 이름이 그대로 표시됨).
+    # 한글 파일명은 wscript 코드페이지 문제 전례가 있어 ASCII로 둔다.
+    _AUTOSTART_VBS_NAME = "PasteFlow-autostart.vbs"
+    _LEGACY_AUTOSTART_VBS_NAME = "autostart_launcher.vbs"
+
     def _write_autostart_launcher_vbs(self, target_cmd: str) -> str:
-        """%LOCALAPPDATA%\\PasteFlow\\autostart_launcher.vbs 생성/갱신.
+        """%LOCALAPPDATA%\\PasteFlow\\PasteFlow-autostart.vbs 생성/갱신.
         VBS는 _AUTOSTART_DRIVE_WAIT_SEC초 대기 후 target_cmd를 hidden으로 실행한다.
         wscript.exe로 실행되므로 콘솔 창이 일절 뜨지 않는다.
         실행 단계마다 %LOCALAPPDATA%\\PasteFlow\\logs\\autostart.log에 로그를 남겨
@@ -3214,14 +3222,19 @@ class PasteFlowApp:
             '    LogMsg "Run dispatched OK"\r\n'
             'End If\r\n'
         )
-        path = os.path.join(_get_local_data_dir(), "autostart_launcher.vbs")
+        path = os.path.join(_get_local_data_dir(), self._AUTOSTART_VBS_NAME)
         # UTF-16 LE + BOM으로 저장해야 한국어 Windows의 wscript.exe가 한글 경로를
         # CP949로 잘못 해석해 objShell.Run이 조용히 실패하는 문제를 막을 수 있다.
         with open(path, "w", encoding="utf-16") as f:
             f.write(vbs)
+        # 옛 이름 파일은 Run 값이 더 이상 가리키지 않으므로 정리.
+        try:
+            os.remove(os.path.join(_get_local_data_dir(), self._LEGACY_AUTOSTART_VBS_NAME))
+        except OSError:
+            pass
         return path
 
-    def _set_auto_start(self, enable: bool):
+    def _set_auto_start(self, enable: bool, clear_approved: bool = True):
         import winreg
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
         try:
@@ -3237,11 +3250,13 @@ class PasteFlowApp:
                     run_pyw = os.path.join(project_root, "run.pyw")
                     target_cmd = f'"{pythonw}" "{run_pyw}"'
                 vbs_path = self._write_autostart_launcher_vbs(target_cmd)
-                cmd = f'wscript.exe "{vbs_path}"'
+                # .vbs를 직접 등록 — 로그온 시 Explorer가 연결 프로그램(wscript)으로 실행한다.
+                cmd = f'"{vbs_path}"'
                 winreg.SetValueEx(reg_key, "PasteFlow", 0, winreg.REG_SZ, cmd)
                 # 작업 관리자 → 시작 앱 탭에서 disabled로 토글된 상태가 있으면 정리.
                 # 이 플래그가 있으면 Run 키가 등록되어 있어도 logon 시 Windows가 차단한다.
-                self._clear_startup_approved_flag()
+                if clear_approved:
+                    self._clear_startup_approved_flag()
             else:
                 try:
                     winreg.DeleteValue(reg_key, "PasteFlow")
@@ -3273,10 +3288,11 @@ class PasteFlowApp:
         import winreg
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
         registered = False
+        current_cmd = ""
         try:
             reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ)
             try:
-                winreg.QueryValueEx(reg_key, "PasteFlow")
+                current_cmd, _ = winreg.QueryValueEx(reg_key, "PasteFlow")
                 registered = True
             except FileNotFoundError:
                 pass
@@ -3284,6 +3300,12 @@ class PasteFlowApp:
         except OSError:
             pass
         self.db.set_setting("auto_start", "1" if registered else "0")
+        # 옛 등록(`wscript.exe "...autostart_launcher.vbs"`)이면 새 이름·직접 등록으로 1회 이전.
+        # 새 형식이면 조용히 스킵(idempotent). Run 값 이름("PasteFlow")은 그대로라 작업 관리자의
+        # 사용/사용 안 함 상태(StartupApproved)도 그대로 유지돼야 하므로 clear_approved=False —
+        # 작업 관리자에서 꺼 둔 자동 시작을 이전이 몰래 다시 켜면 안 된다.
+        if registered and self._AUTOSTART_VBS_NAME not in str(current_cmd):
+            self._set_auto_start(True, clear_approved=False)
 
     # ── 포그라운드 창 추적 ──
 
