@@ -636,6 +636,8 @@ class ClipboardPanel(QWidget):
     queue_select_requested = pyqtSignal(int)    # item_id — 해당 항목부터 최신까지 큐 설정
     queue_deselect_requested = pyqtSignal(int)  # item_id — 큐 해제
     queue_set_ids_requested = pyqtSignal(list)  # [item_id] — Ctrl·Shift로 고른 항목만 큐 설정
+    queue_toggle_requested = pyqtSignal(int)    # item_id — c: 큐 맨 뒤에 붙이기(이미 있으면 빼기)
+    queue_reverse_requested = pyqtSignal()      # r: 남은 큐 순서 뒤집기
     panel_hidden = pyqtSignal()  # 패널 숨겨질 때 emit
     auto_close_changed = pyqtSignal(bool)  # 자동닫기 상태 변경 → main이 DB 저장
 
@@ -1291,13 +1293,19 @@ class ClipboardPanel(QWidget):
             queue_action.triggered.connect(
                 lambda: self.queue_set_ids_requested.emit(list(self._selected_ids)))
         elif item_id in self._queue_item_ids:
-            queue_action = menu.add("큐 해제	C", "list-numbers")
-            queue_action.triggered.connect(lambda: self.queue_deselect_requested.emit(item_id))
+            queue_action = menu.add("큐에서 빼기	C", "list-numbers")
+            queue_action.triggered.connect(lambda: self.queue_toggle_requested.emit(item_id))
         else:
-            queue_action = menu.add("이것만 큐에	C", "list-numbers")
-            queue_action.triggered.connect(lambda: self.queue_set_ids_requested.emit([item_id]))
+            queue_action = menu.add("큐에 추가	C", "list-numbers")
+            queue_action.triggered.connect(lambda: self.queue_toggle_requested.emit(item_id))
             range_action = menu.add("여기부터 맨 위까지 큐	Shift+C", "list-numbers")
             range_action.triggered.connect(lambda: self.queue_select_requested.emit(item_id))
+        reverse_action = menu.add("큐 순서 뒤집기	R", "list-numbers")
+        reverse_action.triggered.connect(self.queue_reverse_requested.emit)
+        reverse_action.setEnabled(len(self._queue_item_ids) >= 2)
+        clear_q_action = menu.add("큐 비우기	Esc", "broom")
+        clear_q_action.triggered.connect(lambda: self.queue_deselect_requested.emit(-1))
+        clear_q_action.setEnabled(bool(self._queue_item_ids))
 
         menu.addSeparator()
 
@@ -1693,6 +1701,12 @@ class ClipboardPanel(QWidget):
             event.accept()
             return
 
+        # ── Escape: 큐가 있으면 큐 비우기(한 번 더 누르면 닫기) ──
+        if key == Qt.Key.Key_Escape and self._queue_item_ids:
+            self.queue_deselect_requested.emit(-1)
+            event.accept()
+            return
+
         # ── Escape / Ctrl+W: 패널 닫기 ──
         if key == Qt.Key.Key_Escape or (
                 key == Qt.Key.Key_W
@@ -1731,6 +1745,15 @@ class ClipboardPanel(QWidget):
                 Qt.KeyboardModifier.ControlModifier
                 | Qt.KeyboardModifier.AltModifier):
             self._kbd_queue_toggle()
+            event.accept()
+            return
+
+        # ── R: 큐 순서 뒤집기 ──
+        if key == Qt.Key.Key_R and not mods & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.AltModifier):
+            if len(self._queue_item_ids) >= 2:
+                self.queue_reverse_requested.emit()
             event.accept()
             return
 
@@ -1848,17 +1871,14 @@ class ClipboardPanel(QWidget):
                 self._do_copy(item)
 
     def _kbd_queue_toggle(self):
-        """c: 포커스 항목 하나만 큐로(앵커 항목이면 해제) — 여기부터 맨 위까지는 Shift+C.
-        Ctrl·Shift로 여러 개 골랐으면 고른 항목만 큐로(이어지지 않아도 됨)."""
+        """c: 누를 때마다 포커스 항목을 큐 맨 뒤에 붙인다(번호 1, 2, 3…). 이미 큐에 있으면 그 항목만 뺀다.
+        Ctrl·Shift로 여러 개 골랐으면 고른 항목만 큐로(화면 위→아래). 큐 비우기는 Esc."""
         if len(self._selected_ids) > 1:
             self.queue_set_ids_requested.emit(list(self._selected_ids))
             return
         if self._kbd_focus_id is None:
             return
-        if self._queue_item_ids and self._kbd_focus_id == self._queue_item_ids[0]:
-            self.queue_deselect_requested.emit(self._kbd_focus_id)
-        else:
-            self.queue_set_ids_requested.emit([self._kbd_focus_id])
+        self.queue_toggle_requested.emit(self._kbd_focus_id)
 
     def _kbd_pin_toggle(self):
         """P: 포커스 항목 고정/해제 토글"""

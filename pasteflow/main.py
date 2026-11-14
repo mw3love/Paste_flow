@@ -1159,6 +1159,8 @@ class PasteFlowApp:
         self.panel.queue_select_requested.connect(self._on_queue_select)
         self.panel.queue_deselect_requested.connect(self._on_queue_deselect)
         self.panel.queue_set_ids_requested.connect(self._on_queue_set_ids)
+        self.panel.queue_toggle_requested.connect(self._on_queue_toggle)
+        self.panel.queue_reverse_requested.connect(self._on_queue_reverse)
         self.panel.auto_close_changed.connect(self._on_auto_close_changed)
 
         panel_hotkey = self.db.get_setting("hotkey_panel_toggle", "ctrl+space")
@@ -2421,16 +2423,14 @@ class PasteFlowApp:
             self._on_copy_toast(full_item, total)
 
     def _on_queue_select(self, item_id: int):
-        """패널 항목 클릭 → 큐 설정.
-        - 히스토리 항목: 선택한 항목~최신까지 큐로 설정
-        - 고정 항목: 선택한 항목~pin1까지 역순 큐로 설정 (히스토리와 동일 패턴)
+        """Shift+C·우클릭 '여기부터 맨 위까지 큐' — 그 섹션 맨 위부터 고른 항목까지, 화면 위→아래 순서.
+        (2026-11-14 사용자 요청으로 옛 '고른 항목→최신' 시간 순에서 바꿈)
         """
         history = self.panel.history_items
         hist_ids = [item.id for item in history]
         if item_id in hist_ids:
             i = hist_ids.index(item_id)
-            # history[0:i+1] = [newest, ..., selected] → reverse → [selected, ..., newest]
-            queue_items = list(reversed(history[0 : i + 1]))
+            queue_items = list(history[0 : i + 1])  # [맨 위(최신), ..., 고른 항목]
             self.queue.set_queue(queue_items)
         else:
             pinned = self.panel.pinned_items
@@ -2438,20 +2438,46 @@ class PasteFlowApp:
             if item_id not in pin_ids:
                 return
             i = pin_ids.index(item_id)
-            # pinned[0:i+1] = [pin1, ..., pinN] → reverse → [pinN, ..., pin1]
-            queue_items = list(reversed(pinned[0 : i + 1]))
+            queue_items = list(pinned[0 : i + 1])  # [첫 고정, ..., 고른 항목]
             self.queue.set_queue(queue_items)
         self._show_queue_set()
 
     def _on_queue_set_ids(self, item_ids: list):
-        """패널에서 Ctrl·Shift로 고른 항목만 큐로 — 순서는 Shift+C(여기부터 맨 위까지)와 같은 방향(화면 아래→위).
-        c로 한 개만 큐에 넣을 때도 이 경로를 쓴다."""
+        """패널에서 Ctrl·Shift로 고른 항목만 큐로 — 순서는 화면 위→아래(Shift+C와 같은 방향)."""
         wanted = set(item_ids)
         shown = self.panel.pinned_items + self.panel.history_items
-        queue_items = [item for item in reversed(shown) if item.id in wanted]
+        queue_items = [item for item in shown if item.id in wanted]
         if not queue_items:
             return
         self.queue.set_queue(queue_items)
+        self._show_queue_set()
+
+    def _on_queue_toggle(self, item_id: int):
+        """c: 큐 맨 뒤에 붙이기(번호가 하나씩 늘어남). 이미 큐에 있으면 그 항목만 뺀다.
+        이미 일부를 붙여 넣은 큐(pointer>0)면 새 큐로 시작한다."""
+        pointer, _ = self.queue.get_status()
+        current = [] if pointer > 0 else self.queue.get_items()
+        if any(it.id == item_id for it in current):
+            current = [it for it in current if it.id != item_id]
+            if not current:
+                self._clear_queue_ui()
+                return
+        else:
+            shown = self.panel.pinned_items + self.panel.history_items
+            item = next((it for it in shown if it.id == item_id), None)
+            if item is None:
+                return
+            current = current + [item]
+        self.queue.set_queue(current)
+        self._show_queue_set()
+
+    def _on_queue_reverse(self):
+        """r: 아직 안 붙인 큐 항목의 순서를 뒤집는다(이미 붙인 것은 버림)."""
+        pointer, _ = self.queue.get_status()
+        remaining = self.queue.get_items()[pointer:]
+        if len(remaining) < 2:
+            return
+        self.queue.set_queue(list(reversed(remaining)))
         self._show_queue_set()
 
     def _show_queue_set(self):
