@@ -362,10 +362,11 @@ class PanelItemWidget(QWidget):
             self.setStyleSheet(f"background-color: {COLORS['surface0']}; border-radius: 6px; border: 1px solid {border_color};")
 
     def _apply_num_style(self):
-        """번호 칸 — 큐 밖: 회색 일련번호 / 큐 안: 코랄 큐 순서 배지(다음에 붙을 것만 채움, 붙인 것은 ✓).
+        """번호 칸 — 큐 밖: 회색 일련번호 / 큐 안: 코랄 테두리 큐 순서 배지(붙인 것은 ✓).
 
-        일련번호와 큐 순서를 한 줄에 나란히 두지 않는다 — 큐는 아래→위 순서라 "5번 항목이 큐 1번"처럼
-        거꾸로 짝지어져 읽기 어렵다. 한 줄에 번호는 하나, 종류는 색·모양으로 구분한다."""
+        다음에 붙을 항목을 따로 채워 칠하지 않는다 — 큐는 위→아래라 ✓가 아닌 첫 코랄 번호가 곧 다음
+        항목이고, 큐를 막 만들면 1번만 달라 보여 오해를 샀다(2026-11-14).
+        일련번호와 큐 순서를 한 줄에 나란히 두지 않는다 — 한 줄에 번호는 하나, 종류는 색·모양으로 구분한다."""
         # 부모(항목)의 선택자 없는 배경·테두리 규칙을 물려받으므로 전부 다시 지정. margin-top = 첫 줄 높이 가운데
         base = f"margin-top: 3px; font-size: 12px; border-radius: {_NUM_H // 2}px;"
         peach, gray = COLORS["peach"], COLORS["subtext0"]
@@ -375,9 +376,6 @@ class PanelItemWidget(QWidget):
         elif self._is_done:
             text = "✓"
             style = f"background: transparent; border: 1px solid {COLORS['surface2']}; color: {gray};"
-        elif self._is_current:
-            text = str(self._q_num)
-            style = f"background: {peach}; border: 1px solid {peach}; color: {COLORS['crust']}; font-weight: 700;"
         else:
             text = str(self._q_num)
             style = f"background: transparent; border: 1px solid {peach}; color: {peach}; font-weight: 700;"
@@ -611,7 +609,6 @@ class ClipboardPanel(QWidget):
     """전체 클립보드 패널"""
 
     paste_item_requested = pyqtSignal(object)
-    copy_item_requested = pyqtSignal(object)
     pin_item_requested = pyqtSignal(int)
     unpin_item_requested = pyqtSignal(int)
     delete_item_requested = pyqtSignal(int)
@@ -635,8 +632,8 @@ class ClipboardPanel(QWidget):
     drag_to_app_requested = pyqtSignal(int, QPoint, bool)  # (item_id, cursor_pos, alt_held)
     queue_select_requested = pyqtSignal(int)    # item_id — 해당 항목부터 최신까지 큐 설정
     queue_deselect_requested = pyqtSignal(int)  # item_id — 큐 해제
-    queue_set_ids_requested = pyqtSignal(list)  # [item_id] — Ctrl·Shift로 고른 항목만 큐 설정
-    queue_toggle_requested = pyqtSignal(int)    # item_id — c: 큐 맨 뒤에 붙이기(이미 있으면 빼기)
+    queue_append_ids_requested = pyqtSignal(list)  # [item_id] — Ctrl·Shift로 여러 개 고르고 c: 큐 맨 뒤에 한꺼번에
+    queue_toggle_requested = pyqtSignal(int)    # item_id — c·Ctrl+C: 큐 맨 뒤에 붙이기(이미 있으면 빼기)
     queue_reverse_requested = pyqtSignal()      # r: 남은 큐 순서 뒤집기
     panel_hidden = pyqtSignal()  # 패널 숨겨질 때 emit
     auto_close_changed = pyqtSignal(bool)  # 자동닫기 상태 변경 → main이 DB 저장
@@ -1212,6 +1209,7 @@ class ClipboardPanel(QWidget):
         return super().eventFilter(obj, event)
 
     def _on_item_clicked(self, item_id: int, event):
+        """클릭·Ctrl+클릭·Shift+클릭은 흰색 고르기만 한다 — 큐·클립보드는 c로만(2026-11-14)."""
         modifiers = QApplication.keyboardModifiers()
 
         if modifiers & Qt.KeyboardModifier.ControlModifier:
@@ -1221,7 +1219,7 @@ class ClipboardPanel(QWidget):
                 self._selected_ids.add(item_id)
         elif modifiers & Qt.KeyboardModifier.ShiftModifier:
             if self._last_clicked_id is not None:
-                self._select_range(self._last_clicked_id, item_id)
+                self._selected_ids.update(self._range_ids(self._last_clicked_id, item_id))
         else:
             self._selected_ids.clear()
             self._selected_ids.add(item_id)
@@ -1236,7 +1234,8 @@ class ClipboardPanel(QWidget):
             if isinstance(widget, PanelItemWidget):
                 widget.is_selected = widget.item_id in self._selected_ids
 
-    def _select_range(self, from_id: int, to_id: int):
+    def _range_ids(self, from_id: int, to_id: int) -> list:
+        """Shift+클릭 범위 — 두 항목 사이(양끝 포함)의 id를 화면 위→아래 순서로(그 범위를 고른다)."""
         all_items = self._pinned_items + self._history_items
         ids = [item.id for item in all_items]
 
@@ -1244,11 +1243,10 @@ class ClipboardPanel(QWidget):
             from_idx = ids.index(from_id)
             to_idx = ids.index(to_id)
         except ValueError:
-            return
+            return []
 
         start, end = min(from_idx, to_idx), max(from_idx, to_idx)
-        for idx in range(start, end + 1):
-            self._selected_ids.add(ids[idx])
+        return ids[start:end + 1]
 
     def _on_item_delete(self, item_id: int):
         item = self._find_item(item_id)
@@ -1291,7 +1289,7 @@ class ClipboardPanel(QWidget):
         if len(self._selected_ids) > 1 and item_id in self._selected_ids:
             queue_action = menu.add(f"고른 {len(self._selected_ids)}개 큐에 추가	C", "list-numbers")
             queue_action.triggered.connect(
-                lambda: self.queue_set_ids_requested.emit(list(self._selected_ids)))
+                lambda: self.queue_append_ids_requested.emit(list(self._selected_ids)))
         elif item_id in self._queue_item_ids:
             queue_action = menu.add("큐에서 빼기	C", "list-numbers")
             queue_action.triggered.connect(lambda: self.queue_toggle_requested.emit(item_id))
@@ -1309,9 +1307,8 @@ class ClipboardPanel(QWidget):
 
         menu.addSeparator()
 
-        copy_action = menu.add("복사	Ctrl+C", "copy")
-        copy_action.triggered.connect(lambda: self._do_copy(item))
-
+        # '복사'는 없앴다 — Ctrl+C가 c와 같은 '큐에 추가'가 됐고(2026-11-14), 큐에 넣으면
+        # 클립보드에도 들어가 Ctrl+V로 붙는다(main._sync_clipboard_to_queue).
         if item.content_type == "image":
             path_action = menu.add("파일로 저장 후 경로 복사	S", "file-arrow-down")
             path_action.triggered.connect(lambda: self.copy_image_as_path_requested.emit(item_id))
@@ -1371,10 +1368,6 @@ class ClipboardPanel(QWidget):
         clear_action.triggered.connect(self.clear_memos_requested.emit)
         clear_action.setEnabled(any(not it.is_locked for it in self._pinned_items))
         menu.exec(pos)
-
-    def _do_copy(self, item: ClipboardItem):
-        """우클릭 복사 — copy_item_requested로 전체 포맷 복사 + self_triggered 처리"""
-        self.copy_item_requested.emit(item)
 
     def _find_item(self, item_id: int) -> Optional[ClipboardItem]:
         for item in self._pinned_items + self._history_items:
@@ -1727,9 +1720,9 @@ class ClipboardPanel(QWidget):
             event.accept()
             return
 
-        # ── 복사: Ctrl+C (하나면 복사 / 여러 개 골랐으면 고른 것만 큐로) ──
+        # ── Ctrl+C: c와 같다 — 큐 맨 뒤에 붙이기/빼기(2026-11-14 통일) ──
         if key == Qt.Key.Key_C and mods & Qt.KeyboardModifier.ControlModifier:
-            self._kbd_copy()
+            self._kbd_queue_toggle()
             event.accept()
             return
 
@@ -1861,20 +1854,11 @@ class ClipboardPanel(QWidget):
         else:
             self.preview_text_requested.emit(item.id)
 
-    def _kbd_copy(self):
-        """Ctrl+C: 하나면 복사, 여러 개 골랐으면 c와 똑같이 고른 것만 큐로(Ctrl+Shift+V로 하나씩 붙임)"""
-        if len(self._selected_ids) > 1:
-            self.queue_set_ids_requested.emit(list(self._selected_ids))
-        else:
-            item = self._find_item(self._kbd_focus_id)
-            if item:
-                self._do_copy(item)
-
     def _kbd_queue_toggle(self):
-        """c: 누를 때마다 포커스 항목을 큐 맨 뒤에 붙인다(번호 1, 2, 3…). 이미 큐에 있으면 그 항목만 뺀다.
-        Ctrl·Shift로 여러 개 골랐으면 고른 항목만 큐로(화면 위→아래). 큐 비우기는 Esc."""
+        """c·Ctrl+C: 누를 때마다 포커스 항목을 큐 맨 뒤에 붙인다(번호 1, 2, 3…). 이미 큐에 있으면 그 항목만 뺀다.
+        Ctrl·Shift로 여러 개 골랐으면 고른 것을 화면 위→아래 순서로 큐 맨 뒤에 한꺼번에. 큐 비우기는 Esc."""
         if len(self._selected_ids) > 1:
-            self.queue_set_ids_requested.emit(list(self._selected_ids))
+            self.queue_append_ids_requested.emit(list(self._selected_ids))
             return
         if self._kbd_focus_id is None:
             return

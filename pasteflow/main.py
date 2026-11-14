@@ -1134,7 +1134,6 @@ class PasteFlowApp:
         self.tray.settings_requested.connect(self._open_settings)
 
         self.panel.paste_item_requested.connect(self._on_panel_paste)
-        self.panel.copy_item_requested.connect(self._on_copy_item)
         self.panel.pin_item_requested.connect(self._on_pin_item)
         self.panel.unpin_item_requested.connect(self._on_unpin_item)
         self.panel.delete_item_requested.connect(self._on_delete_item)
@@ -1158,7 +1157,7 @@ class PasteFlowApp:
         self.panel.drag_to_app_requested.connect(self._on_drag_to_app)
         self.panel.queue_select_requested.connect(self._on_queue_select)
         self.panel.queue_deselect_requested.connect(self._on_queue_deselect)
-        self.panel.queue_set_ids_requested.connect(self._on_queue_set_ids)
+        self.panel.queue_append_ids_requested.connect(self._on_queue_append_ids)
         self.panel.queue_toggle_requested.connect(self._on_queue_toggle)
         self.panel.queue_reverse_requested.connect(self._on_queue_reverse)
         self.panel.auto_close_changed.connect(self._on_auto_close_changed)
@@ -1251,7 +1250,7 @@ class PasteFlowApp:
     def _clear_queue_ui(self):
         """큐를 비우고 tray·패널 하이라이트를 초기화 (큐 포기/클리어 공통 경로).
 
-        '큐를 언제 비울지' 정책의 '포기/클리어' 범주가 공유: 일반 Ctrl+V, 큐 소진 완료,
+        '큐를 언제 비울지' 정책의 '포기/클리어' 범주가 공유: 큐 소진 완료,
         HUD ✕ 취소, 우클릭 큐 해제.
         """
         self.queue.clear()
@@ -2405,18 +2404,15 @@ class PasteFlowApp:
         threading.Thread(target=_do_paste, daemon=True).start()
 
     def _on_copy_item(self, item: ClipboardItem):
-        """고정/히스토리 항목 복사 → 클립보드 + 큐 추가 + (히스토리는) 최상단 이동 + 토스트.
+        """미리보기·핀 창의 '복사' → 클립보드 + 큐 추가 + 토스트.
 
-        옛 히스토리 항목을 복사하면 클립보드가 실제로 그 내용이 되므로, 일반 Ctrl+C와
-        동일하게 최상단으로 올려 "최상단 = 현재 클립보드" 불변식을 지키고 복사 토스트로
-        피드백을 준다. self-triggered `_set_clipboard`라 모니터가 재감지하지 않으므로
-        중복 항목은 생기지 않고, bump/토스트는 여기서 직접 처리한다.
+        self-triggered `_set_clipboard`라 모니터가 재감지하지 않으므로 중복 항목은 생기지 않는다.
+        옛날엔 히스토리 맨 위로도 올렸지만("맨 위 = 지금 클립보드") 2026-11-14에 뺐다 — 큐 번호
+        칩이 무엇이 붙을지 보여 주고, 항목이 튀면 큐 순서(화면 위→아래)와 어긋난다.
         """
         full_item = self.db.get_item(item.id) or item
         self.interceptor._set_clipboard(full_item)
         self.queue.add_item(full_item)
-        if not full_item.is_pinned and full_item.id is not None:
-            self.db.bump_history_to_top(full_item.id)
         self._refresh_panel()
         if self._notify_on_copy:
             _, total = self.queue.get_status()
@@ -2442,14 +2438,18 @@ class PasteFlowApp:
             self.queue.set_queue(queue_items)
         self._show_queue_set()
 
-    def _on_queue_set_ids(self, item_ids: list):
-        """패널에서 Ctrl·Shift로 고른 항목만 큐로 — 순서는 화면 위→아래(Shift+C와 같은 방향)."""
+    def _on_queue_append_ids(self, item_ids: list):
+        """패널에서 Ctrl·Shift로 여러 개 고르고 c — 고른 것을 화면 위→아래 순서로 큐 맨 뒤에 붙인다.
+        이미 큐에 있는 것은 건너뛴다. 일부를 붙여 넣은 큐(pointer>0)면 새 큐로 시작(c 한 개와 같음)."""
         wanted = set(item_ids)
+        pointer, _ = self.queue.get_status()
+        current = [] if pointer > 0 else self.queue.get_items()
+        have = {it.id for it in current}
         shown = self.panel.pinned_items + self.panel.history_items
-        queue_items = [item for item in shown if item.id in wanted]
-        if not queue_items:
+        added = [item for item in shown if item.id in wanted and item.id not in have]
+        if not added:
             return
-        self.queue.set_queue(queue_items)
+        self.queue.set_queue(current + added)
         self._show_queue_set()
 
     def _on_queue_toggle(self, item_id: int):
@@ -2481,7 +2481,8 @@ class PasteFlowApp:
         self._show_queue_set()
 
     def _show_queue_set(self):
-        """큐를 새로 정한 뒤 트레이·패널 표시 갱신 + 클릭 선택 지우기."""
+        """큐를 새로 정한 뒤 클립보드 맞추기 + 트레이·패널 표시 갱신 + 클릭 선택 지우기."""
+        self._sync_clipboard_to_queue()
         pointer, total = self.queue.get_status()
         queue_item_ids = [item.id for item in self.queue.get_items()]
         self.tray.update_queue_status(pointer, total)
@@ -2491,12 +2492,31 @@ class PasteFlowApp:
         # 안 끝난 것처럼" 보인다(전체 큐가 다 끝나야 clear_selection이 불려 없어짐).
         self.panel.clear_selection()
 
+    def _sync_clipboard_to_queue(self):
+        """클립보드 = 큐 맨 끝 항목(2026-11-14). 그래서 패널에서 큐에 넣은 것이 일반 Ctrl+V로도 붙는다.
+
+        Ctrl+V는 가로채지 않으므로(절대 금지 1) 누르는 순간 바꿔 넣을 수 없고, 미리 넣어 둬야 한다.
+        '처음'이 아니라 '끝'인 이유: 다른 앱에서 A·B·C를 복사하면 OS가 이미 C를 넣어 둔다 —
+        처음으로 맞추면 그때마다 A로 덮어써 'C를 복사했는데 A가 붙는' 일이 생긴다.
+        Ctrl+Shift+V로 붙인 뒤엔 방금 붙인 항목이 클립보드에 남는다(=마지막으로 손댄 큐 항목)."""
+        items = self.queue.get_items()
+        if not items:
+            return
+        last = items[-1]
+        full_item = (self.db.get_item(last.id) if last.id is not None else None) or last
+        try:
+            self.interceptor._set_clipboard(full_item)
+        except Exception as e:
+            print(f"[QueueClipboard] Error: {e}")
+
     def _on_queue_deselect(self, item_id: int):
         self._clear_queue_ui()
 
     def _on_plain_paste(self):
-        """일반 Ctrl+V 감지 → 큐 즉시 비우기 + UI 갱신 (훅 스레드 시그널 → 메인)"""
-        self._clear_queue_ui()
+        """일반 Ctrl+V 감지(훅 스레드 시그널 → 메인). 2026-11-14부터 큐를 비우지 않는다 —
+        클립보드가 큐 맨 끝 항목이라(_sync_clipboard_to_queue) Ctrl+V도 큐 항목을 붙이는 것이고,
+        비우면 c로 쌓은 큐가 Ctrl+V 한 번에 사라진다. 큐는 Esc·다 붙임·HUD ✕·새 복사 규칙으로 비워진다."""
+        pass
 
     def _on_pin_item(self, item_id: int):
         self.db.pin_item(item_id)
