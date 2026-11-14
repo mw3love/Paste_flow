@@ -89,7 +89,7 @@ class _HoverIconButton(QPushButton):
 
 
 _MORE_COUNT_CAP = 20000  # 남은 줄 수를 셀 때 원문을 이 글자 수까지만 잰다(큰 텍스트에서 패널이 굳지 않게)
-_MORE_FONT_PX = 10
+_MORE_FONT_PX = 12
 
 
 def _more_chip_font() -> QFont:
@@ -730,7 +730,7 @@ class ClipboardPanel(QWidget):
         self._status_label.setFixedHeight(24)
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._status_label.setStyleSheet(
-            f"color: {COLORS['peach']}; font-size: 11px; font-weight: 600; "
+            f"color: {COLORS['peach']}; font-size: 12px; font-weight: 600; "
             f"background: transparent; padding-right: 2px;"
         )
         self._status_label.hide()
@@ -761,8 +761,8 @@ class ClipboardPanel(QWidget):
                 padding: 0;
             }}
             QPushButton:hover {{
-                background: {COLORS['red']};
-                color: {COLORS['crust']};
+                background: {COLORS['surface1']};
+                color: {COLORS['text']};
             }}
         """)
         close_btn.clicked.connect(self.hide)
@@ -974,9 +974,9 @@ class ClipboardPanel(QWidget):
 
             pin_header_btn = QPushButton(pin_header_text)
             pin_header_btn.setFixedHeight(24)
-            # 스타일시트 글꼴(11px·600)로 잰다 — 버튼 기본 글꼴은 더 커서 폭이 넉넉히 잡혀 + 버튼이 멀어진다
+            # 스타일시트 글꼴(12px·600)로 잰다 — 버튼 기본 글꼴로 재면 폭이 달라져 + 버튼 자리가 어긋난다
             _hf = QFont(pin_header_btn.font())
-            _hf.setPixelSize(11)
+            _hf.setPixelSize(12)
             _hf.setWeight(QFont.Weight.DemiBold)
             fm = QFontMetrics(_hf)
             text_width = fm.horizontalAdvance(pin_header_text) + 6  # 왼쪽 padding 4 + 여유 2(오른쪽 padding 없음)
@@ -985,15 +985,15 @@ class ClipboardPanel(QWidget):
             pin_header_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: transparent;
-                    color: {COLORS['peach']};
+                    color: {COLORS['subtext0']};
                     border: none;
-                    font-size: 11px;
+                    font-size: 12px;
                     font-weight: 600;
                     text-align: left;
                     padding: 0 0 0 4px;
                 }}
                 QPushButton:hover {{
-                    color: {COLORS['peach']};
+                    color: {COLORS['text']};
                 }}
             """)
             pin_header_btn.clicked.connect(self._toggle_pinned)
@@ -1075,15 +1075,15 @@ class ClipboardPanel(QWidget):
             hist_header_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: transparent;
-                    color: {COLORS['peach']};
+                    color: {COLORS['subtext0']};
                     border: none;
-                    font-size: 11px;
+                    font-size: 12px;
                     font-weight: 600;
                     text-align: left;
                     padding: 0 4px;
                 }}
                 QPushButton:hover {{
-                    color: {COLORS['peach']};
+                    color: {COLORS['text']};
                 }}
             """)
             hist_header_btn.clicked.connect(self._toggle_history)
