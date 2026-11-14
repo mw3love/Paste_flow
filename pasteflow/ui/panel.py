@@ -15,7 +15,7 @@ import ctypes.wintypes
 import os
 
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QEvent, QRect, QRectF, QSize, QPropertyAnimation, QEasingCurve
-from PyQt6.QtGui import QPixmap, QCursor, QFontMetrics, QFont, QIcon, QPainter, QColor
+from PyQt6.QtGui import QPixmap, QCursor, QFontMetrics, QFont, QIcon, QPainter, QColor, QBrush
 
 _HWND_TOPMOST = ctypes.wintypes.HWND(-1)
 _SWP_NOMOVE = 0x0002
@@ -128,6 +128,34 @@ def _preview_layout(full: str, fm: QFontMetrics, width: int) -> tuple[str, str]:
     return measure[:lo].rstrip(), chip
 
 
+_THUMB_H = 72                        # 이미지 썸네일 표시 높이(px)
+_THUMB_MAX_W = PANEL_MIN_WIDTH - 41  # 가장 좁은 패널에서도 안 넘치는 폭(패널 여백 20 + 스크롤바 5 + 항목 여백 16)
+
+
+def _fit_thumbnail(src: QPixmap, dpr: float) -> QPixmap:
+    """썸네일을 높이 _THUMB_H에 맞춰 비율 그대로 줄인다(아주 넓은 그림은 폭 _THUMB_MAX_W 기준).
+
+    칸을 그림 비율에 딱 맞추므로(위아래 빈 띠 없음) 그림 모서리가 항목 테두리(반지름 6) 밖으로
+    삐져나오지 않게 안쪽 곡률(5)로 둥글린다. 배율 모니터에서 흐리지 않게 dpr만큼 크게 만든다."""
+    scale = min(_THUMB_H / src.height(), _THUMB_MAX_W / src.width())
+    w = max(1, round(src.width() * scale))
+    h = max(1, round(src.height() * scale))
+    scaled = src.scaled(
+        round(w * dpr), round(h * dpr),
+        Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation,
+    )
+    out = QPixmap(scaled.size())
+    out.fill(Qt.GlobalColor.transparent)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(scaled))
+    p.drawRoundedRect(QRectF(0, 0, out.width(), out.height()), 5 * dpr, 5 * dpr)
+    p.end()
+    out.setDevicePixelRatio(dpr)
+    return out
+
+
 class PanelItemWidget(QWidget):
     """패널 내 개별 항목 위젯"""
 
@@ -188,12 +216,18 @@ class PanelItemWidget(QWidget):
             thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             pixmap = QPixmap()
             pixmap.loadFromData(item.thumbnail)
-            scaled = pixmap.scaled(96, 72, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            thumb_label.setPixmap(scaled)
-            thumb_label.setFixedSize(96, 72)
+            if pixmap.isNull():
+                thumb_w, thumb_h = 96, _THUMB_H
+            else:
+                fitted = _fit_thumbnail(pixmap, self.devicePixelRatioF())
+                thumb_label.setPixmap(fitted)
+                size = fitted.deviceIndependentSize().toSize()
+                thumb_w, thumb_h = size.width(), size.height()
+            # +2 = 테두리(1px) 자리 — 칸이 그림과 같은 비율이라 위아래 빈 띠가 없다
+            thumb_label.setFixedSize(thumb_w + 2, thumb_h + 2)
             layout.addWidget(thumb_label)
             layout.addStretch(1)
-            self.setFixedHeight(86)
+            self.setFixedHeight(thumb_h + 14)
         else:
             preview = item.text_content or item.preview_text or ""
             self._full_text = preview

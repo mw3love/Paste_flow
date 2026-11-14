@@ -21,8 +21,9 @@ CF_HTML = win32clipboard.RegisterClipboardFormat("HTML Format")
 CF_RTF = win32clipboard.RegisterClipboardFormat("Rich Text Format")
 CF_PNG = win32clipboard.RegisterClipboardFormat("PNG")
 
-# 썸네일 크기
-THUMBNAIL_SIZE = (80, 60)
+# 썸네일 크기(이 상자 안에 비율을 지켜 줄인다) — 패널은 높이 72px로 보여 주므로 배율 200%
+# 모니터에서도 늘리지 않게 144, 폭은 가로로 긴 그림(패널 폭까지 표시)을 위해 넉넉히 둔다.
+THUMBNAIL_SIZE = (512, 144)
 
 # OLE 클립보드 포맷 — IDataObject 인터페이스 마샬링 데이터라 실제 콘텐츠가 아니다.
 # 평면 바이트로 복사해 되살리면 원본 앱이 클립보드를 놓는 순간 stale 참조가 되어,

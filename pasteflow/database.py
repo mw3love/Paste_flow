@@ -360,6 +360,16 @@ class Database:
             )
             self.conn.commit()
 
+    def update_thumbnail(self, item_id: int, thumbnail: bytes):
+        """썸네일만 교체 — 원본 이미지 등 다른 칸은 그대로"""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "UPDATE clipboard_items SET thumbnail = ? WHERE id = ?",
+                (thumbnail, item_id),
+            )
+            self.conn.commit()
+
     def clear_history(self):
         """비고정 항목 전체 삭제"""
         with self._lock:

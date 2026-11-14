@@ -309,8 +309,8 @@ def show_copy_toast(item, queue_count: int) -> ToastNotification:
     """
     preview = _elide(getattr(item, "preview_text", None) or "클립보드 항목")
     # 이미지면 항목 썸네일을 렌더. **원본(image_data)을 우선** — 토스트가 96px로 줄여
-    # 그리므로 원본을 축소하면 선명하다. 미리 만든 thumbnail은 80×60이라 96px로 늘리면
-    # 뭉개진다(캡처 토스트가 image_path 원본으로 선명한 것과 같은 이유). 원본이 raw CF_DIB면
+    # 그리므로 원본을 축소하면 선명하다. 미리 만든 thumbnail은 패널용 축소본이라
+    # 원본보다 흐릴 수 있다(캡처 토스트가 image_path 원본으로 선명한 것과 같은 이유). 원본이 raw CF_DIB면
     # QPixmap이 못 여므로 BMP 헤더를 조립해 로드 가능하게 만들고(핀 항목은 thumbnail이
     # 없어 이 변환이 없으면 아이콘만 떴다), 그래도 안 되면 thumbnail로 폴백.
     thumb_bytes = None

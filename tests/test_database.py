@@ -199,6 +199,27 @@ class TestDeleteItem:
         assert db.get_item(item.id) is None
 
 
+class TestUpdateThumbnail:
+    """썸네일만 교체 — 썸네일 크기를 키운 뒤 기존 항목을 다시 만들 때 쓴다"""
+
+    def test_update_thumbnail_replaces_only_thumbnail(self, db):
+        """썸네일만 바뀌고 원본 이미지는 그대로"""
+        item = db.save_item(ClipboardItem(
+            content_type="image", image_data=b"ORIGINAL", thumbnail=b"OLD"))
+        db.update_thumbnail(item.id, b"NEW")
+        loaded = db.get_item(item.id)
+        assert loaded.thumbnail == b"NEW"
+        assert loaded.image_data == b"ORIGINAL"
+
+    def test_update_thumbnail_shows_in_summary(self, db):
+        """패널이 읽는 요약 목록에도 새 썸네일이 보인다"""
+        item = db.save_item(ClipboardItem(
+            content_type="image", image_data=b"ORIGINAL", thumbnail=b"OLD"))
+        db.update_thumbnail(item.id, b"NEW")
+        summary = db.get_recent_items_summary()
+        assert summary[0].thumbnail == b"NEW"
+
+
 class TestThreadSafety:
     """동시 읽기/쓰기 스레드 안전성 — 단일 커넥션을 여러 스레드가 공유한다.
 

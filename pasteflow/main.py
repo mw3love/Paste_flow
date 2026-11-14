@@ -846,6 +846,28 @@ _OFFICIAL_KEYS = (
 )
 
 
+def _migrate_regen_thumbnails(db, make_thumbnail):
+    """1회 마이그레이션(2026-11-14): 썸네일 상자를 80×60 → 512×144로 키우면서, 이미 쌓인
+    이미지 항목의 썸네일을 원본에서 다시 만든다.
+
+    패널이 그림을 비율대로 더 크게(높이 72px) 보여 주게 되어, 옛 80×60 썸네일을 그대로 두면
+    늘어나 흐리다. 원본 이미지를 한꺼번에 메모리에 올리지 않게 항목을 하나씩 읽는다.
+    끝나면 `thumbnail_regen_v2` 표시를 남겨 다시 돌지 않는다(idempotent).
+    """
+    if db.get_setting("thumbnail_regen_v2", "") == "1":
+        return
+    for summary in db.get_pinned_items_summary() + db.get_recent_items_summary():
+        if summary.content_type != "image":
+            continue
+        full = db.get_item(summary.id)
+        if full is None or not full.image_data:
+            continue
+        thumb = make_thumbnail(full.image_data)
+        if thumb:
+            db.update_thumbnail(summary.id, thumb)
+    db.set_setting("thumbnail_regen_v2", "1")
+
+
 def _migrate_path_paste_hotkeys(db):
     """1회 마이그레이션(2026-09-25): 한 번짜리 경로 붙여넣기 제거 + 경로 단축키 재배치.
 
@@ -2995,6 +3017,9 @@ class PasteFlowApp:
 
         # 시크릿 암호화 + 고아 키 purge. Idempotent.
         _migrate_secrets(self.db)
+
+        # 썸네일 크기 변경 — 기존 이미지 항목의 썸네일을 한 번 다시 만든다. Idempotent.
+        _migrate_regen_thumbnails(self.db, self.monitor._create_thumbnail)
 
         # 레지스트리 실제 상태로 auto_start DB 동기화
         self._sync_auto_start_from_registry()
