@@ -1133,7 +1133,6 @@ class PasteFlowApp:
 
         self.panel.paste_item_requested.connect(self._on_panel_paste)
         self.panel.copy_item_requested.connect(self._on_copy_item)
-        self.panel.combine_copy_requested.connect(self._on_combine_copy)
         self.panel.pin_item_requested.connect(self._on_pin_item)
         self.panel.unpin_item_requested.connect(self._on_unpin_item)
         self.panel.delete_item_requested.connect(self._on_delete_item)
@@ -2442,13 +2441,6 @@ class PasteFlowApp:
     def _on_plain_paste(self):
         """일반 Ctrl+V 감지 → 큐 즉시 비우기 + UI 갱신 (훅 스레드 시그널 → 메인)"""
         self._clear_queue_ui()
-
-    def _on_combine_copy(self, item: ClipboardItem):
-        """F6: 다중 선택 결합 복사 → DB 저장 + 클립보드 + 큐"""
-        saved = self.db.save_item(item)
-        self.interceptor._set_clipboard(saved)
-        self.queue.add_item(saved)
-        self._refresh_panel()
 
     def _on_pin_item(self, item_id: int):
         self.db.pin_item(item_id)

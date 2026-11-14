@@ -128,8 +128,12 @@ def _preview_layout(full: str, fm: QFontMetrics, width: int) -> tuple[str, str]:
     return measure[:lo].rstrip(), chip
 
 
-_THUMB_H = 72                        # 이미지 썸네일 표시 높이(px)
-_THUMB_MAX_W = PANEL_MIN_WIDTH - 41  # 가장 좁은 패널에서도 안 넘치는 폭(패널 여백 20 + 스크롤바 5 + 항목 여백 16)
+_NUM_W = 20      # 항목 왼쪽 번호 칸 폭(px) — 두 자리 큐 순서 배지가 들어가는 폭
+_NUM_H = 18      # 큐 순서 배지 높이(px)
+_ROW_INSET = 34  # 항목 줄에서 내용 칸을 뺀 가로 폭: 왼쪽 여백 2 + 번호 칸 20 + 간격 4 + 오른쪽 여백 8
+
+_THUMB_H = 72    # 이미지 썸네일 표시 높이(px)
+_THUMB_MAX_W = PANEL_MIN_WIDTH - 25 - _ROW_INSET  # 가장 좁은 패널에서도 안 넘치는 폭(패널 여백 20 + 스크롤바 5)
 
 
 def _fit_thumbnail(src: QPixmap, dpr: float) -> QPixmap:
@@ -172,11 +176,17 @@ class PanelItemWidget(QWidget):
         is_pinned: bool = False,
         is_selected: bool = False,
         in_queue: bool = False,
+        serial: int = 0,
+        q_num: int = 0,
         parent=None,
     ):
         super().__init__(parent)
         self.item = item
         self.item_id = item.id
+        self._serial = serial        # 섹션 안에서 위에서부터 몇 번째인지(1부터)
+        self._q_num = q_num          # 큐에서 몇 번째로 붙는지(1부터, 큐 밖이면 0)
+        self._is_current = is_current
+        self._is_done = is_done
         self._is_pinned = is_pinned
         self._is_selected = is_selected
         self._is_hovered = False
@@ -198,8 +208,16 @@ class PanelItemWidget(QWidget):
         in_queue: bool = False,
     ):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setContentsMargins(2, 6, 8, 6)
         layout.setSpacing(0)
+
+        # 왼쪽 번호 칸 — 평소엔 회색 일련번호, 큐 안이면 그 자리에 코랄 큐 순서 배지
+        num_label = QLabel()
+        num_label.setFixedSize(_NUM_W, _NUM_H + 3)
+        num_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(num_label, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addSpacing(4)
+        self._num_label = num_label
 
         if is_done:
             accent_color = COLORS['surface2']
@@ -231,10 +249,10 @@ class PanelItemWidget(QWidget):
         else:
             preview = item.text_content or item.preview_text or ""
             self._full_text = preview
-            # 실제 레이블 너비 ≈ PANEL_WIDTH - 패널마진(20) - 아이템내부(lmargin8+rmargin8) = PANEL_WIDTH - 36
+            # 실제 레이블 너비 ≈ PANEL_WIDTH - 패널마진(20) - 항목 줄의 여백·번호 칸(_ROW_INSET)
             _f = QFont(); _f.setPixelSize(12)
             _fm = QFontMetrics(_f)
-            display_text, _ = _preview_layout(preview, _fm, max(1, PANEL_WIDTH - 36))
+            display_text, _ = _preview_layout(preview, _fm, max(1, PANEL_WIDTH - 20 - _ROW_INSET))
 
             text_label = QLabel(display_text)
             text_label.setWordWrap(True)
@@ -246,7 +264,7 @@ class PanelItemWidget(QWidget):
             self._text_label = text_label
 
             _rect = _fm.boundingRect(
-                QRect(0, 0, max(1, PANEL_WIDTH - 36), 10000),
+                QRect(0, 0, max(1, PANEL_WIDTH - 20 - _ROW_INSET), 10000),
                 Qt.TextFlag.TextWordWrap | int(Qt.AlignmentFlag.AlignLeft),
                 display_text,
             )
@@ -273,19 +291,21 @@ class PanelItemWidget(QWidget):
 
         # 바는 레이아웃이 행 높이에 맞춰 자동 조정 (타이머 불필요)
 
+        self._apply_num_style()
         self._apply_bg_style()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._adjust_text_height()
         if self._lock_label is not None and self._text_label is not None:
-            self._lock_label.move(self.width() - 16 - 19, 5)  # 글자 칸 폭 = 위젯 폭 - 좌우 여백(8+8)
+            self._lock_label.move(self.width() - _ROW_INSET - 19, 5)  # 글자 칸 폭 = 위젯 폭 - 여백·번호 칸
 
     def _adjust_text_height(self):
         if self._text_label is None:
             return
-        # lmargin(8) + rmargin(8) + 자물쇠 자리(잠긴 항목만)
-        avail_w = self.width() - 16 - self._text_label.contentsMargins().right()
+        # 여백·번호 칸(_ROW_INSET) + 글자 칸 테두리(선택 시 2px씩 = 4) + 자물쇠 자리(잠긴 항목만).
+        # 테두리를 안 빼면 실제 글자 폭이 계산보다 좁아, 줄 끝이 딱 걸리는 글에서 한 줄 더 넘어가 잘렸다.
+        avail_w = self.width() - _ROW_INSET - 4 - self._text_label.contentsMargins().right()
         if avail_w <= 0:
             return
         fm = self._text_label.fontMetrics()
@@ -341,10 +361,41 @@ class PanelItemWidget(QWidget):
         else:
             self.setStyleSheet(f"background-color: {COLORS['surface0']}; border-radius: 6px; border: 1px solid {border_color};")
 
-    def set_queue_state(self, is_current: bool, is_done: bool, in_queue: bool = True):
-        """위젯 재생성 없이 큐 상태(색상)만 업데이트.
+    def _apply_num_style(self):
+        """번호 칸 — 큐 밖: 회색 일련번호 / 큐 안: 코랄 큐 순서 배지(다음에 붙을 것만 채움, 붙인 것은 ✓).
+
+        일련번호와 큐 순서를 한 줄에 나란히 두지 않는다 — 큐는 아래→위 순서라 "5번 항목이 큐 1번"처럼
+        거꾸로 짝지어져 읽기 어렵다. 한 줄에 번호는 하나, 종류는 색·모양으로 구분한다."""
+        # 부모(항목)의 선택자 없는 배경·테두리 규칙을 물려받으므로 전부 다시 지정. margin-top = 첫 줄 높이 가운데
+        base = f"margin-top: 3px; font-size: 12px; border-radius: {_NUM_H // 2}px;"
+        peach, gray = COLORS["peach"], COLORS["subtext0"]
+        if not self._q_num:
+            text = str(self._serial) if self._serial else ""
+            style = f"background: transparent; border: none; color: {gray};"
+        elif self._is_done:
+            text = "✓"
+            style = f"background: transparent; border: 1px solid {COLORS['surface2']}; color: {gray};"
+        elif self._is_current:
+            text = str(self._q_num)
+            style = f"background: {peach}; border: 1px solid {peach}; color: {COLORS['crust']}; font-weight: 700;"
+        else:
+            text = str(self._q_num)
+            style = f"background: transparent; border: 1px solid {peach}; color: {peach}; font-weight: 700;"
+        self._num_label.setText(text)
+        self._num_label.setStyleSheet(base + style)
+
+    def set_serial(self, serial: int):
+        """일련번호만 바꾼다(끌어서 순서를 바꾼 뒤 다시 매길 때)."""
+        self._serial = serial
+        self._apply_num_style()
+
+    def set_queue_state(self, is_current: bool, is_done: bool, in_queue: bool = True, q_num: int = 0):
+        """위젯 재생성 없이 큐 상태(색상·번호 칸)만 업데이트.
         in_queue=False → 큐에서 제거됨, 기본 색상으로 복원.
         """
+        self._is_current, self._is_done = is_current, is_done
+        self._q_num = q_num if in_queue else 0
+        self._apply_num_style()
         if is_done:
             self._accent_color = COLORS['surface2']
         elif in_queue:
@@ -561,7 +612,6 @@ class ClipboardPanel(QWidget):
 
     paste_item_requested = pyqtSignal(object)
     copy_item_requested = pyqtSignal(object)
-    combine_copy_requested = pyqtSignal(object)  # F6: 다중 선택 결합 복사
     pin_item_requested = pyqtSignal(int)
     unpin_item_requested = pyqtSignal(int)
     delete_item_requested = pyqtSignal(int)
@@ -818,11 +868,11 @@ class ClipboardPanel(QWidget):
                 continue
             q_idx = q_index.get(widget.item_id)
             if q_idx is not None and q_idx < pointer:
-                widget.set_queue_state(is_current=False, is_done=True)
+                widget.set_queue_state(is_current=False, is_done=True, q_num=q_idx + 1)
             elif q_idx is not None and q_idx == pointer:
-                widget.set_queue_state(is_current=True, is_done=False, in_queue=True)
+                widget.set_queue_state(is_current=True, is_done=False, in_queue=True, q_num=q_idx + 1)
             elif q_idx is not None:
-                widget.set_queue_state(is_current=False, is_done=False, in_queue=True)
+                widget.set_queue_state(is_current=False, is_done=False, in_queue=True, q_num=q_idx + 1)
             else:
                 widget.set_queue_state(is_current=False, is_done=False, in_queue=False)
 
@@ -978,9 +1028,11 @@ class ClipboardPanel(QWidget):
                 for i, item in enumerate(filtered_pinned, 1):
                     is_current_pin = False
                     is_done_pin = False
+                    q_num_pin = 0
                     in_queue_pin = item.id in self._queue_item_ids
                     if in_queue_pin:
                         q_idx = self._queue_item_ids.index(item.id)
+                        q_num_pin = q_idx + 1
                         if q_idx < self._pointer:
                             is_done_pin = True
                         elif q_idx == self._pointer:
@@ -992,6 +1044,8 @@ class ClipboardPanel(QWidget):
                         is_done=is_done_pin,
                         is_selected=item.id in self._selected_ids,
                         in_queue=in_queue_pin,
+                        serial=i,
+                        q_num=q_num_pin,
                         parent=sc,
                     )
                     self._connect_item_signals(widget)
@@ -1046,9 +1100,11 @@ class ClipboardPanel(QWidget):
                     # 큐 상태 계산: 큐에 있는 항목이면 포인터 기준으로 current/done 판단
                     is_current = False
                     is_done = False
+                    q_num = 0
                     in_queue = item.id in self._queue_item_ids
                     if in_queue:
                         q_idx = self._queue_item_ids.index(item.id)
+                        q_num = q_idx + 1
                         if q_idx < self._pointer:
                             is_done = True
                         elif q_idx == self._pointer:
@@ -1060,6 +1116,8 @@ class ClipboardPanel(QWidget):
                         is_done=is_done,
                         is_selected=item.id in self._selected_ids,
                         in_queue=in_queue,
+                        serial=i,
+                        q_num=q_num,
                         parent=sc,
                     )
                     self._connect_item_signals(widget)
@@ -1313,34 +1371,6 @@ class ClipboardPanel(QWidget):
                 return item
         return None
 
-    def _combine_selected_items(self) -> Optional[ClipboardItem]:
-        """선택된 항목들을 순서대로 결합하여 새 ClipboardItem 생성"""
-        all_items = self._pinned_items + self._history_items
-        selected = [item for item in all_items if item.id in self._selected_ids]
-        if not selected:
-            return None
-
-        texts = []
-        first_image = None
-        for item in selected:
-            if item.text_content:
-                texts.append(item.text_content)
-            elif item.content_type == "image":
-                texts.append("[이미지]")
-                if first_image is None:
-                    first_image = item
-
-        combined_text = "\n".join(texts)
-
-        # 전체가 이미지면 첫 이미지 반환
-        if all(item.content_type == "image" for item in selected) and first_image:
-            return first_image
-
-        return ClipboardItem(
-            content_type="text",
-            text_content=combined_text,
-        )
-
     def _do_pin_reorder(self, source_id: int, target_id: int):
         """마우스 릴리즈 시 고정 항목 타겟 위치로 이동"""
         source_w = target_w = None
@@ -1470,6 +1500,13 @@ class ClipboardPanel(QWidget):
                 self._items_layout.insertWidget(insert_idx, source_w)
                 break
         source_w._apply_bg_style()
+        # 히스토리 재정렬은 패널을 다시 만들지 않으므로 일련번호를 여기서 다시 매긴다
+        serial = 0
+        for i in range(self._items_layout.count()):
+            w = self._items_layout.itemAt(i).widget()
+            if isinstance(w, PanelItemWidget) and not w._is_pinned:
+                serial += 1
+                w.set_serial(serial)
 
     def _emit_current_hist_order(self):
         """현재 레이아웃의 히스토리 항목 순서를 시그널로 전달 + 인메모리 갱신"""
@@ -1673,7 +1710,7 @@ class ClipboardPanel(QWidget):
             event.accept()
             return
 
-        # ── 복사: Ctrl+C (단일 복사 / 다중 결합 복사) ──
+        # ── 복사: Ctrl+C (하나면 복사 / 여러 개 골랐으면 고른 것만 큐로) ──
         if key == Qt.Key.Key_C and mods & Qt.KeyboardModifier.ControlModifier:
             self._kbd_copy()
             event.accept()
@@ -1799,15 +1836,9 @@ class ClipboardPanel(QWidget):
             self.preview_text_requested.emit(item.id)
 
     def _kbd_copy(self):
-        """Ctrl+C: 단일 복사, 다중 선택이면 결합 복사"""
+        """Ctrl+C: 하나면 복사, 여러 개 골랐으면 c와 똑같이 고른 것만 큐로(Ctrl+Shift+V로 하나씩 붙임)"""
         if len(self._selected_ids) > 1:
-            combined = self._combine_selected_items()
-            if combined and combined.id is not None:
-                # 전부 이미지 → 첫 이미지(기존 항목)를 단일 복사로. 패널 목록 항목은 image_data가
-                # 빠진 요약본이라 결합 복사로 새로 저장하면 원본 없는 껍데기 항목이 생겼다.
-                self._do_copy(combined)
-            elif combined:
-                self.combine_copy_requested.emit(combined)
+            self.queue_set_ids_requested.emit(list(self._selected_ids))
         else:
             item = self._find_item(self._kbd_focus_id)
             if item:
