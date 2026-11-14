@@ -947,6 +947,7 @@ class _SignalBridge(QObject):
     plain_paste        = pyqtSignal()        # 일반 Ctrl+V 감지 (훅 스레드 → 메인: 큐 clear + UI 갱신)
     ocr_requested      = pyqtSignal()        # 훅 스레드 → 메인: OCR 오버레이 띄우기
     ocr_done           = pyqtSignal(str)     # 워커 스레드 → 메인: OCR 결과 텍스트
+    ocr_translated     = pyqtSignal(str)     # 워커 스레드 → 메인: OCR 번역 결과(Shift+드래그)
     ocr_error          = pyqtSignal(str)     # 워커 스레드 → 메인: 에러 메시지
     ocr_fallback       = pyqtSignal(str, str)  # 워커 스레드 → 메인: (실패 모델, 폴백 모델) 자동 폴백 알림
     seq_image_to_path  = pyqtSignal()        # 훅 스레드 → 메인: 큐에서 다음 항목을 꺼내 이미지면 경로 텍스트로 순차 붙여넣기
@@ -991,6 +992,7 @@ class PasteFlowApp:
         self._bridge.paste_queue_done.connect(self._on_paste_queue_done)
         self._bridge.ocr_requested.connect(self._on_ocr_requested)
         self._bridge.ocr_done.connect(self._on_ocr_done)
+        self._bridge.ocr_translated.connect(self._on_ocr_translated)
         self._bridge.ocr_error.connect(self._on_ocr_error)
         self._bridge.ocr_fallback.connect(self._on_ocr_fallback)
         self._bridge.plain_paste.connect(self._on_plain_paste)
@@ -1283,15 +1285,15 @@ class PasteFlowApp:
         """메인 스레드: OCR 오버레이 시작"""
         self._ocr_overlay.start()
 
-    def _on_ocr_region_captured(self, pixmap):
-        """메인 스레드: 선택 영역 픽맵 → 워커 스레드에서 OCR"""
+    def _on_ocr_region_captured(self, pixmap, translate: bool = False):
+        """메인 스레드: 선택 영역 픽맵 → 워커 스레드에서 OCR(translate면 번역 — Shift를 누른 채 끈 경우)"""
         # QPixmap/QBuffer는 메인 스레드에서만 안전 — PNG 변환을 여기서 완료
         buf = QBuffer()
         buf.open(QBuffer.OpenModeFlag.WriteOnly)
         pixmap.save(buf, "PNG")
         png_bytes = bytes(buf.data())
         buf.close()
-        self._start_ocr_worker(png_bytes)
+        self._start_ocr_worker(png_bytes, translate=translate)
 
     # ── 영역 캡처 (Alt+F2) ──
 
@@ -1603,18 +1605,21 @@ class PasteFlowApp:
         except Exception:
             pass
 
-    def _start_ocr_worker(self, png_bytes: bytes):
+    def _start_ocr_worker(self, png_bytes: bytes, translate: bool = False):
         """공용 OCR 워커 — PNG bytes를 받아 백그라운드에서 OCR 수행.
 
         영역 캡처 OCR과 이미지 항목 OCR이 공유. 결과/에러는
         `_bridge.ocr_done` / `_bridge.ocr_error` 시그널로 메인 스레드에 통지.
+        translate=True면 같은 호출에서 프롬프트만 바꿔 번역문을 받아 `_bridge.ocr_translated`로 보낸다.
         """
         import io
         from PIL import Image
         from PyQt6.QtGui import QCursor
 
         # 진행 칩을 OCR 트리거 시점 커서가 있는 모니터 정중앙에 띄운다(영역 선택 직후 / 우클릭 위치).
-        self._start_cursor_progress("인식 중…", "🔤", QCursor.pos())
+        # 번역 창은 이 자리(끌기를 끝낸 곳) 옆에 띄운다.
+        self._ocr_anchor = QCursor.pos()
+        self._start_cursor_progress("번역 중…" if translate else "인식 중…", "🔤", self._ocr_anchor)
 
         def _run():
             # 호출마다 COM 초기화/해제 — asyncio/WinRT 상태 오염 방지
@@ -1626,11 +1631,12 @@ class PasteFlowApp:
                 # OCR은 별도 엔진 선택 없이 항상 AI(Gemini 공식 / Mindlogic 게이트웨이) API로 처리.
                 # (WinRT 엔진 제거 — 설정에서 엔진/언어 선택 UI도 삭제됨. AI 답변과 동일 배관 재사용.)
                 api_key, base_url, model = self._resolve_gemini_cfg()
-                engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url, model=model)
+                engine = OcrEngine(kind="gemini", api_key=api_key, base_url=base_url, model=model,
+                                   translate=translate)
                 text = engine.recognize(pil_img)
                 if engine.last_fallback_from and engine.last_used_model:
                     self._bridge.ocr_fallback.emit(engine.last_fallback_from, engine.last_used_model)
-                self._bridge.ocr_done.emit(text)
+                (self._bridge.ocr_translated if translate else self._bridge.ocr_done).emit(text)
             except Exception as e:
                 self._bridge.ocr_error.emit(str(e))
             finally:
@@ -2044,8 +2050,10 @@ class PasteFlowApp:
             self._on_paste_queue_done()
         return True
 
-    def _on_ocr_done(self, text: str):
-        """메인 스레드: OCR 결과 → 클립보드 + DB + 큐 + 정중앙 결과 칩(✓ 앞부분…)"""
+    def _on_ocr_done(self, text: str, translated: bool = False):
+        """메인 스레드: OCR 결과 → 클립보드 + DB + 큐 + 정중앙 결과 칩(✓ 앞부분…)
+
+        translated=True(Shift+드래그 번역)면 text는 번역문이고, 읽으라고 텍스트 미리보기 창도 띄운다."""
         if not text.strip():
             # 진행 칩을 결과 메시지로 전환(칩이 없으면 일반 토스트로 폴백)
             if not self._finish_cursor_progress("인식된 텍스트 없음"):
@@ -2062,7 +2070,15 @@ class PasteFlowApp:
         # 클립보드 모니터가 동일 항목을 재감지(큐 중복 추가)하지 않도록 함
         self.interceptor._set_clipboard(item)
         # OCR은 아래에서 자체 칩을 띄우므로 복사 토스트 없는 경로 사용
-        self._persist_clipboard_item(item)
+        saved = self._persist_clipboard_item(item)
+        if translated:
+            # 끌기를 끝낸 자리 옆에 번역문을 띄운다(패널 미리보기와 같은 창 — 우클릭 복사·수정 그대로)
+            from PyQt6.QtCore import QSize
+            popup = TextPreviewPopup.open_new(saved, QRect(self._ocr_anchor, QSize(1, 1)))
+            popup.copy_requested.connect(self._on_copy_item)
+            popup.edit_requested.connect(self._open_memo)
+            self._stop_cursor_progress()  # 번역 창이 곧 결과 — "✓ 앞부분…" 칩은 겹치는 정보라 띄우지 않는다
+            return
 
         # 진행 칩을 "✓ 인식 앞부분…"으로 전환 — "내 OCR이 제대로 됐나" 시각 확인용.
         # 전체 텍스트는 클립보드·큐로 들어가므로 칩은 앞 24자 미리보기만 보여준다.
@@ -2073,6 +2089,10 @@ class PasteFlowApp:
         if not self._finish_cursor_progress(msg):
             from pasteflow.ui.toast import ToastNotification
             ToastNotification(msg, icon="🔤")
+
+    def _on_ocr_translated(self, text: str):
+        """메인 스레드: OCR 번역 결과(Shift+드래그) — OCR과 같은 처리에 번역 창만 더한다."""
+        self._on_ocr_done(text, translated=True)
 
     def _on_ocr_fallback(self, failed_model: str, used_model: str):
         """모델 not_found로 폴백이 발동했을 때 사용자에게 알림.

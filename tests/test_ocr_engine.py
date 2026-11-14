@@ -179,3 +179,24 @@ class TestCallWithFallback:
         assert engine.last_fallback_from is None
 
 
+
+
+class TestTranslatePrompt:
+    """OCR 번역 — 같은 호출에서 프롬프트만 바꿔 '읽고 번역'을 한 번에 받는다."""
+
+    def test_default_engine_uses_ocr_prompt(self):
+        from pasteflow.ocr_engine import OcrEngine, _ocr_prompt
+        engine = OcrEngine(kind="gemini")
+        assert engine._prompt() == _ocr_prompt("ko")
+
+    def test_translate_engine_uses_translate_prompt(self):
+        from pasteflow.ocr_engine import OcrEngine, _translate_prompt
+        engine = OcrEngine(kind="gemini", translate=True)
+        assert engine._prompt() == _translate_prompt()
+
+    def test_translate_prompt_states_direction_and_output_rule(self):
+        """한국어가 아니면 한국어로, 한국어면 영어로 — 그리고 번역문만 내놓게 한다."""
+        from pasteflow.ocr_engine import _translate_prompt
+        p = _translate_prompt()
+        assert "Korean" in p and "English" in p
+        assert "only" in p.lower()

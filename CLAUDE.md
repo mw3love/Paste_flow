@@ -115,7 +115,7 @@ docs/
 
 **OCR·AI·음성**
 
-- **`ocr_engine.py`** — 게이트웨이(OpenAI 호환 chat.completions) OCR. `OcrEngine(kind="gemini")`, `max_tokens=16384`(thinking 모델 잘림 방지), `_get_client` 클라이언트 캐시 + `warm_connection`, `_normalize_base_url`. 모델 목록(`list_gemini_models`)은 거르지 않음. 설정창 `연결 테스트`용 라이브 프로브(`probe_connection`/`probe_ocr_model`, `ProbeResult` ok/weak/fail/retry — fail과 retry를 섞지 말 것, 프로브는 폴백을 거치지 않음). not-found면 `_FALLBACK_CHAIN`(`gemini-3.5-flash-lite` → `gemini-3.1-flash-lite`)으로 1회 재시도. 계열 묶기 `family_of`/`group_models`. 크레딧 조회 `get_credit_balance`(certifi CA 명시). `STT_FALLBACK_DEFAULT`.
+- **`ocr_engine.py`** — 게이트웨이(OpenAI 호환 chat.completions) OCR. `OcrEngine(kind="gemini")`, `translate=True`면 같은 호출에서 프롬프트만 바꿔 번역문을 받는다(`_translate_prompt` — 한국어가 아니면 한국어로, 한국어면 영어로), `max_tokens=16384`(thinking 모델 잘림 방지), `_get_client` 클라이언트 캐시 + `warm_connection`, `_normalize_base_url`. 모델 목록(`list_gemini_models`)은 거르지 않음. 설정창 `연결 테스트`용 라이브 프로브(`probe_connection`/`probe_ocr_model`, `ProbeResult` ok/weak/fail/retry — fail과 retry를 섞지 말 것, 프로브는 폴백을 거치지 않음). not-found면 `_FALLBACK_CHAIN`(`gemini-3.5-flash-lite` → `gemini-3.1-flash-lite`)으로 1회 재시도. 계열 묶기 `family_of`/`group_models`. 크레딧 조회 `get_credit_balance`(certifi CA 명시). `STT_FALLBACK_DEFAULT`.
 - **`stt_engine.py`** — 음성 입력. `Recorder`(sounddevice 16kHz mono wav, RMS 레벨, 피크 `last_peak_rms`, MME 장치만 나열, 없는 마이크면 기본 장치로 폴백), `transcribe`(Gemini 계열만 오디오 입력 가능), 30초 상한. `SILENCE_RMS_THRESHOLD` 아래면 API를 부르지 않음(무음 환각 방지 — 설정창 마이크 테스트와 같은 상수).
 - **`web_open.py`** — 브라우저에서 Google AI 모드 열기(`google_ai_url` / 이미지 주입용 `google_ai_home_url`), 키 주입 전 `is_browser_foreground()` 확인, `open_url`은 기본 브라우저.
 - **`ai_palette.py`** — 질문창 타겟 데이터. 지금은 `DEFAULT_SITES`(Google AI 하나)만 쓴다. 편집용 함수는 테스트만 사용.
@@ -140,7 +140,7 @@ docs/
 - **`paste_hud.py`** — 순차 붙여넣기 진행 HUD(비활성 창, ✓▶·, ✕ 취소 → `_on_cancel_paste_queue`).
 - **`settings_dialog.py`** — 왼쪽 목록 내비(`일반`/`붙여넣기`/`캡처·녹화`/`AI`, 실제 페이지는 탭 바를 숨긴 `QTabWidget`), 기능 카드마다 그 기능의 단축키·옵션. AI 탭: `AI 연결 (OpenAI 호환 API)`(Base URL·API 키·모델조회·연결 테스트 = 연결+OCR 모델+크레딧), OCR, 음성 입력(STT 모델은 Gemini만, 마이크 테스트). 창-모달(`WindowModal`) + `_open_settings` 재진입 가드. 녹화 중 훅 정지는 `recording_active` → `done()`/`closeEvent`에서도 해제. 모델 콤보는 editable이라 표시 텍스트 = 저장값(계열 헤더는 비활성, 들여쓰기는 델리게이트로). 디자인 비교 하네스 `tools/settings_bakeoff.py`.
 - **`nav_icons.py`** — 설정창 아이콘(SVG 문자열 내장 — spec datas 불필요).
-- **`capture_overlay.py`** — 마그네틱 영역 캡처(아래 「캡처 동작」). **`ocr_overlay.py`** — OCR 영역 선택(모니터별 위젯). **`record_chooser.py`** — 녹화 종류 선택 바. **`ai_query.py`** — 이미지 우클릭 "Gemini에게 질문" 입력창(비모달·TOPMOST, 이미지 1장, Tab 순환·키워드 접두어). **`stt_indicator.py`** — 녹음 중 이퀄라이저 pill(클릭=정지). **`tray.py`** — 트레이(좌클릭 패널, 우클릭 패널·설정·종료).
+- **`capture_overlay.py`** — 마그네틱 영역 캡처(아래 「캡처 동작」). **`ocr_overlay.py`** — OCR 영역 선택(모니터별 위젯). 손을 뗄 때 Shift가 눌려 있으면 번역(`region_captured(pixmap, translate)`), 끄는 동안 선택 영역 위에 '번역' 꼬리표. **`record_chooser.py`** — 녹화 종류 선택 바. **`ai_query.py`** — 이미지 우클릭 "Gemini에게 질문" 입력창(비모달·TOPMOST, 이미지 1장, Tab 순환·키워드 접두어). **`stt_indicator.py`** — 녹음 중 이퀄라이저 pill(클릭=정지). **`tray.py`** — 트레이(좌클릭 패널, 우클릭 패널·설정·종료).
 
 ### 캡처 동작 (Alt+F2 · Alt+F3)
 
@@ -176,7 +176,7 @@ docs/
 |--------|------|-----------|
 | Ctrl+Shift+V | 순차 붙여넣기 (suppress) | WH_KEYBOARD_LL (paste_interceptor) |
 | ctrl+space *(기본값, 설정 가능)* | 패널 토글 (suppress) | WH_KEYBOARD_LL (paste_interceptor) |
-| ctrl+shift+s *(기본값, 설정 가능)* | OCR 영역 선택 시작 (suppress) | WH_KEYBOARD_LL (paste_interceptor) |
+| ctrl+shift+s *(기본값, 설정 가능)* | OCR 영역 선택 시작 (suppress). 그냥 끌면 글자 인식, **Shift를 누른 채 끌면 번역**(번역문을 미리보기 창으로 띄우고 클립보드·히스토리에도 — 2026-11-14) | WH_KEYBOARD_LL (paste_interceptor) |
 | ctrl+shift+p *(기본값, 설정 가능 — 2026-09-25부터; 예전엔 ctrl+shift+[)* | 순차 경로 붙여넣기 — 큐에서 다음 항목을 꺼내 이미지면 경로 텍스트로(Ctrl+Shift+V와 큐 공유) (suppress). ⚠ 옛 '한 번짜리' 이미지→경로(최신 히스토리 이미지, 옛 기본 ctrl+shift+p)는 2026-09-25 제거 | WH_KEYBOARD_LL (paste_interceptor) |
 | ctrl+shift+a *(기본값, 설정 가능 — 2026-09-06 도입)* | 순차 붙여넣기 전체 자동주입 — Ctrl+Shift+V의 '벌크' 버전. 큐에 남은 항목 전체를 간격(300ms) 두고 순서대로 자동 Ctrl+V(같은 큐 공유) (suppress) | WH_KEYBOARD_LL (paste_interceptor) — 감지만, 반복 주입 루프는 main._bulk_paste_step |
 | ctrl+shift+[ *(기본값, 설정 가능 — 2026-09-25부터; 예전엔 ctrl+shift+])* | 순차 경로 붙여넣기 전체 자동주입 — Ctrl+Shift+P의 '벌크' 버전. 이미지는 경로 텍스트로, 그 외는 원본 그대로 순서대로 자동 주입 (suppress) | WH_KEYBOARD_LL (paste_interceptor) — 감지만, 반복 주입 루프는 main._bulk_paste_step |

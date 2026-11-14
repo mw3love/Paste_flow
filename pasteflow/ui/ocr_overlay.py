@@ -4,7 +4,8 @@
 ----
 1. OcrOverlay.start() → 각 QScreen마다 _ScreenOverlay 위젯 생성 후 표시
 2. 사용자 드래그 → 해당 모니터의 오버레이 위에 선택 영역 강조
-3. 마우스 업 → 매니저가 region_captured(QPixmap) emit
+3. 마우스 업 → 매니저가 region_captured(QPixmap, translate) emit
+   (손을 뗄 때 Shift가 눌려 있으면 translate=True — 글자 인식 대신 번역)
 4. ESC 또는 우클릭 → 모든 오버레이 닫고 cancelled() emit
 
 다중 DPI 모니터 환경 대응
@@ -36,7 +37,7 @@ class _ScreenOverlay(QWidget):
     """
 
     drag_started = pyqtSignal(object)        # (self) — 드래그 시작 알림
-    drag_finished = pyqtSignal(object, QRect)  # (self, sel_rect) — 마우스 업 시
+    drag_finished = pyqtSignal(object, QRect, bool)  # (self, sel_rect, translate) — 마우스 업 시
     cancel_requested = pyqtSignal()          # ESC / 우클릭 / 5px 미만
 
     def __init__(self, screen: QScreen):
@@ -56,6 +57,7 @@ class _ScreenOverlay(QWidget):
         self._start: QPoint | None = None
         self._end: QPoint | None = None
         self._dragging = False
+        self._translate = False  # 드래그 중 Shift가 눌려 있나 — 손을 뗄 때 True면 번역
         self._hint_visible = True
         self._active = True  # 다른 모니터에서 드래그 시작되면 False (마스크만 표시)
 
@@ -71,6 +73,7 @@ class _ScreenOverlay(QWidget):
         self._start = None
         self._end = None
         self._dragging = False
+        self._translate = False
         self._hint_visible = True
         self._active = True
 
@@ -127,9 +130,27 @@ class _ScreenOverlay(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(sel.adjusted(0, 0, -1, -1))
 
+            # 5) Shift를 누른 채 끄는 중이면 '번역' 꼬리표 — 손을 떼기 전에 어느 쪽인지 보이게
+            if self._translate:
+                font = QFont()
+                font.setPixelSize(13)
+                font.setBold(True)
+                p.setFont(font)
+                fm = p.fontMetrics()
+                tag_w = fm.horizontalAdvance("번역") + 16
+                tag_h = fm.height() + 6
+                tag_y = sel.top() - tag_h - 4
+                if tag_y < 0:  # 위에 자리가 없으면 선택 영역 안쪽 위
+                    tag_y = sel.top() + 4
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(PEACH))
+                p.drawRoundedRect(sel.left(), tag_y, tag_w, tag_h, 4, 4)
+                p.setPen(QColor(0, 0, 0))
+                p.drawText(sel.left() + 8, tag_y + 3 + fm.ascent(), "번역")
+
         # 안내 텍스트 — 드래그 전, 활성 상태일 때만
         if self._hint_visible and self._active:
-            hint = "드래그하여 영역 선택  ·  ESC 또는 우클릭으로 취소"
+            hint = "드래그 = 글자 인식  ·  Shift+드래그 = 번역  ·  ESC 또는 우클릭으로 취소"
             font = QFont()
             font.setPointSize(13)
             font.setBold(True)
@@ -166,12 +187,14 @@ class _ScreenOverlay(QWidget):
             self._start = event.position().toPoint()
             self._end = self._start
             self._dragging = True
+            self._translate = self._shift_held(event)
             self.drag_started.emit(self)
             self.update()
 
     def mouseMoveEvent(self, event):
         if self._dragging:
             self._end = event.position().toPoint()
+            self._translate = self._shift_held(event)
             self.update()
 
     def mouseReleaseEvent(self, event):
@@ -185,17 +208,35 @@ class _ScreenOverlay(QWidget):
             self.cancel_requested.emit()
             return
 
-        self.drag_finished.emit(self, sel)
+        self.drag_finished.emit(self, sel, self._shift_held(event))
 
     # ── keyboard ──────────────────────────────────────────────────────────────
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             self.cancel_requested.emit()
+        elif event.key() == Qt.Key.Key_Shift:
+            self._set_translate(True)
         else:
             super().keyPressEvent(event)
 
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Shift:
+            self._set_translate(False)
+        else:
+            super().keyReleaseEvent(event)
+
     # ── helper ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _shift_held(event) -> bool:
+        return bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+    def _set_translate(self, on: bool):
+        """마우스를 멈춘 채 Shift만 누르거나 떼도 '번역' 꼬리표가 바로 바뀌게 한다."""
+        if self._dragging and self._translate != on:
+            self._translate = on
+            self.update()
 
     def _sel_rect(self) -> QRect:
         if self._start is None or self._end is None:
@@ -219,7 +260,7 @@ class _ScreenOverlay(QWidget):
 class _OcrOverlayBridge(QObject):
     """OcrOverlay 매니저의 외부 노출 시그널 컨테이너."""
 
-    region_captured = pyqtSignal(QPixmap)
+    region_captured = pyqtSignal(QPixmap, bool)  # (잘라낸 그림, translate)
     cancelled = pyqtSignal()
 
 
@@ -282,10 +323,10 @@ class OcrOverlay:
             if ov is not source:
                 ov.deactivate()
 
-    def _on_drag_finished(self, source: _ScreenOverlay, sel: QRect):
+    def _on_drag_finished(self, source: _ScreenOverlay, sel: QRect, translate: bool):
         cropped = source.crop_selection(sel)
         self._close_all()
-        self.region_captured.emit(cropped)
+        self.region_captured.emit(cropped, translate)
 
     def _on_cancel(self):
         self._close_all()
@@ -310,7 +351,7 @@ if __name__ == "__main__":
 
     overlay = OcrOverlay()
 
-    def _on_captured(pixmap: QPixmap):
+    def _on_captured(pixmap: QPixmap, translate: bool):
         path = os.path.join(os.path.expanduser("~"), "ocr_test_capture.png")
         ok = pixmap.save(path)
         if ok:

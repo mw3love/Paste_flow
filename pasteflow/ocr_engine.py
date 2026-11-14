@@ -251,6 +251,17 @@ def _ocr_prompt(language: str) -> str:
     )
 
 
+def _translate_prompt() -> str:
+    """OCR 번역 — 글자를 읽고 번역까지 한 번의 호출로 받는다(한국어가 아니면 한국어로, 한국어면 영어로)."""
+    return (
+        "Read all text in this image and translate it. "
+        "If the text is not Korean, translate it into natural Korean. "
+        "If the text is already Korean, translate it into natural English. "
+        "Preserve line breaks and paragraph structure. "
+        "Output only the translation with no original text, explanation or commentary."
+    )
+
+
 # ── 엔진 ────────────────────────────────────────────────────────────────────
 
 
@@ -264,17 +275,22 @@ class OcrEngine:
         base_url: str = "",
         language: str = "ko",
         model: str = "",
+        translate: bool = False,
     ):
         self.kind: EngineKind = kind
         self.api_key = api_key
         self.base_url = base_url
         self.language = language
         self.model = model
+        self.translate = translate  # True면 글자 인식 대신 번역문을 돌려준다(같은 호출, 프롬프트만 다름)
         # OCR 호출이 끝났을 때 main이 토스트로 안내할 수 있도록 남기는 상태:
         # last_used_model    — 실제 응답을 만든 모델 (폴백 발생 시 폴백 모델)
         # last_fallback_from — 원래 시도했다가 실패한 모델 (폴백 없으면 None)
         self.last_used_model: str = ""
         self.last_fallback_from: Optional[str] = None
+
+    def _prompt(self) -> str:
+        return _translate_prompt() if self.translate else _ocr_prompt(self.language)
 
     def recognize(self, pil_image: Image.Image) -> str:
         """동기 OCR — 호출자가 워커 스레드에서 실행해야 UI 블로킹이 없다."""
@@ -399,7 +415,7 @@ class OcrEngine:
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-                    {"type": "text", "text": _ocr_prompt(self.language)},
+                    {"type": "text", "text": self._prompt()},
                 ],
             }],
         )
