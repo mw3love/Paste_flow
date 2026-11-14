@@ -103,6 +103,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
     copy_as_path_requested = pyqtSignal(object)  # ClipboardItem — 파일로 저장 후 경로 복사
     ask_ai_requested = pyqtSignal(object)      # ClipboardItem — Gemini에게 질문(이미지 첨부, 2026-08-02)
     ocr_requested = pyqtSignal(object)         # ClipboardItem — 텍스트 추출(OCR)
+    translate_requested = pyqtSignal(object)   # ClipboardItem — 번역(글자를 읽어 번역)
     duplicate_requested = pyqtSignal(object, QRect)  # (ClipboardItem, 놓을 논리 전역 사각형) — 복제
     # 편집 완료 → main 핸들러 (PNG bytes)
     annotated_copy_requested = pyqtSignal(bytes)   # 클립보드 복사 + 히스토리 저장
@@ -493,6 +494,7 @@ class ImagePreviewPopup(_EditorMixin, QWidget):
             lambda: self.copy_as_path_requested.emit(target))
         menu.addSeparator()
         menu.add("텍스트 추출(OCR)", "scan").triggered.connect(lambda: self.ocr_requested.emit(target))
+        menu.add("번역", "translate").triggered.connect(lambda: self.translate_requested.emit(target))
         menu.add("Gemini에게 질문", "sparkle").triggered.connect(lambda: self.ask_ai_requested.emit(target))
         menu.addSeparator()
         # 복제 — 지금 보이는 모습(주석 있으면 평탄화본) 그대로, 같은 크기로 살짝 비켜 새 핀을
