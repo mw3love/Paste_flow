@@ -66,13 +66,13 @@ pasteflow/
     ├── toast.py            # 우하단 스택형 토스트 (복사 알림·시작·OCR)
     ├── paste_hud.py        # 순차 붙여넣기 진행 HUD (큐 목록·포인터 실시간)
     ├── settings_dialog.py  # 설정 화면
-    ├── ocr_overlay.py      # OCR 영역 선택 오버레이
+    ├── ocr_overlay.py      # OCR 영역 선택 오버레이 (Shift를 누른 채 끌면 번역)
     ├── capture_overlay.py  # 마그네틱 영역 캡처 오버레이 (Snipaste식 입력-소유 오버레이 — 얼린 최상위창+창-스코프 요소 스냅·자유드래그·크로스모니터 합성. select_only 모드=자르지 않고 사각형만 emit → GIF 녹화용. Space로 '실제 커서 포함' 토글 + 그 Space·ESC를 삼키는 세션 전용 저수준 키보드 훅)
     ├── ai_query.py         # AI 팔레트 질문 입력 다이얼로그 (이미지 우클릭 "Gemini에게 질문"으로만 열림)
     ├── stt_indicator.py    # 음성 입력 녹음 중 표시되는 음량 반응 이퀄라이저 pill (커서 옆, 클릭하면 녹음 종료)
     ├── nav_icons.py        # 설정창 왼쪽 목록 아이콘 4종 (Phosphor 듀오톤, SVG 문자열 내장 — spec datas 불필요)
     ├── menu_style.py       # 우클릭 메뉴 공통 모양 — make_menu()·menu.add(이름, 아이콘, danger=). 항목을 QSS 대신 프록시 스타일이 직접 그림(단축키 흐리게·위험 항목 호버 빨강)
-    ├── menu_icons.py       # 우클릭 메뉴 아이콘 22종 (Phosphor 듀오톤, SVG 문자열 내장)
+    ├── menu_icons.py       # 우클릭 메뉴 아이콘 23종 (Phosphor 듀오톤, SVG 문자열 내장)
     ├── record_chooser.py   # 녹화 영역 선택 직후 뜨는 [GIF] [영상] 선택 바 (G/V/Enter=지난 선택/ESC)
     └── tray.py             # 시스템 트레이
 
@@ -104,11 +104,11 @@ docs/
 
 **핵심 흐름**
 
-- **`main.py`** — 오케스트레이션. 모듈 연결, 단일 인스턴스(뮤텍스 + Named Pipe `\\.\pipe\PasteFlow_IPC`), 자동 시작(HKCU `Run` → `"%LOCALAPPDATA%\PasteFlow\PasteFlow-autostart.vbs"` 직접 등록(작업 관리자에 파일 이름으로 표시) → `pythonw run.pyw` 또는 exe; `python.exe`/`-m` 등록 금지), 시작 시 마이그레이션(`_migrate_secrets`·`_ORPHAN_KEYS` purge·`_migrate_drop_official_backend` 등), 시크릿(`_SECRET_KEYS`, `_get_secret`). 큐 UI 공통 클리어는 `_clear_queue_ui`, 히스토리 삭제 시 `queue.remove_item`으로 큐도 동기화. 단축키 슬롯: 순차 경로(`_on_seq_image_to_path_hotkey` — 이미지면 임시 PNG 경로를 붙이고 250ms 뒤 원본 이미지로 클립보드 복원), 벌크(`_start_bulk_paste`/`_bulk_paste_step`, 300ms 간격 QTimer 체인, `_bulk_paste_active`로 재진입·취소), 핀(`_on_pin_hotkey`), 캡처(`_on_capture_region`), 녹화(`_on_record_hotkey` → `RecordModeChooser`), STT(`_on_stt_start`/`_on_stt_stop`/`_finish_stt_recording`), OCR(`_start_ocr_worker` — 영역·우클릭 공용, 시작 시 `_prewarm_ocr_connection`). 패널 드래그 붙여넣기 헬퍼(`_activate_and_send_ctrl_v`, 탐색기/바탕화면 저장, `_position_desktop_icon`), 이미지 변환(`_image_data_to_png_bytes`, `_read_image_from_clipboard` — CF_HDROP 이미지 파일 폴백 포함). 진행 칩은 `_start_cursor_progress`/`_finish_cursor_progress`.
+- **`main.py`** — 오케스트레이션. 모듈 연결, 단일 인스턴스(뮤텍스 + Named Pipe `\\.\pipe\PasteFlow_IPC`), 자동 시작(HKCU `Run` → `"%LOCALAPPDATA%\PasteFlow\PasteFlow-autostart.vbs"` 직접 등록(작업 관리자에 파일 이름으로 표시) → `pythonw run.pyw` 또는 exe; `python.exe`/`-m` 등록 금지), 시작 시 마이그레이션(`_migrate_secrets`·`_ORPHAN_KEYS` purge·`_migrate_drop_official_backend`·`_migrate_regen_thumbnails` 등), 시크릿(`_SECRET_KEYS`, `_get_secret`). 큐 UI 공통 클리어는 `_clear_queue_ui`, 히스토리 삭제 시 `queue.remove_item`으로 큐도 동기화. 단축키 슬롯: 순차 경로(`_on_seq_image_to_path_hotkey` — 이미지면 임시 PNG 경로를 붙이고 250ms 뒤 원본 이미지로 클립보드 복원), 벌크(`_start_bulk_paste`/`_bulk_paste_step`, 300ms 간격 QTimer 체인, `_bulk_paste_active`로 재진입·취소), 핀(`_on_pin_hotkey`), 캡처(`_on_capture_region`), 녹화(`_on_record_hotkey` → `RecordModeChooser`), STT(`_on_stt_start`/`_on_stt_stop`/`_finish_stt_recording`), OCR(`_start_ocr_worker` — 영역·우클릭 공용, 시작 시 `_prewarm_ocr_connection`). 패널 드래그 붙여넣기 헬퍼(`_activate_and_send_ctrl_v`, 탐색기/바탕화면 저장, `_position_desktop_icon`), 이미지 변환(`_image_data_to_png_bytes`, `_read_image_from_clipboard` — CF_HDROP 이미지 파일 폴백 포함). 진행 칩은 `_start_cursor_progress`/`_finish_cursor_progress`.
 - **`clipboard_monitor.py`** — `WM_CLIPBOARDUPDATE` 감시 → `_read_clipboard()`가 항상 리스트 반환(탐색기 다중 이미지 파일은 파일마다 항목). 자체 쓰기는 `mark_self_write`(0.5초 시간창 + `SELF_WRITE_BACKSTOP_SEC` 2초 해시). 직전과 같은 내용은 `DUPLICATE_WINDOW_SEC`(1.5초) 안에서만 중복으로 거른다. OLE·HWP 네이티브 포맷은 `extra_formats`에서 제외(한글→한글 붙여넣기 실패 방지). 썸네일은 PIL 우선, 실패 시 raw DIB로 보고 `_dib_to_bmp`. `is_encoded_image`는 인터셉터와 공유.
 - **`paste_queue.py`** — 순차 큐·포인터. 리셋 트리거: 일반 Ctrl+V(`mark_plain_paste`) / idle 만료(`idle_reset_sec`, 기본 10초) / `pointer>0`인 상태의 새 복사. `set_queue`·`clear`·`remove_item`·`undo_last`(테스트만 사용). TDD 대상.
 - **`paste_interceptor.py`** — `WH_KEYBOARD_LL` 훅 하나로 모든 전역 단축키 감지(표는 아래 「단축키 체계」). Ctrl+Shift+V는 클립보드 교체 → `_send_clean_key(VK_V)`(수정키 해제·복원 + `VK_MASK` 입력기 전환 방지). 일반 Ctrl+V는 통과시키며 물리 키만 `on_plain_paste`로 알림. suppress한 키는 짝 **물리** keyup도 막음. STT는 keydown·keyup 푸시투토크(`_stt_mod_only`면 Ctrl+Win처럼 수식키만). 설정창 녹화 중엔 `suspend()`로 전부 통과. `_set_clipboard`는 텍스트·HTML·RTF·이미지(PNG면 PNG+DIB, 그 밖의 파일 포맷은 DIB로 변환, raw DIB는 그대로)·`extra_formats` 전부 복원.
-- **`database.py`** — SQLite(`clipboard_items` FIFO 50개·고정 제외 / `settings` / 사용 안 하는 `ai_history`). 단일 커넥션 + `_lock`(RLock). `history_order`(DB 전용)로 표시 순서, `bump_history_to_top`으로 복사한 항목을 최상단에(패널 Enter·드래그 붙여넣기는 순서 안 바꿈). summary 쿼리는 컬럼을 명시 나열하므로 새 컬럼은 거기에도 추가할 것. 열 때 빈 페이지가 절반 넘고 5MB 이상이면 `VACUUM`(`_compact_if_bloated`), 그다음 `PRAGMA mmap_size`로 연다(큰 이미지 행 뒤 칸 읽기 140ms → 1ms). 메모장: `create_memo`(맨 위)·`set_locked`·`count_memos`·`clear_memos`(잠긴 것 제외, 지운 id 반환)·`restore_memos`(비우기 되돌리기) — 잠긴 항목은 `delete_item`/`unpin_item`이 False로 거부. TDD 대상.
+- **`database.py`** — SQLite(`clipboard_items` FIFO 50개·고정 제외 / `settings` / 사용 안 하는 `ai_history`). 단일 커넥션 + `_lock`(RLock). `history_order`(DB 전용)로 표시 순서, `bump_history_to_top`으로 복사한 항목을 최상단에(패널 Enter·드래그 붙여넣기는 순서 안 바꿈). summary 쿼리는 컬럼을 명시 나열하므로 새 컬럼은 거기에도 추가할 것. 열 때 빈 페이지가 절반 넘고 5MB 이상이면 `VACUUM`(`_compact_if_bloated`), 그다음 `PRAGMA mmap_size`로 연다(큰 이미지 행 뒤 칸 읽기 140ms → 1ms). 메모장: `create_memo`(맨 위)·`set_locked`·`count_memos`·`clear_memos`(잠긴 것 제외, 지운 id 반환)·`restore_memos`(비우기 되돌리기), `update_thumbnail`(썸네일만 교체) — 잠긴 항목은 `delete_item`/`unpin_item`이 False로 거부. TDD 대상.
 - **`models.py`** — `ClipboardItem`(… `extra_formats` dict, `saved_image_path` = Alt+F2 캡처 파일 경로, `is_locked` = 메모장 삭제 방지). TDD 대상.
 - **`hotkey_manager.py`** — `_SPECIAL_KEY_MAP`(특수 키 이름 → VK) 단일 정의만 남음.
 - **`crypto.py`** — DPAPI `protect`/`unprotect`(`enc:v1:` 접두, 멱등, 실패 시 `""`).
