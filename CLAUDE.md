@@ -69,7 +69,7 @@ pasteflow/
 │   ├── explorer.py         # _get_explorer_folder·_get_explorer_subfolder_at_cursor
 │   ├── desktop.py          # _get_desktop_path·_find_desktop_listview·_position_desktop_icon
 │   └── image_io.py         # _image_data_to_png_bytes·_save_image_to_folder·_save_image_to_drop_temp·_read_image_from_clipboard·_render_text_to_png·_qpixmap_to_dib·_default_capture_folder
-├── app/                    # 앱 조립 — PasteFlowApp이 물려받는 기능별 믹스인 + 시작 코드(2026-11-16 main.py에서 글자 그대로 옮김). 믹스인끼리 같은 이름 금지(tests/test_app_structure.py)
+├── app/                    # 앱 조립 — PasteFlowApp이 물려받는 기능별 믹스인 + 시작 코드(2026-11-16 main.py에서 글자 그대로 옮김). 믹스인끼리 같은 이름 금지(tests/test_app_structure.py). `__file__` 기준 경로는 저장소 루트까지 세 단계(옮기며 두 단계로 남아 자동 시작 VBS가 없는 `pasteflow/run.pyw`를 가리킨 적 있음, 2026-11-16)
 │   ├── data_paths.py       # _get_local_data_dir·_resolve_db_path
 │   ├── secret_keys.py      # _SECRET_KEYS(DPAPI 시크릿 화이트리스트)·_ORPHAN_KEYS
 │   ├── migrations.py       # 시작 시 1회 이전 _migrate_* 6개
