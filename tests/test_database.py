@@ -303,8 +303,10 @@ class TestCompactOnOpen:
         import os
         path = str(tmp_path / "t.db")
         d = Database(path)
-        ids = [d.save_item(ClipboardItem(content_type="image",
-                                         image_data=os.urandom(2_000_000))).id
+        # 이미지 원본은 이제 blobs 파일로 가서 DB를 키우지 않는다(2026-11-16) — 압축이 보는
+        # 「크게 지운 뒤 빈 공간」은 DB에 그대로 들어가는 큰 글로 만든다.
+        ids = [d.save_item(ClipboardItem(content_type="text",
+                                         text_content=os.urandom(1_000_000).hex())).id
                for _ in range(5)]
         for i in ids:
             d.delete_item(i)
@@ -455,3 +457,110 @@ class TestMemo:
         texts = [it.text_content for it in db.get_pinned_items_summary()]
         assert texts == ["c", "b", "a"]
         assert all(it.is_pinned for it in db.get_pinned_items())
+
+
+class TestImageBlobs:
+    """이미지 원본을 DB 밖 blobs 파일로(2026-11-16, docs/plan/done/20261116-이미지-파일-저장.md)"""
+
+    @staticmethod
+    def _files(d):
+        return sorted(n for n in __import__("os").listdir(d.blobs.folder) if n.endswith(".bin"))
+
+    @staticmethod
+    def _img(data, pinned=False):
+        return ClipboardItem(content_type="image", image_data=data, is_pinned=pinned)
+
+    def test_saved_to_file_not_db(self, tmp_path):
+        d = Database(str(tmp_path / "t.db"))
+        try:
+            item = d.save_item(self._img(b"PNG-1" * 1000))
+            assert len(self._files(d)) == 1
+            raw = d.conn.execute("SELECT image_data, image_hash FROM clipboard_items WHERE id=?",
+                                 (item.id,)).fetchone()
+            assert raw[0] is None and raw[1]
+            assert d.get_item(item.id).image_data == b"PNG-1" * 1000
+            assert d.blobs.folder == str(tmp_path / "blobs")
+        finally:
+            d.close()
+
+    def test_same_image_shared_until_last_delete(self, db):
+        a = db.save_item(self._img(b"same"))
+        b = db.save_item(self._img(b"same"))
+        assert len(self._files(db)) == 1
+        db.delete_item(a.id)
+        assert len(self._files(db)) == 1
+        db.delete_item(b.id)
+        assert self._files(db) == []
+
+    def test_clear_history_removes_files(self, db):
+        db.save_item(self._img(b"h1"))
+        db.save_item(self._img(b"h2"))
+        keep = db.save_item(self._img(b"pinned", pinned=True))
+        db.clear_history()
+        assert len(self._files(db)) == 1
+        assert db.get_item(keep.id).image_data == b"pinned"
+
+    def test_fifo_limit_removes_files(self, db):
+        db.set_setting("history_max", "1")
+        db.save_item(self._img(b"old"))
+        db.save_item(self._img(b"new"))
+        assert len(self._files(db)) == 1
+        assert db.get_recent_items()[0].image_data == b"new"
+
+    def test_clear_memos_then_restore_keeps_image(self, db):
+        db.save_item(self._img(b"memo-img", pinned=True))
+        snapshot = [it for it in db.get_pinned_items() if not it.is_locked]
+        db.clear_memos()
+        assert self._files(db) == []
+        db.restore_memos(snapshot)
+        restored = db.get_pinned_items()
+        assert len(restored) == 1 and restored[0].image_data == b"memo-img"
+        assert len(self._files(db)) == 1
+
+    def test_missing_file_does_not_crash(self, db):
+        item = db.save_item(self._img(b"gone"))
+        __import__("os").remove(db.blobs.path(db.conn.execute(
+            "SELECT image_hash FROM clipboard_items WHERE id=?", (item.id,)).fetchone()[0]))
+        assert db.get_item(item.id).image_data is None
+
+    def test_sweep_keeps_only_used(self, db):
+        used = db.save_item(self._img(b"used"))
+        orphan_hash = db.blobs.put(b"orphan")
+        (__import__("pathlib").Path(db.blobs.folder) / ".tmp-x").write_bytes(b"p")
+        assert db.sweep_blobs() == 2
+        assert self._files(db) == [db.conn.execute(
+            "SELECT image_hash FROM clipboard_items WHERE id=?", (used.id,)).fetchone()[0] + ".bin"]
+        assert not __import__("os").path.exists(db.blobs.path(orphan_hash))
+
+    @staticmethod
+    def _legacy_rows(d, blobs):
+        for data in blobs:
+            d.conn.execute("INSERT INTO clipboard_items (content_type, image_data, is_pinned) "
+                           "VALUES ('image', ?, 0)", (data,))
+        d.conn.commit()
+
+    def test_migration_moves_all_with_backup(self, tmp_path):
+        import os
+        path = str(tmp_path / "t.db")
+        d = Database(path)
+        try:
+            self._legacy_rows(d, [b"L1" * 500, b"L2" * 500, b"L3" * 500])
+            assert d.migrate_images_to_files() == 3
+            rows = d.conn.execute("SELECT id, image_data FROM clipboard_items").fetchall()
+            assert all(r[1] is None for r in rows)
+            assert sorted(d.get_item(r[0]).image_data for r in rows) == [b"L1" * 500, b"L2" * 500, b"L3" * 500]
+            assert len(self._files(d)) == 3
+            assert d.get_setting("images_to_files_v1") == "1"
+            assert any(n.startswith("t.db.bak-images-") for n in os.listdir(tmp_path))
+            assert d.migrate_images_to_files() == 0  # 다시 돌지 않는다
+        finally:
+            d.close()
+
+    def test_migration_resumes_after_interrupt(self, db):
+        self._legacy_rows(db, [b"A", b"B", b"C"])
+        assert db.migrate_images_to_files(max_rows=1) == 1
+        assert db.get_setting("images_to_files_v1", "") == ""
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM clipboard_items WHERE image_data IS NOT NULL").fetchone()[0] == 2
+        assert db.migrate_images_to_files() == 2
+        assert db.get_setting("images_to_files_v1") == "1"

@@ -3089,6 +3089,10 @@ class PasteFlowApp:
         # 썸네일 크기 변경 — 기존 이미지 항목의 썸네일을 한 번 다시 만든다. Idempotent.
         _migrate_regen_thumbnails(self.db, self.monitor._create_thumbnail)
 
+        # 이미지 원본을 DB BLOB → blobs 파일로 1회 이전(처음에 DB 백업) + 아무도 안 쓰는 파일 청소. Idempotent.
+        self.db.migrate_images_to_files()
+        self.db.sweep_blobs()
+
         # 레지스트리 실제 상태로 auto_start DB 동기화
         self._sync_auto_start_from_registry()
 

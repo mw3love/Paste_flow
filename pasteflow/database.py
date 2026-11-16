@@ -1,11 +1,14 @@
 """SQLite 데이터베이스 CRUD"""
 import json
 import base64
+import os
 import sqlite3
+import tempfile
 import threading
 from datetime import datetime
 from typing import Optional
 from pasteflow.models import ClipboardItem
+from pasteflow.blob_store import BlobStore
 
 DEFAULT_HISTORY_MAX = 50
 
@@ -14,6 +17,13 @@ class Database:
     """clipboard_items, settings 테이블 관리"""
 
     def __init__(self, db_path: str = "pasteflow.db"):
+        self.db_path = db_path
+        # 이미지 원본은 DB 밖 blobs 폴더에(해시 이름) — DB 파일 옆. 시험용 ":memory:"는 임시 폴더.
+        if db_path == ":memory:":
+            blob_dir = tempfile.mkdtemp(prefix="pasteflow-blobs-")
+        else:
+            blob_dir = os.path.join(os.path.dirname(os.path.abspath(db_path)), "blobs")
+        self.blobs = BlobStore(blob_dir)
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         # 단일 커넥션을 여러 스레드(클립보드 모니터·메인·OCR 워커)가 공유하므로
@@ -88,6 +98,11 @@ class Database:
             cur.execute("UPDATE clipboard_items SET is_locked = 1 WHERE is_pinned = 1")
         except sqlite3.OperationalError:
             pass  # 이미 존재
+        # 이미지 원본을 blobs 파일로 옮기며 해시를 담는 칸(2026-11-16) — image_data는 옛 행에만 남는다
+        try:
+            cur.execute("ALTER TABLE clipboard_items ADD COLUMN image_hash TEXT")
+        except sqlite3.OperationalError:
+            pass  # 이미 존재
         cur.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
@@ -114,6 +129,8 @@ class Database:
     def save_item(self, item: ClipboardItem) -> ClipboardItem:
         """항목 저장 후 ID가 설정된 항목 반환"""
         extra_json = self._serialize_extra_formats(item.extra_formats)
+        # 이미지 원본은 파일로, DB에는 해시만(같은 그림은 한 번만 저장)
+        image_hash = self.blobs.put(item.image_data) if item.image_data else None
         with self._lock:
             cur = self.conn.cursor()
             # 비고정 항목은 history_order = MIN - 1 로 맨 위에 배치
@@ -127,12 +144,12 @@ class Database:
                 """INSERT INTO clipboard_items
                    (content_type, text_content, image_data, html_content,
                     rtf_content, preview_text, thumbnail, is_pinned, pin_order,
-                    extra_formats, history_order, saved_image_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    extra_formats, history_order, saved_image_path, image_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     item.content_type,
                     item.text_content,
-                    item.image_data,
+                    None,  # 원본은 blobs 파일(image_hash)
                     item.html_content,
                     item.rtf_content,
                     item.preview_text,
@@ -142,6 +159,7 @@ class Database:
                     extra_json,
                     hist_order,
                     item.saved_image_path,
+                    image_hash,
                 ),
             )
             self.conn.commit()
@@ -223,12 +241,13 @@ class Database:
         """항목 삭제 — 잠긴 항목은 지우지 않고 False"""
         with self._lock:
             cur = self.conn.cursor()
-            cur.execute(
-                "DELETE FROM clipboard_items WHERE id = ? AND COALESCE(is_locked, 0) = 0",
-                (item_id,),
-            )
+            where = "id = ? AND COALESCE(is_locked, 0) = 0"
+            hashes = self._hashes_where(cur, where, (item_id,))
+            cur.execute(f"DELETE FROM clipboard_items WHERE {where}", (item_id,))
             self.conn.commit()
-            return cur.rowcount > 0
+            deleted = cur.rowcount > 0
+            self._release_blobs(cur, hashes)
+            return deleted
 
     def create_memo(self, text: str = "") -> ClipboardItem:
         """메모장(고정 섹션) 맨 위에 새 텍스트 메모를 만든다 — 히스토리·FIFO와 무관"""
@@ -270,8 +289,10 @@ class Database:
                 "SELECT id FROM clipboard_items WHERE is_pinned = 1 AND COALESCE(is_locked, 0) = 0"
             )
             ids = [row[0] for row in cur.fetchall()]
+            hashes = self._hashes_where(cur, "is_pinned = 1 AND COALESCE(is_locked, 0) = 0", ())
             cur.executemany("DELETE FROM clipboard_items WHERE id = ?", [(i,) for i in ids])
             self.conn.commit()
+            self._release_blobs(cur, hashes)
         return ids
 
     def restore_memos(self, items: list[ClipboardItem]):
@@ -374,8 +395,10 @@ class Database:
         """비고정 항목 전체 삭제"""
         with self._lock:
             cur = self.conn.cursor()
+            hashes = self._hashes_where(cur, "is_pinned = 0", ())
             cur.execute("DELETE FROM clipboard_items WHERE is_pinned = 0")
             self.conn.commit()
+            self._release_blobs(cur, hashes)
 
     def _enforce_fifo_limit(self):
         """비고정 항목이 50개 초과 시 가장 오래된 것부터 삭제"""
@@ -389,6 +412,17 @@ class Database:
             if count > max_count:
                 excess = count - max_count
                 cur.execute(
+                    """SELECT DISTINCT image_hash FROM clipboard_items
+                       WHERE image_hash IS NOT NULL AND id IN (
+                           SELECT id FROM clipboard_items
+                           WHERE is_pinned = 0
+                           ORDER BY id ASC
+                           LIMIT ?
+                       )""",
+                    (excess,),
+                )
+                hashes = [r[0] for r in cur.fetchall()]
+                cur.execute(
                     """DELETE FROM clipboard_items
                        WHERE id IN (
                            SELECT id FROM clipboard_items
@@ -399,6 +433,98 @@ class Database:
                     (excess,),
                 )
                 self.conn.commit()
+                self._release_blobs(cur, hashes)
+
+    # --- 이미지 원본 파일(blobs) ---
+
+    @staticmethod
+    def _hashes_where(cur, where: str, params: tuple) -> list[str]:
+        """지우려는 행들이 쓰는 해시(지우기 전에 모아 둔다)."""
+        cur.execute(
+            f"SELECT DISTINCT image_hash FROM clipboard_items WHERE image_hash IS NOT NULL AND {where}",
+            params,
+        )
+        return [r[0] for r in cur.fetchall()]
+
+    def _release_blobs(self, cur, hashes: list[str]):
+        """남은 행이 아무도 안 쓰는 해시의 파일을 지운다(같은 그림을 여러 행이 나눠 쓸 수 있다)."""
+        for h in hashes:
+            cur.execute("SELECT COUNT(*) FROM clipboard_items WHERE image_hash = ?", (h,))
+            if cur.fetchone()[0] == 0:
+                self.blobs.remove(h)
+
+    def sweep_blobs(self) -> int:
+        """시작 청소 — 어떤 행도 안 쓰는 파일과 임시 찌꺼기를 지운다. 지운 개수."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("SELECT DISTINCT image_hash FROM clipboard_items WHERE image_hash IS NOT NULL")
+            keep = [r[0] for r in cur.fetchall()]
+        return self.blobs.sweep(keep)
+
+    _IMAGES_MIGRATED_KEY = "images_to_files_v1"
+
+    def migrate_images_to_files(self, max_rows: Optional[int] = None) -> int:
+        """1회 이전(2026-11-16): 옛 행의 image_data BLOB을 blobs 파일로 옮긴다.
+
+        행마다 「파일 먼저 쓰기 → 그 행의 image_hash 채우고 image_data 비우기 → 커밋」이라
+        중간에 꺼져도 데이터를 잃지 않고, 다음 실행에서 남은 행부터 이어서 한다.
+        처음 옮기기 전에 DB를 `<db>.bak-images-YYYYMMDD`로 한 번 백업한다. 다 끝나면 설정
+        표시를 남기고 VACUUM 한 번. max_rows는 시험용(그만큼만 하고 멈춤). 옮긴 행 수를 돌려준다.
+        """
+        if self.get_setting(self._IMAGES_MIGRATED_KEY, "") == "1":
+            return 0
+        with self._lock:
+            ids = [r[0] for r in self.conn.execute(
+                "SELECT id FROM clipboard_items WHERE image_data IS NOT NULL ORDER BY id").fetchall()]
+        if ids and not self._backup_before_image_migration():
+            return 0  # 백업 실패 — 이번 실행은 옮기지 않는다(옛 방식으로도 읽힌다)
+        moved = 0
+        for item_id in ids:
+            if max_rows is not None and moved >= max_rows:
+                return moved
+            try:
+                with self._lock:
+                    row = self.conn.execute(
+                        "SELECT image_data FROM clipboard_items WHERE id = ?", (item_id,)).fetchone()
+                    if row is None or row[0] is None:
+                        continue
+                    h = self.blobs.put(bytes(row[0]))
+                    self.conn.execute(
+                        "UPDATE clipboard_items SET image_hash = ?, image_data = NULL WHERE id = ?",
+                        (h, item_id))
+                    self.conn.commit()
+                moved += 1
+            except Exception as e:  # 한 행이 실패해도 나머지는 간다
+                print(f"[DB] 이미지 파일 이전 실패 — id={item_id}: {e}")
+        with self._lock:
+            left = self.conn.execute(
+                "SELECT COUNT(*) FROM clipboard_items WHERE image_data IS NOT NULL").fetchone()[0]
+        if left == 0:
+            self.set_setting(self._IMAGES_MIGRATED_KEY, "1")
+            if moved:
+                try:
+                    with self._lock:
+                        self.conn.execute("VACUUM")
+                except sqlite3.Error as e:
+                    print(f"[DB] 이전 뒤 압축 실패 — 무시: {e}")
+        return moved
+
+    def _backup_before_image_migration(self) -> bool:
+        """이전 직전 DB 백업(이미 있으면 다시 만들지 않는다). 시험용 메모리 DB는 건너뛴다."""
+        if self.db_path == ":memory:":
+            return True
+        bak = f"{self.db_path}.bak-images-{datetime.now():%Y%m%d}"
+        if os.path.exists(bak):
+            return True
+        try:
+            dst = sqlite3.connect(bak)
+            with self._lock:
+                self.conn.backup(dst)
+            dst.close()
+            return True
+        except Exception as e:
+            print(f"[DB] 이전 전 백업 실패 — 이번엔 옮기지 않음: {e}")
+            return False
 
     # --- Settings ---
 
@@ -450,11 +576,16 @@ class Database:
         else:
             created_at = datetime.now()
 
+        image_data = row["image_data"]
+        # 원본은 blobs 파일 — 칸을 고른 요약 조회에는 image_hash가 없어 파일을 읽지 않는다
+        if image_data is None and "image_hash" in row.keys() and row["image_hash"]:
+            image_data = self.blobs.get(row["image_hash"])
+
         return ClipboardItem(
             id=row["id"],
             content_type=row["content_type"],
             text_content=row["text_content"],
-            image_data=row["image_data"],
+            image_data=image_data,
             html_content=row["html_content"],
             rtf_content=row["rtf_content"],
             preview_text=row["preview_text"],
