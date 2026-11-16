@@ -1,0 +1,7 @@
+when,kind,name,size_mb,ws_mb,private_mb,start_ms,start_is_proxy,swap_max_ms,order_ok,focus_kept,read_by,note
+2026-11-16 11:05,measure,PasteFlow(python),98.8,129.0,60.0,3000,yes,,,,,procs=2
+2026-11-16 11:08,paste,C# single,,,,,,1,yes,yes,file,got='하나둘셋' swaps=3
+2026-11-16 11:13,measure,Tauri,4.2,339.5,153.1,1126,no,,,,,procs=7
+2026-11-16 11:13,paste,Tauri,,,,,,1,yes,yes,file,got='하나둘셋' swaps=3
+2026-11-16 11:14,measure,C# single,165.0,87.0,45.0,478,no,,,,,procs=1
+2026-11-16 11:15,measure,C# fdd,0.2,83.7,43.9,341,no,,,,,procs=1
