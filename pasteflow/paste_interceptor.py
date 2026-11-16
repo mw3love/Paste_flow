@@ -20,6 +20,7 @@ import win32clipboard
 
 from pasteflow.models import ClipboardItem
 from pasteflow.paste_queue import PasteQueue
+from pasteflow.core.hotkey_rules import Combo, classify_keydown
 from pasteflow.hotkey_manager import _SPECIAL_KEY_MAP
 from pasteflow.clipboard_monitor import is_encoded_image
 
@@ -358,6 +359,8 @@ class PasteInterceptor:
         # 전부 눌렸는지를 직접 추적해 트리거한다(아래 _low_level_keyboard_proc).
         self._stt_mod_only: bool = False
         self._stt_active: bool = False  # 키 반복(auto-repeat) keydown 무시 + 정확한 keyup 매칭용
+        self._combos: dict = {}
+        self._rebuild_combos()
         self._mod_win: bool = False  # Win키 눌림 상태 — Alt(_mod_alt)와 동일하게 자체 추적
         # 설정창에서 새 단축키를 녹화하는 동안 True — 전역 단축키 감지를 통째로 멈춰
         # 이전 단축키를 눌러도 그 동작이 실행되지 않고 키 이벤트가 그대로 통과하게 한다
@@ -365,6 +368,44 @@ class PasteInterceptor:
         self._suspended: bool = False
         # 콜백 참조 유지 (GC 방지)
         self._hook_proc = HOOKPROC(self._low_level_keyboard_proc)
+
+    # 포그라운드 잠금 해제(AllowSetForegroundWindow)가 필요한 동작 — 지금까지 OCR·핀·메모·캡처·
+    # PrintScreen 캡처·녹화에서 했던 것과 같다.
+    _FOREGROUND_ACTIONS = frozenset({"ocr", "pin", "memo", "capture", "capture_printscreen", "record"})
+
+    def _action_callback(self, action: str):
+        """동작 이름 → 지금까지 그 단축키가 부르던 콜백(없으면 None). stt_repeat는 콜백 없음."""
+        return {
+            "panel": self.on_toggle_panel,
+            "ocr": self.on_ocr_trigger,
+            "seq_image_to_path": self.on_seq_image_to_path,
+            "bulk_paste": self.on_bulk_paste,
+            "bulk_path_paste": self.on_bulk_path_paste,
+            "pin": self.on_pin_image,
+            "memo": self.on_new_memo,
+            "capture": self.on_capture,
+            "capture_printscreen": self.on_capture,
+            "record": self.on_record,
+            "stt_start": self.on_stt_start,
+        }.get(action)
+
+    def _rebuild_combos(self):
+        """set_*_hotkey가 풀어 둔 필드로 규칙 함수에 넘길 단축키 표를 다시 만든다(훅마다 만들지 않게)."""
+        self._combos = {
+            "panel": Combo(self._panel_vk, self._panel_need_ctrl, self._panel_need_shift, self._panel_need_alt),
+            "ocr": Combo(self._ocr_vk, self._ocr_need_ctrl, self._ocr_need_shift, self._ocr_need_alt),
+            "seq_image_to_path": Combo(self._seqimg2path_vk, self._seqimg2path_need_ctrl,
+                                       self._seqimg2path_need_shift, self._seqimg2path_need_alt),
+            "bulk_paste": Combo(self._bulk_vk, self._bulk_need_ctrl, self._bulk_need_shift, self._bulk_need_alt),
+            "bulk_path_paste": Combo(self._bulkpath_vk, self._bulkpath_need_ctrl,
+                                     self._bulkpath_need_shift, self._bulkpath_need_alt),
+            "pin": Combo(self._pin_vk, self._pin_need_ctrl, self._pin_need_shift, self._pin_need_alt),
+            "memo": Combo(self._memo_vk, self._memo_need_ctrl, self._memo_need_shift, self._memo_need_alt),
+            "capture": Combo(self._capture_vk, self._capture_need_ctrl, self._capture_need_shift,
+                             self._capture_need_alt),
+            "record": Combo(self._record_vk, self._record_need_ctrl, self._record_need_shift, self._record_need_alt),
+            "stt": Combo(self._stt_vk, self._stt_need_ctrl, self._stt_need_shift, self._stt_need_alt),
+        }
 
     def set_panel_hotkey(self, hotkey_str: str):
         """패널 토글 단축키 설정 — WH_KEYBOARD_LL에서 감지할 키 조합을 파싱"""
@@ -378,6 +419,7 @@ class PasteInterceptor:
             self._panel_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._panel_vk = 0
+        self._rebuild_combos()
 
     def set_ocr_hotkey(self, hotkey_str: str):
         """OCR 단축키 설정 — WH_KEYBOARD_LL에서 감지할 키 조합을 파싱"""
@@ -391,6 +433,7 @@ class PasteInterceptor:
             self._ocr_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._ocr_vk = 0
+        self._rebuild_combos()
 
     def set_seq_image_to_path_hotkey(self, hotkey_str: str):
         """순차 경로 붙여넣기 단축키 설정 — 큐에서 다음 항목을 꺼내 이미지면 경로 텍스트로 붙여넣기."""
@@ -404,6 +447,7 @@ class PasteInterceptor:
             self._seqimg2path_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._seqimg2path_vk = 0
+        self._rebuild_combos()
 
     def set_bulk_paste_hotkey(self, hotkey_str: str):
         """순차 붙여넣기 전체 자동주입 단축키 설정 — 큐 전체를 간격 두고 순차 주입(Ctrl+Shift+V의 벌크 버전)."""
@@ -417,6 +461,7 @@ class PasteInterceptor:
             self._bulk_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._bulk_vk = 0
+        self._rebuild_combos()
 
     def set_bulk_path_paste_hotkey(self, hotkey_str: str):
         """순차 경로 붙여넣기 전체 자동주입 단축키 설정 — 큐 전체를 경로 텍스트로 간격 두고 순차 주입(Ctrl+Shift+[의 벌크 버전)."""
@@ -430,6 +475,7 @@ class PasteInterceptor:
             self._bulkpath_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._bulkpath_vk = 0
+        self._rebuild_combos()
 
     def set_pin_hotkey(self, hotkey_str: str):
         """화면에 핀 단축키 설정 — 현재 클립보드 이미지를 화면에 떠 있는 창으로 띄운다."""
@@ -443,6 +489,7 @@ class PasteInterceptor:
             self._pin_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._pin_vk = 0
+        self._rebuild_combos()
 
     def set_memo_hotkey(self, hotkey_str: str):
         """새 메모 단축키 설정 — 메모장에 새 메모를 만들고 메모창을 연다."""
@@ -456,6 +503,7 @@ class PasteInterceptor:
             self._memo_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._memo_vk = 0
+        self._rebuild_combos()
 
     def set_capture_hotkey(self, hotkey_str: str):
         """영역 캡처 단축키 설정 — 캡처 오버레이를 띄워 드래그 영역을 클립보드·파일로 저장."""
@@ -469,6 +517,7 @@ class PasteInterceptor:
             self._capture_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._capture_vk = 0
+        self._rebuild_combos()
 
     def set_capture_via_printscreen(self, enabled: bool):
         """PrintScreen 키를 영역 캡처(Alt+F2)의 추가 트리거로 쓸지 설정한다."""
@@ -486,6 +535,7 @@ class PasteInterceptor:
             self._record_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._record_vk = 0
+        self._rebuild_combos()
 
     def set_stt_hotkey(self, hotkey_str: str):
         """음성 입력(STT) 단축키 설정 — 누르고 있는 동안 녹음(푸시투토크), 떼면 인식+전송.
@@ -512,6 +562,7 @@ class PasteInterceptor:
                 self._stt_need_ctrl, self._stt_need_shift,
                 self._stt_need_alt, self._stt_need_win,
             ))
+        self._rebuild_combos()
 
     def start(self):
         """저수준 키보드 훅 시작 (별도 스레드)"""
@@ -706,184 +757,51 @@ class PasteInterceptor:
                             except Exception:
                                 pass
 
-                if ctrl_pressed and shift_pressed and not alt_pressed:
-                    now = time.monotonic()
-                    debounce_ok = (now - self._last_paste_time) > 0.1
+                # 어떤 동작인지는 순수 규칙(core/hotkey_rules.py)이 정하고, 여기서는 지금까지와
+                # 같은 부작용만 실행한다(검사 순서·조건은 규칙 함수에 그대로 옮겨 시험한다).
+                now = time.monotonic()
+                kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                decision = classify_keydown(
+                    vk_code, ctrl_pressed, shift_pressed, alt_pressed, win_pressed,
+                    bool(kbd.flags & LLKHF_INJECTED), self._combos,
+                    self._capture_via_printscreen, self._stt_active,
+                    seq_paste_ready=(now - self._last_paste_time) > 0.1,
+                )
 
-                    if vk_code == VK_V and debounce_ok:
-                        self._last_paste_time = now
-                        self._on_ctrl_shift_v()
-                        # suppress — Ctrl+Shift+V를 앱에 전달하지 않음(V의 물리 keyup까지)
-                        return self._suppress(vk_code)
+                if decision.action == "seq_paste":
+                    self._last_paste_time = now
+                    self._on_ctrl_shift_v()
+                    # suppress — Ctrl+Shift+V를 앱에 전달하지 않음(V의 물리 keyup까지)
+                    return self._suppress(vk_code)
 
-                # 일반 Ctrl+V 관찰 (suppress 안 함 — 그대로 통과)
-                # PasteFlow 자체 주입(SendInput)은 LLKHF_INJECTED 플래그로 제외해
-                # Ctrl+Shift+V / direct_paste 경로의 Ctrl+V를 잘못 잡지 않는다.
-                if (vk_code == VK_V
-                        and ctrl_pressed and not shift_pressed and not alt_pressed
-                        and self.on_plain_paste):
-                    kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-                    if not (kbd.flags & LLKHF_INJECTED):
-                        try:
-                            self.on_plain_paste()
-                        except Exception:
-                            pass
-                    # fall through → CallNextHookEx로 통과
+                # 일반 Ctrl+V 관찰 (suppress 안 함 — 그대로 통과). PasteFlow 자체 주입(SendInput)은
+                # 규칙 함수가 LLKHF_INJECTED로 빼서 Ctrl+Shift+V / direct_paste 경로의 Ctrl+V를 잘못 잡지 않는다.
+                if decision.plain_paste and self.on_plain_paste:
+                    try:
+                        self.on_plain_paste()
+                    except Exception:
+                        pass
+                    # fall through → 아래 동작 또는 CallNextHookEx로 통과
 
-                # 패널 토글 단축키 감지 (RegisterHotKey 대체 — 탐색기 등 모든 앱에서 동작)
-                if (self._panel_vk and vk_code == self._panel_vk
-                        and ctrl_pressed  == self._panel_need_ctrl
-                        and shift_pressed == self._panel_need_shift
-                        and alt_pressed   == self._panel_need_alt):
-                    if self.on_toggle_panel:
-                        try:
-                            self.on_toggle_panel()
-                        except Exception:
-                            pass
-                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
-
-                # OCR 단축키 감지
-                if (self._ocr_vk and vk_code == self._ocr_vk
-                        and ctrl_pressed  == self._ocr_need_ctrl
-                        and shift_pressed == self._ocr_need_shift
-                        and alt_pressed   == self._ocr_need_alt):
-                    # 훅 스레드에서 포그라운드 잠금 해제 — 오버레이가 SetForegroundWindow 가능하도록
-                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
-                    if self.on_ocr_trigger:
-                        try:
-                            self.on_ocr_trigger()
-                        except Exception:
-                            pass
-                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
-
-                # 순차 경로 붙여넣기 단축키 감지 (기본 Ctrl+Shift+P) — 큐에서 다음 항목을 경로로
-                if (self._seqimg2path_vk and vk_code == self._seqimg2path_vk
-                        and ctrl_pressed  == self._seqimg2path_need_ctrl
-                        and shift_pressed == self._seqimg2path_need_shift
-                        and alt_pressed   == self._seqimg2path_need_alt):
-                    if self.on_seq_image_to_path:
-                        try:
-                            self.on_seq_image_to_path()
-                        except Exception:
-                            pass
-                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
-
-                # 순차 붙여넣기 전체 자동주입 단축키 감지 (기본 Ctrl+Shift+A) — Ctrl+Shift+V의 벌크 버전.
-                # 실제 반복 주입 루프는 main 쪽(_start_bulk_paste)이 QTimer로 돌린다 — 여기선 감지·suppress만.
-                if (self._bulk_vk and vk_code == self._bulk_vk
-                        and ctrl_pressed  == self._bulk_need_ctrl
-                        and shift_pressed == self._bulk_need_shift
-                        and alt_pressed   == self._bulk_need_alt):
-                    if self.on_bulk_paste:
-                        try:
-                            self.on_bulk_paste()
-                        except Exception:
-                            pass
-                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
-
-                # 순차 경로 붙여넣기 전체 자동주입 단축키 감지 (기본 Ctrl+Shift+[) — Ctrl+Shift+[의 벌크 버전
-                if (self._bulkpath_vk and vk_code == self._bulkpath_vk
-                        and ctrl_pressed  == self._bulkpath_need_ctrl
-                        and shift_pressed == self._bulkpath_need_shift
-                        and alt_pressed   == self._bulkpath_need_alt):
-                    if self.on_bulk_path_paste:
-                        try:
-                            self.on_bulk_path_paste()
-                        except Exception:
-                            pass
-                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
-
-                # 핀 단축키 감지 (기본 Alt+F3) — 큐에 다음 항목이 있으면 그걸, 없으면 클립보드를 핀
-                if (self._pin_vk and vk_code == self._pin_vk
-                        and ctrl_pressed  == self._pin_need_ctrl
-                        and shift_pressed == self._pin_need_shift
-                        and alt_pressed   == self._pin_need_alt):
-                    # 새 핀 창이 포그라운드를 잡을 수 있도록 잠금 해제 (OCR 트리거와 동일)
-                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
-                    if self.on_pin_image:
-                        try:
-                            self.on_pin_image()
-                        except Exception:
-                            pass
-                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
-
-                # 새 메모 단축키 감지 (기본 Alt+`)
-                if (self._memo_vk and vk_code == self._memo_vk
-                        and ctrl_pressed  == self._memo_need_ctrl
-                        and shift_pressed == self._memo_need_shift
-                        and alt_pressed   == self._memo_need_alt):
-                    # 메모창이 포그라운드를 잡을 수 있도록 잠금 해제 (핀과 동일)
-                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
-                    if self.on_new_memo:
-                        try:
-                            self.on_new_memo()
-                        except Exception:
-                            pass
-                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
-
-                # 영역 캡처 단축키 감지 (기본 Alt+F2)
-                if (self._capture_vk and vk_code == self._capture_vk
-                        and ctrl_pressed  == self._capture_need_ctrl
-                        and shift_pressed == self._capture_need_shift
-                        and alt_pressed   == self._capture_need_alt):
-                    # 캡처 오버레이가 포그라운드를 잡을 수 있도록 잠금 해제 (OCR 트리거와 동일)
-                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
-                    if self.on_capture:
-                        try:
-                            self.on_capture()
-                        except Exception:
-                            pass
-                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
-
-                # PrintScreen으로 영역 캡처 대체 실행(설정 체크박스) — Alt+F2와 동일한
-                # on_capture 콜백. 수식키가 하나라도 눌려 있으면(Alt+PrtScn·Win+PrtScn 등
-                # OS 고유 조합) 건드리지 않고 통과시킨다.
-                if (self._capture_via_printscreen and vk_code == VK_SNAPSHOT
-                        and not ctrl_pressed and not shift_pressed
-                        and not alt_pressed and not win_pressed):
-                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
-                    if self.on_capture:
-                        try:
-                            self.on_capture()
-                        except Exception:
-                            pass
-                    return self._suppress(vk_code)  # suppress (짝 keyup까지, OS 기본 PrtScn 동작 차단)
-
-                # 녹화 단축키 감지 (기본 Ctrl+Shift+R) — GIF/영상은 영역 선택 뒤 고른다
-                if (self._record_vk and vk_code == self._record_vk
-                        and ctrl_pressed  == self._record_need_ctrl
-                        and shift_pressed == self._record_need_shift
-                        and alt_pressed   == self._record_need_alt):
-                    # 선택 오버레이·정지 컨트롤러가 포그라운드를 잡도록 잠금 해제 (캡처 트리거와 동일)
-                    _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
-                    if self.on_record:
-                        try:
-                            self.on_record()
-                        except Exception:
-                            pass
-                    return self._suppress(vk_code)  # suppress (짝 keyup까지)
-
-                # 음성 입력(STT) 단축키 감지 — 푸시투토크: keydown=시작, keyup=종료(위에서 처리)
-                if (self._stt_vk and vk_code == self._stt_vk
-                        and ctrl_pressed  == self._stt_need_ctrl
-                        and shift_pressed == self._stt_need_shift
-                        and alt_pressed   == self._stt_need_alt):
-                    if not self._stt_active:  # auto-repeat keydown은 무시 — 최초 눌림에만 시작
+                action = decision.action
+                if action is not None:
+                    if action in self._FOREGROUND_ACTIONS:
+                        # 오버레이·새 창이 포그라운드를 잡을 수 있도록 훅 스레드에서 잠금 해제
+                        _user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
+                    if action == "stt_start":
                         self._stt_active = True
                         if self._stt_need_alt:
-                            # R(비수정키)을 통째로 suppress하면 앱은 'Alt만 눌렸다 떼짐'을
-                            # 본다 — Windows가 이를 메뉴바 포커스 진입으로 해석해(표준 동작),
-                            # 이후 우리가 주입하는 Ctrl+V가 메뉴에 먹혀 정작 입력창엔 아무것도
-                            # 안 들어간다(2026-08-02 사용자 리포트: "메모장에서 Alt키가 먹혀
-                            # 입력이 안 됨"). 미할당 키(VK_MASK)로 Alt 조합을 더럽혀 '벌거벗은
-                            # Alt' 해석을 막는다 — _send_clean_key의 Ctrl+Shift 마스킹과 동일 기법.
+                            # R(비수정키)을 통째로 suppress하면 앱은 'Alt만 눌렸다 떼짐'을 본다 — Windows가
+                            # 메뉴바 포커스 진입으로 해석해 이후 주입한 Ctrl+V가 메뉴에 먹힌다(2026-08-02
+                            # 사용자 리포트). 미할당 키(VK_MASK)로 Alt 조합을 더럽혀 '벌거벗은 Alt' 해석을 막는다.
                             _send_inputs([_make_key_input(VK_MASK),
                                           _make_key_input(VK_MASK, KEYEVENTF_KEYUP)])
-                        if self.on_stt_start:
-                            try:
-                                self.on_stt_start()
-                            except Exception:
-                                pass
+                    callback = self._action_callback(action)
+                    if callback:
+                        try:
+                            callback()
+                        except Exception:
+                            pass
                     return self._suppress(vk_code)  # suppress (짝 keyup까지)
         except Exception as e:
             print(f"[Hook] 훅 프로시저 예외 (무시): {e}")

@@ -45,10 +45,10 @@ pyinstaller PasteFlow.spec    # 산출물: dist/PasteFlow-{버전}.exe
 
 ```
 pasteflow/
-├── main.py                 # 진입점, 앱 초기화 및 모듈 오케스트레이션
+├── main.py                 # 진입점, 앱 초기화 및 모듈 오케스트레이션 (클래스 밖 Windows 도우미는 2026-11-16 winapi/로 옮김)
 ├── clipboard_monitor.py    # 클립보드 감시 (WM_CLIPBOARDUPDATE)
 ├── paste_queue.py          # 순차 붙여넣기 큐 & 포인터 관리 (핵심)
-├── paste_interceptor.py    # Ctrl+Shift+V 감지 + 패널 토글 단축키 감지 (핵심)
+├── paste_interceptor.py    # Ctrl+Shift+V 감지 + 패널 토글 단축키 감지 (핵심) — 어떤 키가 어떤 동작인지는 core/hotkey_rules.py가 정하고 훅은 부작용만 실행
 ├── hotkey_manager.py       # `_SPECIAL_KEY_MAP`(특수 키 이름 → VK 코드 표)만 남음 — paste_interceptor가 import. 옛 RegisterHotKey `HotkeyManager`는 2026-10-03 제거
 ├── database.py             # SQLite CRUD (clipboard_items, settings) — 이미지 원본은 DB 밖 blobs 폴더(해시 이름)에, DB엔 image_hash만(2026-11-16)
 ├── blob_store.py           # 이미지 원본 파일 저장소 — %LOCALAPPDATA%\PasteFlow\blobs\<sha256>.bin, 같은 그림은 한 번만
@@ -62,6 +62,13 @@ pasteflow/
 ├── gif_recorder.py         # GIF 녹화 — 캡처 오버레이 select_only로 영역만 받아 라이브 연속 grab → Pillow 애니메이션 GIF (GifRecorder + 정지 컨트롤러 + encode_gif). GDI 커서 합성(composite_cursor)도 여기 있고 video_recorder.py가 재사용한다. 저수준 조각(sample_cursor·cursor_hotspot·blit_icon_at)은 capture_overlay.py의 정지 캡처 '커서 포함'(Space 토글)도 공유한다.
 ├── video_recorder.py       # 영상(MP4) 녹화 — GIF와 같은 select_only 흐름을 공유하되 프레임을 cv2.VideoWriter로 즉시 파일에 흘려써 메모리 상한이 없다(VideoRecorder, gif_recorder의 _RecordController·composite_cursor 재사용)
 ├── stt_engine.py           # 음성 입력(STT) — Recorder(sounddevice 녹음+RMS 음량)·transcribe(게이트웨이 Gemini 계열 화이트리스트, ocr_engine 패턴 재사용)·마이크 장치 목록/기본값 조회
+├── core/                   # 순수 로직 — Windows·Qt를 모른다(운영체제 없이 시험). 2026-11-16 시작
+│   └── hotkey_rules.py     # 키 판정 규칙: classify_keydown(키·수식키·단축키 표 → 동작 이름). 검사 순서 = 우선순위
+├── winapi/                 # Windows 연결부 — ctypes·win32·셸 도우미(2026-11-16 main.py에서 글자 그대로 옮김)
+│   ├── drag_paste.py       # _find_deepest_child·_is_chromium_window·_activate_and_send_ctrl_v
+│   ├── explorer.py         # _get_explorer_folder·_get_explorer_subfolder_at_cursor
+│   ├── desktop.py          # _get_desktop_path·_find_desktop_listview·_position_desktop_icon
+│   └── image_io.py         # _image_data_to_png_bytes·_save_image_to_folder·_save_image_to_drop_temp·_read_image_from_clipboard·_render_text_to_png·_qpixmap_to_dib·_default_capture_folder
 └── ui/
     ├── panel.py            # 전체 클립보드 패널
     ├── image_preview.py    # 이미지 미리보기 팝업 (다중 창 지원, Space로 인라인 주석 편집 진입)
@@ -112,7 +119,7 @@ docs/
 
 **핵심 흐름**
 
-- **`main.py`** — 오케스트레이션. 모듈 연결, 단일 인스턴스(뮤텍스 + Named Pipe `\\.\pipe\PasteFlow_IPC`), 자동 시작(HKCU `Run` → `"%LOCALAPPDATA%\PasteFlow\PasteFlow-autostart.vbs"` 직접 등록(작업 관리자에 파일 이름으로 표시) → `pythonw run.pyw` 또는 exe; `python.exe`/`-m` 등록 금지), 시작 시 마이그레이션(`_migrate_secrets`·`_ORPHAN_KEYS` purge·`_migrate_drop_official_backend`·`_migrate_regen_thumbnails` 등), 시크릿(`_SECRET_KEYS`, `_get_secret`). 큐 UI 공통 클리어는 `_clear_queue_ui`, 히스토리 삭제 시 `queue.remove_item`으로 큐도 동기화. 단축키 슬롯: 순차 경로(`_on_seq_image_to_path_hotkey` — 이미지면 임시 PNG 경로를 붙이고 250ms 뒤 원본 이미지로 클립보드 복원), 벌크(`_start_bulk_paste`/`_bulk_paste_step`, 300ms 간격 QTimer 체인, `_bulk_paste_active`로 재진입·취소), 핀(`_on_pin_hotkey`), 캡처(`_on_capture_region`), 녹화(`_on_record_hotkey` → `RecordModeChooser`), STT(`_on_stt_start`/`_on_stt_stop`/`_finish_stt_recording`), OCR(`_start_ocr_worker` — 영역·우클릭 공용, 시작 시 `_prewarm_ocr_connection`). 패널 드래그 붙여넣기 헬퍼(`_activate_and_send_ctrl_v`, 탐색기/바탕화면 저장, `_position_desktop_icon`), 이미지 변환(`_image_data_to_png_bytes`, `_read_image_from_clipboard` — CF_HDROP 이미지 파일 폴백 포함). 진행 칩은 `_start_cursor_progress`/`_finish_cursor_progress`.
+- **`main.py`** — 오케스트레이션. 모듈 연결, 단일 인스턴스(뮤텍스 + Named Pipe `\\.\pipe\PasteFlow_IPC`), 자동 시작(HKCU `Run` → `"%LOCALAPPDATA%\PasteFlow\PasteFlow-autostart.vbs"` 직접 등록(작업 관리자에 파일 이름으로 표시) → `pythonw run.pyw` 또는 exe; `python.exe`/`-m` 등록 금지), 시작 시 마이그레이션(`_migrate_secrets`·`_ORPHAN_KEYS` purge·`_migrate_drop_official_backend`·`_migrate_regen_thumbnails` 등), 시크릿(`_SECRET_KEYS`, `_get_secret`). 큐 UI 공통 클리어는 `_clear_queue_ui`, 히스토리 삭제 시 `queue.remove_item`으로 큐도 동기화. 단축키 슬롯: 순차 경로(`_on_seq_image_to_path_hotkey` — 이미지면 임시 PNG 경로를 붙이고 250ms 뒤 원본 이미지로 클립보드 복원), 벌크(`_start_bulk_paste`/`_bulk_paste_step`, 300ms 간격 QTimer 체인, `_bulk_paste_active`로 재진입·취소), 핀(`_on_pin_hotkey`), 캡처(`_on_capture_region`), 녹화(`_on_record_hotkey` → `RecordModeChooser`), STT(`_on_stt_start`/`_on_stt_stop`/`_finish_stt_recording`), OCR(`_start_ocr_worker` — 영역·우클릭 공용, 시작 시 `_prewarm_ocr_connection`). 패널 드래그 붙여넣기 헬퍼와 이미지 변환 도우미는 2026-11-16부터 `pasteflow/winapi/`(drag_paste·explorer·desktop·image_io — 이름 그대로)에 있고 main.py는 import만 한다. 진행 칩은 `_start_cursor_progress`/`_finish_cursor_progress`.
 - **`clipboard_monitor.py`** — `WM_CLIPBOARDUPDATE` 감시 → `_read_clipboard()`가 항상 리스트 반환(탐색기 다중 이미지 파일은 파일마다 항목). 자체 쓰기는 `mark_self_write`(0.5초 시간창 + `SELF_WRITE_BACKSTOP_SEC` 2초 해시). 직전과 같은 내용은 `DUPLICATE_WINDOW_SEC`(1.5초) 안에서만 중복으로 거른다. OLE·HWP 네이티브 포맷은 `extra_formats`에서 제외(한글→한글 붙여넣기 실패 방지). 썸네일은 PIL 우선, 실패 시 raw DIB로 보고 `_dib_to_bmp`. `is_encoded_image`는 인터셉터와 공유.
 - **`paste_queue.py`** — 순차 큐·포인터. 리셋 트리거: idle 만료(`idle_reset_sec`, 기본 10초) / `pointer>0`인 상태의 새 복사. `set_queue`·`clear`·`remove_item`·`undo_last`·`mark_plain_paste`(테스트만 사용 — 일반 Ctrl+V는 2026-11-14부터 큐를 비우지 않음). TDD 대상.
 - **`paste_interceptor.py`** — `WH_KEYBOARD_LL` 훅 하나로 모든 전역 단축키 감지(표는 아래 「단축키 체계」). Ctrl+Shift+V는 클립보드 교체 → `_send_clean_key(VK_V)`(수정키 해제·복원 + `VK_MASK` 입력기 전환 방지). 일반 Ctrl+V는 통과시키며 물리 키만 `on_plain_paste`로 알림. suppress한 키는 짝 **물리** keyup도 막음. STT는 keydown·keyup 푸시투토크(`_stt_mod_only`면 Ctrl+Win처럼 수식키만). 설정창 녹화 중엔 `suspend()`로 전부 통과. `_set_clipboard`는 텍스트·HTML·RTF·이미지(PNG면 PNG+DIB, 그 밖의 파일 포맷은 DIB로 변환, raw DIB는 그대로)·`extra_formats` 전부 복원.
