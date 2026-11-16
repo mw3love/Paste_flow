@@ -1,4 +1,12 @@
 {
+  "live": {
+    "paths": ["%LOCALAPPDATA%/PasteFlow"],
+    "registry": [
+      "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\PasteFlow",
+      "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run\\PasteFlow"
+    ],
+    "running": "run.pyw"
+  },
   "rules": [
     {"name": "길이 검사와 시험", "paths": ["*.py", "tests/**", "pasteflow/**", "requirements*.txt", "tools/**"], "run": "python tools/check_file_length.py && python -m pytest -q -p no:cacheprovider tests", "cwd": "."}
   ]
