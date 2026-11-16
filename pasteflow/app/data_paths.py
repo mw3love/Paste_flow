@@ -20,7 +20,7 @@ def _resolve_db_path() -> str:
     """DB 경로 결정. 로컬에 없고 Drive에 기존 DB가 있으면 1회 마이그레이션."""
     local_db = os.path.join(_get_local_data_dir(), "pasteflow.db")
     if not os.path.exists(local_db):
-        legacy_db = os.path.join(os.path.dirname(__file__), "..", "pasteflow.db")
+        legacy_db = os.path.join(os.path.dirname(__file__), "..", "..", "pasteflow.db")
         if os.path.exists(legacy_db):
             try:
                 import shutil

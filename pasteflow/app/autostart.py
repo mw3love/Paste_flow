@@ -78,7 +78,7 @@ class AutoStartMixin:
                     pythonw = sys.executable
                     if pythonw.lower().endswith("python.exe"):
                         pythonw = pythonw[:-len("python.exe")] + "pythonw.exe"
-                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                     run_pyw = os.path.join(project_root, "run.pyw")
                     target_cmd = f'"{pythonw}" "{run_pyw}"'
                 vbs_path = self._write_autostart_launcher_vbs(target_cmd)
