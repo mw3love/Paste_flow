@@ -9,7 +9,9 @@ build/
 !PasteFlow.spec
 desktop.ini
 .env
-.claude/
+/.claude/*
+# 전역 커밋 직전 검사(~/.claude/commit-gate-hook.py)의 이 프로젝트 규칙 — PC 간 같아야 해서 git에 넣는다(2026-11-16)
+!/.claude/commit-gate.json
 logs/
 settings.json
 _icons_preview.png

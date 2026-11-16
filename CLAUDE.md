@@ -24,9 +24,13 @@ python -m pasteflow.main
 
 # 의존성 설치
 pip install -r requirements.txt
+pip install -r requirements-dev.txt   # 시험 전용(pytest·hypothesis) — 앱 빌드에는 안 들어감
 
 # 테스트 실행
 pytest tests/
+# 커밋할 때 전역 커밋 직전 검사가 .claude/commit-gate.json 규칙대로
+# 「python tools/check_file_length.py && pytest」를 돌리고 실패하면 커밋을 막는다(2026-11-16).
+# 길이 검사: 새 .py 파일이 300줄을 넘으면 실패, 기존 큰 파일은 목록만.
 
 # 단독 실행 .exe 빌드 (진입점·onefile·windowed·아이콘·버전 메타데이터는 spec에 인코딩)
 pyinstaller PasteFlow.spec    # 산출물: dist/PasteFlow-{버전}.exe
@@ -85,10 +89,13 @@ tests/
 ├── test_ai_palette.py
 ├── test_clipboard_monitor.py
 ├── test_text_preview.py
-└── test_crypto.py
+├── test_crypto.py
+├── test_paste_queue_stateful.py  # 순차 붙여넣기 규칙 조합 시험(hypothesis — 사건을 무작위 순서로)
+└── test_check_file_length.py     # tools/check_file_length.py 시험
 
 tools/
-└── make_icon.py
+├── make_icon.py
+└── check_file_length.py   # 커밋 직전 검사의 새 파일 길이 검사
 
 docs/
 └── architecture-notes.md  # 모듈별 상세 설명·결정 근거·실패 기록 (Grep으로 해당 항목만 읽기)

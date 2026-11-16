@@ -1,0 +1,4 @@
+# 시험 전용 의존성 — 앱(빌드)에는 들어가지 않는다
+-r requirements.txt
+pytest
+hypothesis
