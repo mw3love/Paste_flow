@@ -31,6 +31,8 @@ pytest tests/
 # 커밋할 때 전역 커밋 직전 검사가 .claude/commit-gate.json 규칙대로
 # 「python tools/check_file_length.py && pytest」를 돌리고 실패하면 커밋을 막는다(2026-11-16).
 # 길이 검사: 새 .py 파일이 300줄을 넘으면 실패, 기존 큰 파일은 목록만.
+# 같은 설정의 live 칸(2026-11-17): 시험 전후로 %LOCALAPPDATA%\PasteFlow와 시작 프로그램 레지스트리 값 둘(Run·StartupApproved\Run의 PasteFlow)을
+# 비교해 바뀌면 시험이 통과해도 막는다. 앱이 run.pyw로 실행 중이면 비교는 건너뛴다(~/.claude/live_guard.py).
 
 # 단독 실행 .exe 빌드 (진입점·onefile·windowed·아이콘·버전 메타데이터는 spec에 인코딩)
 pyinstaller PasteFlow.spec    # 산출물: dist/PasteFlow-{버전}.exe
