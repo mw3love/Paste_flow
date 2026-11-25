@@ -195,3 +195,82 @@ def test_clear_board_drops_fade_strokes_from_undo():
     _EditorMixin.clear_board(host)
     assert host._scene.items() == []
     assert host._undo == [("delete", [keep])]
+
+
+# ---- 도구 옵션창 다시 그리기 — docs/plan/20261125-2302-도구-옵션창-다시-그리기.md ----
+
+from pasteflow.ui import image_annotator as _ia  # noqa: E402
+
+
+@pytest.mark.parametrize("value, want", [
+    (8, 14), (14, 14), (17, 14), (18, 22), (22, 22), (26, 22), (27, 32), (32, 32), (60, 32),
+])
+def test_nearest_head_step(value, want):
+    assert _ia._HEAD_STEPS == (14, 22, 32)
+    assert _ia._nearest_head_step(value) == want
+
+
+@pytest.mark.parametrize("tool, field, label", [
+    ("pen", "width", "두께"), ("marker", "width", "두께"), ("rect", "width", "두께"),
+    ("ellipse", "width", "두께"), ("arrow", "width", "두께"), ("fade", "width", "두께"),
+    ("text", "font", "크기"), ("badge", "size", "크기"),
+])
+def test_slider_spec_one_slider_per_tool(tool, field, label):
+    f, lab, lo, hi = _ia._slider_spec(tool)
+    assert (f, lab) == (field, label)
+    assert lo < hi
+
+
+@pytest.mark.parametrize("tool, cur, steps, want", [
+    ("pen", 6, 1, 7), ("pen", 6, -1, 5), ("pen", 40, 1, 40), ("pen", 1, -1, 1),
+    ("text", 200, 2, 200), ("text", 16, 1, 17), ("badge", 12, -1, 12), ("badge", 30, 3, 33),
+])
+def test_wheel_value_one_per_notch_clamped(tool, cur, steps, want):
+    assert _ia._wheel_value(tool, cur, steps) == want
+
+
+@pytest.mark.parametrize("key, active, want", [
+    ("select", True, "none"), ("select", False, "tool"),
+    ("pen", False, "tool"), ("pen", True, "popup"),
+    ("shape", True, "popup"), ("arrow", True, "popup"), ("marker", False, "tool"),
+])
+def test_tool_click_action(key, active, want):
+    assert _ia._tool_click_action(key, active) == want
+
+
+@pytest.mark.parametrize("center, box_x, box_w, want", [
+    (150, 100, 100, 50),    # 가운데
+    (101, 100, 100, 14),    # 왼쪽 끝 — 안쪽 14px까지
+    (199, 100, 100, 86),    # 오른쪽 끝
+    (50, 100, 100, 14),     # 상자가 화면 끝에 밀려 버튼이 상자 밖
+])
+def test_tail_offset_points_at_button(center, box_x, box_w, want):
+    assert _ia._tail_offset(center, box_x, box_w) == want
+
+
+def test_old_width_dots_and_stroke_preview_removed():
+    for name in ("_WIDTH_DOTS", "_MARKER_WIDTH_DOTS", "_StrokePreview", "_width_dot_icon"):
+        assert not hasattr(_ia, name), name
+
+
+class _FakeWheel:
+    def __init__(self, dy):
+        self._dy = dy
+
+    def type(self):
+        from PyQt6.QtCore import QEvent
+        return QEvent.Type.Wheel
+
+    def angleDelta(self):
+        return SimpleNamespace(y=lambda: self._dy)
+
+
+def test_wheel_filter_counts_120_per_notch_and_swallows():
+    got = []
+    f = _ia._ToolWheelFilter(lambda obj, steps: got.append(steps))
+    assert f.eventFilter("btn", _FakeWheel(120)) is True          # 한 칸 → +1, 휠은 삼킨다
+    assert [f.eventFilter("btn", _FakeWheel(40)) for _ in range(2)] == [True, True]
+    assert got == [1]                                               # 터치패드 80 — 아직 한 칸 안 됨
+    f.eventFilter("btn", _FakeWheel(40))                            # 모아서 120 → +1
+    f.eventFilter("btn", _FakeWheel(-240))                          # 아래로 두 칸 → -2
+    assert got == [1, 1, -2]

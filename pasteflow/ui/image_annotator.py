@@ -17,6 +17,7 @@ import time
 
 from PyQt6.QtCore import (
     Qt, QPoint, QPointF, QRectF, QLineF, QSize, QBuffer, QIODevice, QTimer, pyqtSignal,
+    QObject, QEvent,
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QPainter, QPen, QBrush, QColor, QPainterPath,
@@ -27,7 +28,7 @@ from PyQt6.QtWidgets import (
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsPathItem,
     QGraphicsTextItem, QGraphicsItem, QHBoxLayout, QVBoxLayout,
     QToolButton, QButtonGroup, QLabel, QSlider, QApplication, QCheckBox,
-    QStyle, QStyleOptionGraphicsItem,
+    QStyle, QStyleOptionGraphicsItem, QAbstractButton,
 )
 
 from pasteflow.ui.theme import (
@@ -301,12 +302,12 @@ def _tool_icon(tool: str, color=None, neutral_override=None) -> QIcon:
     return QIcon(pm)
 
 
-def _arrow_dir_icon(head_at_end: bool) -> QIcon:
+def _arrow_dir_icon(head_at_end: bool, color=_TEXT) -> QIcon:
     pm = QPixmap(24, 18)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    col = QColor(_TEXT)
+    col = QColor(color)
     p.setPen(QPen(col, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
     p.drawLine(5, 9, 19, 9)
     p.setBrush(col)
@@ -2529,47 +2530,117 @@ class _DragBar(QWidget):
         self._press = None
 
 
-# 옵션창 굵기 점 5개(누르면 그 두께). 형광펜은 굵게 쓰므로 따로.
-_WIDTH_DOTS = (2, 4, 6, 10, 16)
-_MARKER_WIDTH_DOTS = (10, 14, 18, 24, 32)
+# ---- 도구 옵션창 — 계획: docs/plan/20261125-2302-도구-옵션창-다시-그리기.md ----
+# 툴바와 같은 밝은 말풍선(연 버튼을 가리키는 아래 꼬리), 어느 도구든 슬라이더 하나.
+_POP_BG, _POP_LINE, _POP_LABEL = "#f4f4f4", "#cfcfcf", "#6b6b6b"
+_POP_CHECKED = "#cfe3ff"        # 눌린 버튼 바탕 — 툴바(_CHROME_QSS)와 같은 값
+_POP_TAIL = 7                   # 꼬리 높이(px)
+_POP_TAIL_INSET = 14            # 꼬리가 상자 모서리 쪽으로 갈 수 있는 한계(상자 안쪽 px)
+_HEAD_STEPS = (14, 22, 32)      # 화살표 머리 작게·보통·크게(가운데 = _DEFAULT_HEAD)
+_SIZE_DOT_BOX = 22              # 실제 크기 점 칸(px) — 값이 넘치면 칸 크기로 자름
 
 
-def _width_dot_icon(width: int) -> QIcon:
-    """굵기 점 버튼 그림 — 그 두께를 보이는 만큼(최대 18px) 줄인 원."""
-    pm = QPixmap(22, 22)
+def _nearest_head_step(value: int) -> int:
+    """저장된 머리 크기 → 눌린 채 보일 단계(가장 가까운 것, 한가운데면 큰 쪽 — 반올림처럼)."""
+    return min(_HEAD_STEPS, key=lambda s: (abs(s - value), -s))
+
+
+def _slider_spec(tool_key: str):
+    """도구 옵션창의 슬라이더 하나 → (tool_defaults 필드, 라벨, 최소, 최대)."""
+    if tool_key == "text":
+        return "font", "크기", _MIN_FONT, _MAX_FONT
+    if tool_key == "badge":
+        return "size", "크기", _MIN_BADGE, _MAX_BADGE
+    return "width", "두께", _MIN_WIDTH, _MAX_WIDTH
+
+
+def _wheel_value(tool_key: str, cur: int, steps: int) -> int:
+    """도구 버튼 위 휠 steps칸 → 새 슬라이더 값(한 칸 1, 범위 안)."""
+    _f, _lab, lo, hi = _slider_spec(tool_key)
+    return max(lo, min(int(cur) + int(steps), hi))
+
+
+def _tool_click_action(key: str, active: bool) -> str:
+    """툴바 도구 버튼을 눌렀을 때 — "tool"(그 도구 켜기) · "none"(도구 없음) · "popup"(옵션창 토글).
+    꺼진 버튼은 도구만 켜고, 켜진 선택 도구는 도구 없음, 켜진 그리기 도구는 옵션창."""
+    if not active:
+        return "tool"
+    return "popup" if key in _DRAW_TOOLS else "none"
+
+
+def _tail_offset(center_x: int, box_x: int, box_w: int, inset: int = _POP_TAIL_INSET) -> int:
+    """꼬리 끝의 상자 안 x — 버튼 가운데를 가리키되 상자 안쪽 inset까지만."""
+    return max(inset, min(int(center_x) - int(box_x), int(box_w) - inset))
+
+
+def _head_step_icon(head: int) -> QIcon:
+    """머리 단계 버튼 그림 — 같은 길이의 화살표, 머리만 단계 크기로."""
+    pm = QPixmap(30, 20)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    col = QColor(_ICON_DARK)
+    h = {14: 4.0, 22: 6.0, 32: 8.5}.get(head, 6.0)   # 그림 안 머리 반높이
+    tip = 27.0
+    p.setPen(QPen(col, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawLine(QPointF(4, 10), QPointF(tip - h * 1.2, 10))
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor(_TEXT))
-    d = max(3.0, min(float(width), 18.0))
-    p.drawEllipse(QPointF(11, 11), d / 2, d / 2)
+    p.setBrush(col)
+    p.drawPolygon(QPolygonF([QPointF(tip, 10), QPointF(tip - h * 1.6, 10 - h),
+                             QPointF(tip - h * 1.6, 10 + h)]))
     p.end()
     return QIcon(pm)
 
 
-class _StrokePreview(QWidget):
-    """옵션창 맨 위 미리보기 — 지금 색·두께로 그은 짧은 물결선(형광펜은 반투명)."""
+class _ColorDot(QAbstractButton):
+    """옵션창 색 칸 — 지름 16px 원, 고르면 바깥 2px 진한 고리. 흰색은 옅은 회색 테두리."""
 
-    def __init__(self, pen_fn, parent=None):
+    def __init__(self, color: QColor, parent=None):
         super().__init__(parent)
-        self._pen_fn = pen_fn   # () -> QPen (호스트 make_pen에 지금 도구를 넣은 것)
-        self.setFixedSize(170, 34)
+        self._color = QColor(color)
+        self.setCheckable(True)
+        self.setFixedSize(22, 22)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(self._color.name().upper())
 
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(self._pen_fn())
-        pen.setWidthF(min(pen.widthF(), 24.0))   # 아주 굵어도 칸 안에 보이게
-        p.setPen(pen)
-        h = self.height() / 2
-        path = QPainterPath(QPointF(14, h + 4))
-        path.cubicTo(55, h - 12, 100, h + 14, self.width() - 14, h - 4)
-        p.drawPath(path)
+        c = QPointF(self.width() / 2, self.height() / 2)
+        if self.isChecked():
+            p.setPen(QPen(QColor(_ICON_DARK), 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(c, 10, 10)
+        light = self._color.lightnessF() > 0.9
+        p.setPen(QPen(QColor("#c4c4c4"), 1) if light else Qt.PenStyle.NoPen)
+        p.setBrush(self._color)
+        p.drawEllipse(c, 8, 8)
+
+
+class _SizeDot(QWidget):
+    """슬라이더 옆 실제 크기 점 — 지금 색, 지름 = 값(칸보다 크면 칸 크기). 형광펜은 반투명."""
+
+    def __init__(self, spec_fn, parent=None):
+        super().__init__(parent)
+        self._spec_fn = spec_fn   # () -> (QColor, 지름)
+        self.setFixedSize(_SIZE_DOT_BOX, _SIZE_DOT_BOX)
+
+    def paintEvent(self, e):
+        color, d = self._spec_fn()
+        d = max(1.0, min(float(d), float(_SIZE_DOT_BOX)))
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = QPointF(self.width() / 2, self.height() / 2)
+        light = color.lightnessF() > 0.9 and color.alpha() == 255
+        p.setPen(QPen(QColor("#c4c4c4"), 1) if light else Qt.PenStyle.NoPen)
+        p.setBrush(color)
+        p.drawEllipse(c, d / 2, d / 2)
 
 
 class _ToolSettingsPopup(QWidget):
-    """도구 우클릭 미니패널(색·두께/글자·번호 크기, 화살표는 머리크기·방향도).
+    """도구 옵션창(색·슬라이더 하나, 도형은 모양, 화살표는 머리 단계·방향). 밝은 말풍선을
+    직접 그린다 — 창 바탕은 투명, paintEvent가 둥근 상자 + 연 버튼을 가리키는 아래 꼬리
+    (tail_x = 꼬리 끝의 창 안 x, _show_tool_settings가 정함).
 
     ⚠ 처음엔 Qt.WindowType.Popup으로 만들었으나(색 팔레트 팝업과 같은 패턴), Popup은
     떠 있는 동안 마우스 입력을 통째로 그랩한다 — 그래서 패널이 열린 채로 캔버스에서
@@ -2578,7 +2649,7 @@ class _ToolSettingsPopup(QWidget):
     (paste_hud.py의 비활성 창과 동일 패턴 — 클릭은 받되 편집기 창의 활성 상태·포커스는
     뺏지 않음)로 바꿔 해결했다. 대신 '바깥 클릭 시 자동으로 닫힘'을 Popup 그랩에 기대던
     것도 잃으므로, 도구 전환·캔버스 클릭 시 _EditorMixin._hide_tool_popups()가 명시적으로
-    닫는다(같은 버튼 재우클릭=토글은 그대로 유효). hidden_at은 그 토글 디바운스에 쓰인다.
+    닫는다(같은 버튼 다시 누름·우클릭 = 토글은 그대로 유효). hidden_at은 그 토글 디바운스에 쓰인다.
     `_refresh_from_defaults`(콜러블)는 _build_tool_settings_popup이 붙이는 속성 — 휠 조절
     등으로 바뀐 값을 다시 열 때 반영한다."""
 
@@ -2586,11 +2657,50 @@ class _ToolSettingsPopup(QWidget):
         super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
                           | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.hidden_at = 0.0
+        self.tail_x = None
 
     def hideEvent(self, event):
         self.hidden_at = time.monotonic()
         super().hideEvent(event)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        box = QRectF(0.5, 0.5, w - 1.0, h - 1.0 - _POP_TAIL)
+        path = QPainterPath()
+        path.addRoundedRect(box, 8, 8)
+        tx = float(self.tail_x if self.tail_x is not None else w / 2)
+        tail = QPainterPath()
+        tail.addPolygon(QPolygonF([QPointF(tx - _POP_TAIL, box.bottom() - 1),
+                                   QPointF(tx + _POP_TAIL, box.bottom() - 1),
+                                   QPointF(tx, h - 0.5)]))
+        tail.closeSubpath()
+        p.setPen(QPen(QColor(_POP_LINE), 1))
+        p.setBrush(QColor(_POP_BG))
+        p.drawPath(path.united(tail))
+
+
+class _ToolWheelFilter(QObject):
+    """그리기 도구 버튼 위 휠 → on_steps(버튼, 칸 수 — 위로 = +). 터치패드처럼 잘게 오는 휠은
+    모아 120마다 한 칸. 휠은 늘 삼킨다(툴바 뒤로 넘기지 않음)."""
+
+    def __init__(self, on_steps, parent=None):
+        super().__init__(parent)
+        self._on_steps = on_steps
+        self._acc = 0
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Wheel:
+            self._acc += event.angleDelta().y()
+            steps = int(self._acc / 120)
+            if steps:
+                self._acc -= steps * 120
+                self._on_steps(obj, steps)
+            return True
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -2799,17 +2909,19 @@ class _EditorMixin:
             btn.setCheckable(True)
             tip = f"{name} ({sc})"
             if key == "shape":
-                tip += f" — {sc}를 한 번 더: 네모·원 바꾸기\n우클릭: 모양·색·크기 설정"
+                tip += f" — {sc}를 한 번 더: 네모·원 바꾸기\n켜진 채 다시 누르기·우클릭: 모양·색·두께\n버튼 위 휠: 두께"
             elif key in _DRAW_TOOLS:
-                tip += "\n우클릭: 색·크기 설정"
+                tip += "\n켜진 채 다시 누르기·우클릭: 색·크기\n버튼 위 휠: 크기"
             btn.setToolTip(tip)
-            # 활성 도구를 다시 누르면 손 모드(None)로 복귀 — 토글(도형 버튼은 네모·원 어느 쪽이든 활성).
-            btn.clicked.connect(lambda _c, k=key: self.set_tool(None if self._tool_active(k) else k))
+            # 켜진 선택 도구를 다시 누르면 손 모드(None), 켜진 그리기 도구를 다시 누르면 옵션창 열기·닫기.
+            btn.clicked.connect(lambda _c, k=key, b=btn: self._on_tool_button_clicked(k, b))
             if key in _DRAW_TOOLS:
-                # 우클릭 미니패널 — 도구별 색·두께(화살표는 머리크기·방향도)를 독립 조절.
+                # 우클릭 옵션창 — 도구별 색·두께(화살표는 머리크기·방향도)를 독립 조절.
                 btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
                 btn.customContextMenuRequested.connect(
                     lambda _pos, k=key, b=btn: self._show_tool_settings(k, b))
+                # 버튼 위 휠 — 옵션창을 열며 슬라이더 값 ±1(도구는 안 바꿈)
+                btn.installEventFilter(_ToolWheelFilter(self._on_tool_button_wheel, btn))
             group.addButton(btn)
             tools.addWidget(btn)
             self._tool_buttons[key] = btn
@@ -2872,34 +2984,69 @@ class _EditorMixin:
         self._text_opts_bar.setVisible(False)
         return tools
 
-    # ---- 도구별 우클릭 미니패널 (색·두께/글자·번호 크기, 화살표는 머리크기·방향도) ------
+    def _on_tool_button_clicked(self, key: str, btn: QToolButton):
+        """툴바 도구 버튼 누름 — 꺼진 버튼은 도구 켜기, 켜진 선택 도구는 도구 없음(손 모드),
+        켜진 그리기 도구는 그 옵션창 열기·닫기(_tool_click_action)."""
+        action = _tool_click_action(key, self._tool_active(key))
+        if action == "popup":
+            btn.setChecked(True)   # 체크 버튼이라 누르면 꺼졌다 — 도구는 그대로라 되돌린다
+            self._show_tool_settings(key, btn)
+        else:
+            self.set_tool(None if action == "none" else key)
+
+    def _on_tool_button_wheel(self, btn, steps: int):
+        """그리기 도구 버튼 위 휠 — 그 도구 옵션창을 열고(다른 창은 닫음) 슬라이더 값 ±steps.
+        도구는 바꾸지 않는다. 값은 도구 기본값(DB annot_tool_defaults)에 저장된다."""
+        key = next((k for k, b in self._tool_buttons.items() if b is btn), None)
+        if key is None or key not in _DRAW_TOOLS:
+            return
+        pop = self._open_tool_settings(key, btn)
+        rk = self._resolve_tool_key(key)
+        field, _lab, _lo, _hi = _slider_spec(rk)
+        cur = self.tool_defaults[rk][field]
+        new = _wheel_value(rk, cur, steps)
+        if new != cur:
+            self._set_tool_size(rk, field, new)
+            pop._refresh_from_defaults()
+
+    # ---- 도구 옵션창 (켜진 도구 다시 누름·우클릭·버튼 위 휠로 연다) -----------------
     def _show_tool_settings(self, tool_key: str, btn: QToolButton):
-        """도구 아이콘 우클릭 → 그 도구 전용 미니패널 토글. 그랩하지 않는 패널이라(위
-        _ToolSettingsPopup 참고) 다른 패널이 열려 있으면 여기서 먼저 명시적으로 닫는다."""
+        """그 도구 옵션창 토글. 그랩하지 않는 창이라(위 _ToolSettingsPopup 참고) 다른 창이
+        열려 있으면 _open_tool_settings가 먼저 명시적으로 닫는다."""
+        pop = self._tool_popups.get(tool_key)
+        if pop is not None and pop.isVisible():
+            pop.hide()
+            return
+        if pop is not None and time.monotonic() - pop.hidden_at < 0.25:
+            return
+        self._open_tool_settings(tool_key, btn)
+
+    def _open_tool_settings(self, tool_key: str, btn: QToolButton):
+        """그 도구 옵션창을 연다(이미 열려 있으면 그대로) — 연 버튼 가운데 위에 두고 꼬리로
+        버튼을 가리킨다. 화면 밖으로 밀리면 상자만 옮기고 꼬리는 버튼을 계속 가리킨다."""
         pop = self._tool_popups.get(tool_key)
         if pop is None:
             pop = self._build_tool_settings_popup(tool_key)
             self._tool_popups[tool_key] = pop
         if pop.isVisible():
-            pop.hide()
-            return
-        if time.monotonic() - pop.hidden_at < 0.25:
-            return
+            return pop
         self._hide_tool_popups()
         pop._refresh_from_defaults()  # 휠 조절 등으로 바뀐 값이 있으면 반영 후 표시
         pop.adjustSize()
-        # 누른 버튼 가운데 위 4px, 그 화면의 사용 가능 영역 밖으로 나가지 않게
         top_mid = btn.mapToGlobal(QPoint(btn.width() // 2, 0))
         x = top_mid.x() - pop.width() // 2
-        y = top_mid.y() - pop.height() - 4
+        y = top_mid.y() - pop.height() - 2   # 꼬리 끝이 버튼 위 2px
         scr = QApplication.screenAt(top_mid) or btn.screen()
         if scr is not None:
             a = scr.availableGeometry()
             x = max(a.left(), min(x, a.right() - pop.width() + 1))
             y = max(a.top(), min(y, a.bottom() - pop.height() + 1))
+        pop.tail_x = _tail_offset(top_mid.x(), x, pop.width())
         pop.move(QPoint(x, y))
         pop.show()
         pop.raise_()
+        pop.update()
+        return pop
 
     def _hide_tool_popups(self):
         """열려 있는 도구 미니패널을 전부 닫는다 — 도구 전환·캔버스 클릭 시 호출해
@@ -2909,36 +3056,35 @@ class _EditorMixin:
                 pop.hide()
 
     def _build_tool_settings_popup(self, tool_key: str) -> QWidget:
-        """도구 하나의 미니패널: 색 프리셋+스포이드 한 줄 + 크기 슬라이더(들). 화살표는
-        두께 슬라이더 아래에 머리 크기 슬라이더 + 방향 토글 버튼을 추가로 담는다."""
+        """도구 하나의 옵션창. 줄 순서: (도형만) 모양 네모·원 → 색 7개 + 구분선 + 스포이드
+        → 슬라이더 하나(라벨·슬라이더·숫자·실제 크기 점) → (화살표만) 머리 3단계 + 구분선 + 방향."""
         pop = _ToolSettingsPopup(self)
-        pop.setObjectName("toolsettings")
-        pop.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         pop.setStyleSheet(
-            f"QWidget#toolsettings {{ background-color: {_SURFACE0};"
-            f" border: 1px solid {_BORDER}; border-radius: 6px; }}"
-            f"QToolButton {{ background-color: {_SURFACE0}; border: 1px solid {_BORDER};"
-            f" border-radius: 4px; padding: 2px; }}"
-            f"QToolButton:hover {{ background-color: {_SURFACE2}; }}"
-            f"QToolButton:checked {{ background-color: {_SURFACE2}; border: 2px solid {_TEXT}; }}"
-            f"QLabel {{ color: {_SUBTEXT}; background: transparent; }}"
+            "QToolButton { background-color: transparent; border: none;"
+            " border-radius: 5px; padding: 3px; }"
+            "QToolButton:hover { background-color: #e2e2e2; }"
+            f"QToolButton:checked {{ background-color: {_POP_CHECKED}; }}"
+            f"QLabel {{ color: {_POP_LABEL}; background: transparent; font-size: 12px; }}"
+            f"QLabel#popvalue {{ color: {_ICON_DARK}; }}"
+            "QSlider { background: transparent; }"   # 투명 창 위라 안 주면 검은 상자로 칠해진다
+            "QSlider::groove:horizontal { height: 4px; background: #d6d6d6; border-radius: 2px; }"
+            f"QSlider::sub-page:horizontal {{ height: 4px; background: {_ICON_DARK}; border-radius: 2px; }}"
+            "QSlider::handle:horizontal { width: 12px; height: 12px; margin: -5px 0;"
+            f" border-radius: 7px; background: #ffffff; border: 1px solid {_ICON_DARK}; }}"
         )
         col = QVBoxLayout(pop)
-        col.setContentsMargins(8, 8, 8, 8)
+        col.setContentsMargins(10, 8, 10, 8 + _POP_TAIL)
         col.setSpacing(6)
         rk = lambda: self._resolve_tool_key(tool_key)   # noqa: E731 — 도형 버튼이면 지금 모양 칸
 
         shape_btns: dict[str, QToolButton] = {}
         if tool_key == "shape":
             shape_row = QHBoxLayout()
-            shape_row.setSpacing(6)
-            shape_lab = QLabel("모양")
-            shape_lab.setFixedWidth(52)
-            shape_row.addWidget(shape_lab)
+            shape_row.setSpacing(4)
             for kind, kname in (("rect", "네모"), ("ellipse", "원")):
                 sb = QToolButton()
                 sb.setCheckable(True)
-                sb.setIcon(_tool_icon(kind))
+                sb.setIcon(_tool_icon(kind, neutral_override=_ICON_DARK))
                 sb.setIconSize(QSize(18, 18))
                 sb.setToolTip(kname)
                 sb.clicked.connect(lambda _c, kk=kind: self._choose_shape_in_panel(kk))
@@ -2947,27 +3093,20 @@ class _EditorMixin:
             shape_row.addStretch()
             col.addLayout(shape_row)
 
-        has_width = tool_key not in ("text", "badge")
-        preview = None
-        if has_width:
-            preview = _StrokePreview(lambda: self.make_pen(rk()), pop)
-            col.addWidget(preview)
-
-        preset_buttons: list[tuple[QColor, QToolButton]] = []
+        preset_buttons: list[tuple[QColor, _ColorDot]] = []
         color_row = QHBoxLayout()
-        color_row.setSpacing(4)
+        color_row.setSpacing(2)
         for hexs in _COLOR_PRESETS:
             c = QColor(hexs)
-            b = QToolButton()
-            b.setObjectName("swatch")
-            b.setFixedSize(20, 20)
-            b.setCheckable(True)
-            b.setToolTip(hexs)
-            b.clicked.connect(lambda _c, cc=c: self._set_tool_color(rk(), cc))
+            b = _ColorDot(c)
+            b.clicked.connect(lambda _c=False, cc=c: self._set_tool_color(rk(), cc))
             color_row.addWidget(b)
             preset_buttons.append((c, b))
+        color_row.addSpacing(4)
+        color_row.addWidget(self._vsep())
+        color_row.addSpacing(2)
         eyedrop_btn = QToolButton()
-        eyedrop_btn.setIcon(_tool_icon("eyedrop"))
+        eyedrop_btn.setIcon(_tool_icon("eyedrop", neutral_override=_ICON_DARK))
         eyedrop_btn.setIconSize(QSize(18, 18))
         eyedrop_btn.setToolTip("스포이드 — 화면에서 색 따오기 (클릭으로 선택, ESC 취소)")
         eyedrop_btn.clicked.connect(lambda _c=None, k=tool_key: self._pick_tool_eyedrop(k))
@@ -2975,87 +3114,71 @@ class _EditorMixin:
         col.addLayout(color_row)
         self._tool_preset_buttons[tool_key] = preset_buttons
 
-        sliders: dict[str, tuple[QSlider, QLabel]] = {}
-        dot_buttons: list[tuple[int, QToolButton]] = []
-        dir_btn = None
-        if tool_key == "text":
-            row, slider, val_lab = self._build_slider_row(
-                "크기", _MIN_FONT, _MAX_FONT, lambda v, k=tool_key: self._set_tool_size(k, "font", v))
-            col.addLayout(row)
-            sliders["font"] = (slider, val_lab)
-        elif tool_key == "badge":
-            row, slider, val_lab = self._build_slider_row(
-                "크기", _MIN_BADGE, _MAX_BADGE, lambda v, k=tool_key: self._set_tool_size(k, "size", v))
-            col.addLayout(row)
-            sliders["size"] = (slider, val_lab)
-        else:
-            dots = _MARKER_WIDTH_DOTS if tool_key == "marker" else _WIDTH_DOTS
-            dot_row = QHBoxLayout()
-            dot_row.setSpacing(4)
-            dot_lab = QLabel("두께")
-            dot_lab.setFixedWidth(52)
-            dot_row.addWidget(dot_lab)
-            for w in dots:
-                db = QToolButton()
-                db.setCheckable(True)
-                db.setIcon(_width_dot_icon(w))
-                db.setIconSize(QSize(22, 22))
-                db.setToolTip(f"두께 {w}")
-                db.clicked.connect(lambda _c, ww=w: (self._set_tool_size(rk(), "width", ww),
-                                                     pop._refresh_from_defaults()))
-                dot_row.addWidget(db)
-                dot_buttons.append((w, db))
-            dot_row.addStretch()
-            col.addLayout(dot_row)
-            row, slider, val_lab = self._build_slider_row(
-                "", _MIN_WIDTH, _MAX_WIDTH, lambda v: (self._set_tool_size(rk(), "width", v),
-                                                       pop._refresh_from_defaults()))
-            col.addLayout(row)
-            sliders["width"] = (slider, val_lab)
-            if tool_key == "arrow":
-                row2, slider2, val_lab2 = self._build_slider_row(
-                    "머리 크기", _MIN_HEAD, _MAX_HEAD, self._set_arrow_head_size)
-                col.addLayout(row2)
-                sliders["head"] = (slider2, val_lab2)
+        field, label, lo, hi = _slider_spec(rk())
 
-                dir_row = QHBoxLayout()
-                dir_row.setSpacing(6)
-                dir_lab = QLabel("방향")
-                dir_lab.setFixedWidth(52)
-                dir_btn = QToolButton()
-                dir_btn.setIconSize(QSize(28, 20))
-                dir_btn.setToolTip("화살표 방향 바꾸기 (선택된 화살표도 뒤집음)")
-                dir_btn.clicked.connect(self._toggle_arrow_dir_panel)
-                dir_row.addWidget(dir_lab)
-                dir_row.addWidget(dir_btn)
-                dir_row.addStretch()
-                col.addLayout(dir_row)
-                self._arrow_dir_panel_btn = dir_btn
+        def _dot_spec():
+            d = self.tool_defaults[rk()]
+            c = QColor(d["color"])
+            if rk() == "marker":
+                c.setAlpha(_MARKER_ALPHA)
+            return c, d[field]
+
+        size_dot = _SizeDot(_dot_spec)
+        row, slider, val_lab = self._build_slider_row(
+            label, lo, hi, lambda v: (self._set_tool_size(rk(), field, v), size_dot.update()))
+        row.addWidget(size_dot)
+        col.addLayout(row)
+
+        head_btns: list[tuple[int, QToolButton]] = []
+        dir_btn = None
+        if tool_key == "arrow":
+            head_row = QHBoxLayout()
+            head_row.setSpacing(2)
+            for step, sname in zip(_HEAD_STEPS, ("작게", "보통", "크게")):
+                hb = QToolButton()
+                hb.setCheckable(True)
+                hb.setIcon(_head_step_icon(step))
+                hb.setIconSize(QSize(30, 20))
+                hb.setToolTip(f"머리 {sname}")
+                hb.clicked.connect(lambda _c, s=step: (self._set_arrow_head_size(s),
+                                                       pop._refresh_from_defaults()))
+                head_row.addWidget(hb)
+                head_btns.append((step, hb))
+            head_row.addSpacing(2)
+            head_row.addWidget(self._vsep())
+            head_row.addSpacing(2)
+            dir_btn = QToolButton()
+            dir_btn.setIconSize(QSize(28, 20))
+            dir_btn.setToolTip("화살표 방향 바꾸기 (선택된 화살표도 뒤집음)")
+            dir_btn.clicked.connect(self._toggle_arrow_dir_panel)
+            head_row.addWidget(dir_btn)
+            head_row.addStretch()
+            col.addLayout(head_row)
+            self._arrow_dir_panel_btn = dir_btn
 
         def _refresh():
             d = self.tool_defaults[rk()]
             cur_name = QColor(d["color"]).name().lower()
             for c, b in preset_buttons:
-                sel = c.name().lower() == cur_name
                 b.blockSignals(True)
-                b.setChecked(sel)
+                b.setChecked(c.name().lower() == cur_name)
                 b.blockSignals(False)
-                b.setStyleSheet(self._swatch_style(c, sel))
-            for field, (slider, val_lab) in sliders.items():
-                v = d[field]
-                slider.blockSignals(True)
-                slider.setValue(v)
-                slider.blockSignals(False)
-                val_lab.setText(str(v))
-            if tool_key == "arrow" and dir_btn is not None:
-                dir_btn.setIcon(_arrow_dir_icon(d["head_at_end"]))
-            for w, db in dot_buttons:
-                db.setChecked(d.get("width") == w)
+                b.update()
+            v = d[field]
+            slider.blockSignals(True)
+            slider.setValue(v)
+            slider.blockSignals(False)
+            val_lab.setText(str(v))
+            size_dot.update()
+            if tool_key == "arrow":
+                near = _nearest_head_step(d["head"])
+                for step, hb in head_btns:
+                    hb.setChecked(step == near)
+                if dir_btn is not None:
+                    dir_btn.setIcon(_arrow_dir_icon(d["head_at_end"], _ICON_DARK))
             cur_kind = rk()
             for kind, sb in shape_btns.items():
                 sb.setChecked(kind == cur_kind)
-            if preview is not None:
-                preview.update()
 
         pop._refresh_from_defaults = _refresh
         _refresh()
@@ -3063,18 +3186,19 @@ class _EditorMixin:
         return pop
 
     def _build_slider_row(self, label: str, lo: int, hi: int, on_change):
-        """라벨 + 가로 슬라이더 + 값 표시로 이뤄진 한 줄. (layout, slider, value_label) 반환
-        — 값 라벨·슬라이더는 미니패널이 다시 열릴 때 최신값으로 갱신(_refresh_from_defaults)하는 데 쓰인다."""
+        """라벨 + 가로 슬라이더 + 숫자로 이뤄진 한 줄. (layout, slider, value_label) 반환
+        — 값 라벨·슬라이더는 옵션창이 다시 열릴 때 최신값으로 갱신(_refresh_from_defaults)하는 데 쓰인다."""
         row = QHBoxLayout()
         row.setSpacing(6)
         lab = QLabel(label)
-        lab.setFixedWidth(52)
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setMinimum(lo)
         slider.setMaximum(hi)
         slider.setFixedWidth(120)
         val_lab = QLabel("")
-        val_lab.setFixedWidth(28)
+        val_lab.setObjectName("popvalue")
+        val_lab.setFixedWidth(24)
+        val_lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         def _changed(v):
             val_lab.setText(str(v))
@@ -3089,7 +3213,7 @@ class _EditorMixin:
     def _set_tool_color(self, tool_key: str, color):
         self.tool_defaults[tool_key]["color"] = QColor(color).name()
         self._persist_tool_defaults()
-        for pop in self._tool_popups.values():   # 스와치 테두리·미리보기 획 갱신
+        for pop in self._tool_popups.values():   # 색 칸 고리·실제 크기 점 갱신
             pop._refresh_from_defaults()
         self._refresh_tool_icons()
         for it in self._scene.selectedItems():
@@ -3186,12 +3310,6 @@ class _EditorMixin:
         # 밝은 툴바 pill 위 구분선 — 옅은 회색(어두운 _BORDER는 밝은 바에서 너무 튐).
         sep.setStyleSheet("background-color: #d0d0d0;")
         return sep
-
-    @staticmethod
-    def _swatch_style(color: QColor, selected: bool) -> str:
-        border = f"2px solid {_TEXT}" if selected else f"1px solid {_BORDER}"   # 밝은 테두리(파랑 칸과 구분)
-        return (f"QToolButton#swatch {{ background-color: {color.name()};"
-                f" border: {border}; border-radius: 3px; }}")
 
     def _editor_stylesheet(self, view_border: str) -> str:
         """편집 UI 전체 스타일시트. view_border로 그래픽스뷰(이미지) 테두리 색을 바꿔
