@@ -78,6 +78,7 @@ pasteflow/
 │   ├── drag_paste.py       # _find_deepest_child·_is_chromium_window·_activate_and_send_ctrl_v
 │   ├── explorer.py         # _get_explorer_folder·_get_explorer_subfolder_at_cursor
 │   ├── desktop.py          # _get_desktop_path·_find_desktop_listview·_position_desktop_icon
+│   ├── click_through.py    # 라이브 판서용 — WS_EX_TRANSPARENT 클릭 통과 켜고 끄기·claim_topmost·foreground_window(전용 WinDLL)
 │   └── image_io.py         # _image_data_to_png_bytes·_save_image_to_folder·_save_image_to_drop_temp·_read_image_from_clipboard·_render_text_to_png·_qpixmap_to_dib·_default_capture_folder
 ├── app/                    # 앱 조립 — PasteFlowApp이 물려받는 기능별 믹스인 + 시작 코드(2026-11-16 main.py에서 글자 그대로 옮김). 믹스인끼리 같은 이름 금지(tests/test_app_structure.py). `__file__` 기준 경로는 저장소 루트까지 세 단계(옮기며 두 단계로 남아 자동 시작 VBS가 없는 `pasteflow/run.pyw`를 가리킨 적 있음, 2026-11-16)
 │   ├── data_paths.py       # _get_local_data_dir·_resolve_db_path
@@ -85,11 +86,12 @@ pasteflow/
 │   ├── migrations.py       # 시작 시 1회 이전 _migrate_* 6개
 │   ├── signals.py          # _SignalBridge(훅·워커 스레드 → 메인)
 │   ├── dialog_style.py     # _MSGBOX_DARK_STYLE
-│   └── 믹스인 16개         # clipboard_flow(복사·큐·벌크) · capture(OCR 요청·영역 캡처) · recording · progress(진행 칩) · ocr · image_items · pin · stt · panel · items · preview · ai_browser · drag · settings · autostart · lifecycle(포그라운드·종료·IPC)
+│   └── 믹스인 17개         # clipboard_flow(복사·큐·벌크) · capture(OCR 요청·영역 캡처) · recording · progress(진행 칩) · ocr · image_items · pin · live_draw(화면 판서 단축키·칩) · stt · panel · items · preview · ai_browser · drag · settings · autostart · lifecycle(포그라운드·종료·IPC)
 └── ui/
     ├── panel.py            # 전체 클립보드 패널
     ├── image_preview.py    # 이미지 미리보기 팝업 (다중 창 지원, Space로 인라인 주석 편집 진입)
-    ├── image_annotator.py  # 이미지 주석 편집기 (QGraphicsScene — 도형·선·화살표·펜·텍스트·번호)
+    ├── image_annotator.py  # 이미지 주석 편집기 (QGraphicsScene — 도형·선·화살표·펜·텍스트·번호·형광펜, 판서 전용 사라지는 펜)
+    ├── live_draw.py        # 라이브 화면 판서 창 — 커서 모니터를 덮는 투명 창(배경 알파 1)에 _EditorMixin 호스트, 그리기↔앱 쓰기(클릭 통과), Ctrl+C=화면+판서 캡처
     ├── text_preview.py     # 텍스트 미리보기 팝업
     ├── memo_window.py      # 빠른 메모창 — 메모장 텍스트 항목을 쓰는 동안 자동 저장(일반 창, Esc·Ctrl+W=닫기, Ctrl+T·오른쪽 위 핀=항상 위, Ctrl+휠/Ctrl+0=글자 크기, 우클릭=공통 메뉴)
     ├── toast.py            # 우하단 스택형 토스트 (복사 알림·시작·OCR)
@@ -116,7 +118,8 @@ tests/
 ├── test_text_preview.py
 ├── test_crypto.py
 ├── test_paste_queue_stateful.py  # 순차 붙여넣기 규칙 조합 시험(hypothesis — 사건을 무작위 순서로)
-└── test_check_file_length.py     # tools/check_file_length.py 시험
+├── test_check_file_length.py     # tools/check_file_length.py 시험
+└── test_annotator_tools.py       # 주석 편집기 도구 표(형광펜·사라지는 펜 기본값 채우기·숫자 키 9·0)
 
 tools/
 ├── make_icon.py
@@ -165,13 +168,14 @@ docs/
 - **`panel.py`** — 메모장(고정) + 히스토리 패널(검색 없음). 메모장 제목 옆 `+`=새 메모, 제목 우클릭=새 메모·메모장 비우기(확인은 main). 텍스트 `수정`과 메모장 텍스트 항목의 `Space`·더블클릭은 메모창으로 연다(히스토리는 미리보기 — 열기만 하고 붙여넣지 않음). 메모창에서 쓰는 내용은 `update_item_text`로 그 한 줄만 실시간 반영(전체 refresh는 깜빡임). 메모 삭제·메모장 비우기 직후 토스트(2초, 복사 알림과 같음)를 누르면 되돌린다(`db.restore_memos`, 토스트 `on_click`) — 빈 메모창을 닫아 저절로 지울 때는 안 띄움. 잠긴 항목은 글자 칸 안 자물쇠 표시, `l`로 잠금 토글, `Del`·`p`는 막고 토스트. 클릭=선택(밝은 회색 배경+굵은 테두리 — 테두리는 큐 안이면 코랄, 밖이면 흰색이라 큐 표시와 안 섞임), 항목 왼쪽 번호 칸은 평소 회색 일련번호(섹션마다 위에서 1부터), 큐 안이면 그 자리에 코랄 테두리 큐 순서 배지(모두 같은 모양, 붙인 것은 ✓ — `_apply_num_style`). 클릭·Ctrl+클릭·Shift+클릭은 고르기만 하고 큐·클립보드는 건드리지 않는다 — 큐는 `c`로만 만든다(2026-11-14). 키(`c`=`Ctrl+C` 누를 때마다 그 항목을 큐 맨 뒤에 붙여 번호가 늘어남(이미 큐에 있으면 그 항목만 빼기, 일부 붙인 큐면 새로 시작 — `main._on_queue_toggle`) — Ctrl·Shift로 여러 개 골랐으면 고른 것을 화면 위→아래로 큐 맨 뒤에 한꺼번에(`main._on_queue_append_ids`, 이미 있는 건 건너뜀), 우클릭 `큐에 추가`·`큐에서 빼기`·`고른 N개 큐에 추가`도 같음(우클릭 `복사`는 없앰). 큐를 바꿀 때마다 클립보드 = 큐 맨 끝 항목(`main._sync_clipboard_to_queue`)이라 일반 Ctrl+V로도 붙고, 일반 Ctrl+V는 큐를 비우지 않는다·`Shift+C` 맨 위(최신/첫 고정)부터 여기까지 큐 = 우클릭 `여기부터 맨 위까지 큐`·`r` 남은 큐 순서 뒤집기·`Esc` 큐가 있으면 큐 비우기, 없으면 패널 닫기 — 큐 순서는 모두 화면 위→아래(2026-11-14)·`Space`·`Enter` 붙여넣기·`p`·`l`·`s`·`o`·`g`·`Del`·`↑↓`). 단축키 대상 `_kbd_focus_id`는 클릭·방향키로만 정함(hover 금지). 더블클릭 붙여넣기 없음(더블클릭은 열기). fake drag로 외부 앱 붙여넣기(Alt+드래그 이미지=경로 텍스트) 및 재정렬. 자동 닫기 📌(기본 OFF). 항목 최대 5줄(높이 공식은 「설계 규칙」), 자동 줄넘김까지 쳐서 넘으면 마지막 줄 오른쪽에 회색 `+N줄` 칩(`_preview_layout`). 항목 더블클릭=열기(붙여넣기는 여전히 없음).
 - **`menu_style.py`** / **`menu_icons.py`** — 우클릭 메뉴 공통: `make_menu()`·`menu.add(이름\t단축키, 아이콘, danger=)`. 조건부 항목은 숨기지 말고 비활성. 묶음 순서: 보기·큐 | 꺼내기 | 다루기 | 고정 | 삭제·닫기.
 - **`image_preview.py`** — 이미지 미리보기·핀 창(다중 창, `native=True`면 1:1, `place_rect`로 제자리 덮기). 우클릭: 복사·경로 복사·OCR·번역·Gemini 질문·복제·주석 편집·닫기 — 주석이 있으면 `_effective_item()` 평탄화본 대상. Space로 인라인 주석 편집, 툴바는 하단 예약 strip(토글 시 창 크기 불변).
-- **`image_annotator.py`** — 주석 편집기(`_EditorMixin`·`_AnnotatorView`·도형 아이템 + `_HandleResizeMixin`). 도구 1~8(수식키 없이), 도구별 우클릭 미니패널(색·크기·화살표 머리/방향, DB `annot_tool_defaults`), 3차 베지어 화살표 + 도형 테두리 스냅, 크기조절(우하단)·회전(좌상단) 핸들(잡기 판정 24px), `flatten_scene_to_png`.
+- **`image_annotator.py`** — 주석 편집기(`_EditorMixin`·`_AnnotatorView`·도형 아이템 + `_HandleResizeMixin`). 도구 1~8과 9 형광펜(반투명 `_MARKER_ALPHA`)·0 사라지는 펜(호스트가 `_allow_fade_pen`을 켤 때만 — 판서 창만, 되돌리기 목록 밖, 1초 뒤 0.5초 흐려짐)(수식키 없이), 도구별 우클릭 미니패널(색·크기·화살표 머리/방향, DB `annot_tool_defaults`), 3차 베지어 화살표 + 도형 테두리 스냅, 크기조절(우하단)·회전(좌상단) 핸들(잡기 판정 24px), `flatten_scene_to_png`.
 - **`text_preview.py`** — 평문 미리보기(`QPlainTextEdit`, 스크롤 없이 전부 보이게 크기 계산, 우클릭 전체 복사·수정(→메모창)·닫기).
 - **`memo_window.py`** — 빠른 메모창(일반 창). 0.5초 멈추면 저장, 닫을 때 저장, 빈 채로 닫으면 삭제. Esc·Ctrl+W 닫기, 항상 위로 열림(포스트잇처럼 띄워 두는 용도, Ctrl+T·오른쪽 위 핀 버튼으로 창마다 끄고 켬, 저장 안 함 — 전용 WinDLL `SetWindowPos`), 우클릭은 `make_menu`(Qt 기본 메뉴는 창 배경을 물려받아 글자가 묻혔음), Ctrl+휠·Ctrl+0 글자 크기. 글자 크기·마지막 창 자리(`saveGeometry`)는 DB `memo_window_prefs`(JSON)에 저장돼 다음에도 그대로 연다(`set_prefs`/`prefs_saver`) — 단, 위치는 기억하지 않고 늘 마우스가 있는 모니터 정중앙에 연다(`show_centered`, 크기만 기억, 여러 개면 24px 계단 — 가로·세로·해상도가 다른 모니터를 섞어 써서 '모니터 왼쪽 위 기준 상대 위치'는 세로 모니터에서 가장자리로 밀렸다). 열 때 `AttachThreadInput`으로 포그라운드 잠금을 우회한 뒤 `BringWindowToTop`으로 맨 위에 올리고, Windows 열림 효과(~0.3초)는 `DWMWA_TRANSITIONS_FORCEDISABLED`로 끈다. DB는 시그널로 main에 넘김. `_quit`에서 `close_all()`을 `db.close()`보다 먼저.
 - **`toast.py`** — 우하단 스택 토스트(주 모니터, 최대 5개, 클릭 시 빠른 닫기 — `on_click`을 주면 클릭 때 한 번 호출), `image_path`/`image_bytes` 썸네일, 커서 앵커·중앙 칩(`anchor`, `center=True`, 클릭 통과), 지속형(`duration_ms=0` + `set_message`/`dismiss`). 복사 알림은 `Q{n}` 배지 + 썸네일(원본 `image_data` 우선), 아이콘 없음.
 - **`paste_hud.py`** — 순차 붙여넣기 진행 HUD(비활성 창, ✓▶·, ✕ 취소 → `_on_cancel_paste_queue`).
 - **`settings_dialog.py`** — 왼쪽 목록 내비(`일반`/`붙여넣기`/`캡처·녹화`/`AI`, 실제 페이지는 탭 바를 숨긴 `QTabWidget`), 기능 카드마다 그 기능의 단축키·옵션. AI 탭: `AI 연결 (OpenAI 호환 API)`(Base URL·API 키·모델조회·연결 테스트 = 연결+OCR 모델+크레딧), OCR, 음성 입력(STT 모델은 Gemini만, 마이크 테스트). 창-모달(`WindowModal`) + `_open_settings` 재진입 가드. 녹화 중 훅 정지는 `recording_active` → `done()`/`closeEvent`에서도 해제. 모델 콤보는 editable이라 표시 텍스트 = 저장값(계열 헤더는 비활성, 들여쓰기는 델리게이트로). 디자인 비교 하네스 `tools/settings_bakeoff.py`.
 - **`nav_icons.py`** — 설정창 아이콘(SVG 문자열 내장 — spec datas 불필요).
+- **`live_draw.py`** — 라이브 화면 판서(`LiveDrawOverlay`). 단축키(기본 Ctrl+Shift+D) 한 번에 커서 모니터를 덮고 그리기, 다시 누르면 앱 쓰기(그림은 남고 `WS_EX_TRANSPARENT`로 클릭 통과, 모니터 오른쪽 위 「판서 중」 칩 — `app/live_draw.py`), 또 누르면 그리기. 그리기 상태 Esc=지우고 닫기(단계적 취소는 뷰가), Space=아무것도 안 함, Ctrl+C·툴바 복사·저장=툴바를 숨기고 `grabWindow`로 화면+판서 한 장 → `_on_capture_region`(영역 캡처와 같은 저장). 배경을 알파 1로 칠해야 클릭을 받는다(알파 0 화소는 Windows가 아래 창으로 넘김 — `spikes/live_draw/README.md` 실측). 툴바는 작업 표시줄 위 가운데, 왼쪽 손잡이로 창 안에서 이동.
 - **`capture_overlay.py`** — 마그네틱 영역 캡처(아래 「캡처 동작」). **`ocr_overlay.py`** — OCR 영역 선택(모니터별 위젯). 손을 뗄 때 Shift가 눌려 있으면 번역(`region_captured(pixmap, translate)`), 끄는 동안 선택 영역 위에 '번역' 꼬리표. **`record_chooser.py`** — 녹화 종류 선택 바. **`ai_query.py`** — 이미지 우클릭 "Gemini에게 질문" 입력창(비모달·TOPMOST, 이미지 1장, Tab 순환·키워드 접두어). **`stt_indicator.py`** — 녹음 중 이퀄라이저 pill(클릭=정지). **`tray.py`** — 트레이(좌클릭 패널, 우클릭 패널·설정·종료).
 
 ### 캡처 동작 (Alt+F2 · Alt+F3)
@@ -214,6 +218,7 @@ docs/
 | ctrl+shift+[ *(기본값, 설정 가능 — 2026-09-25부터; 예전엔 ctrl+shift+])* | 순차 경로 붙여넣기 전체 자동주입 — Ctrl+Shift+P의 '벌크' 버전. 이미지는 경로 텍스트로, 그 외는 원본 그대로 순서대로 자동 주입 (suppress) | WH_KEYBOARD_LL (paste_interceptor) — 감지만, 반복 주입 루프는 main._bulk_paste_step |
 | alt+f3 *(기본값, 설정 가능)* | 핀 — 순차 큐에 다음 항목이 있으면 그걸(Ctrl+Shift+V와 큐 공유), 없으면 클립보드 이미지/텍스트를 화면에 떠 있는 창으로 띄우기. 2026-09-25 옛 순차 핀(Alt+Shift+F3)을 흡수 (suppress) | WH_KEYBOARD_LL (paste_interceptor) |
 | alt+\` *(기본값, 설정 가능 — 2026-10-05 도입)* | 새 메모 — 메모장 맨 위에 새 메모를 만들고 메모창을 연다 (suppress) | WH_KEYBOARD_LL (paste_interceptor) |
+| ctrl+shift+d *(기본값, 설정 가능 — 2026-11-25 도입)* | 라이브 화면 판서 — 꺼져 있으면 커서 모니터에 켜기(그리기), 켜져 있으면 그리기↔앱 쓰기(클릭 통과) 전환. 끝내기는 그리기 상태의 Esc (suppress) | WH_KEYBOARD_LL (paste_interceptor) |
 | alt+f2 *(기본값, 설정 가능)* | 영역 캡처 → 클립보드(DIB)+파일 저장 (suppress). 오버레이 안에서 Space=실제 커서 포함 토글 | WH_KEYBOARD_LL (paste_interceptor) |
 | PrintScreen *(설정 체크박스, 기본 켜짐 — 2026-08-12 도입, 2026-08-25 기본값 켜짐으로 전환)* | 영역 캡처(Alt+F2)의 대체 트리거 — 수식키(Ctrl/Shift/Alt/Win) 없이 단독으로 눌렸을 때만 동일한 `on_capture` 콜백 발동, Alt+PrtScn·Win+PrtScn 등 OS 조합은 그대로 통과. 켜면 OS 기본 PrtScn(전체화면 클립보드 복사) 동작을 suppress로 대체 | WH_KEYBOARD_LL (paste_interceptor) |
 | ctrl+shift+r *(기본값, 설정 가능 — 2026-09-25 GIF·영상 통합)* | 녹화 — 영역 선택 후 뜨는 [GIF] [영상] 바에서 골라 라이브 녹화 → 파일 저장·경로 복사 (G/V/Enter=지난 선택/ESC) (suppress) | WH_KEYBOARD_LL (paste_interceptor) |

@@ -260,6 +260,7 @@ class PasteInterceptor:
         on_bulk_path_paste: Optional[Callable[[], None]] = None,
         on_pin_image: Optional[Callable[[], None]] = None,
         on_new_memo: Optional[Callable[[], None]] = None,
+        on_live_draw: Optional[Callable[[], None]] = None,
         on_capture: Optional[Callable[[], None]] = None,
         on_record: Optional[Callable[[], None]] = None,
         on_stt_start: Optional[Callable[[], None]] = None,
@@ -277,6 +278,7 @@ class PasteInterceptor:
         self.on_bulk_path_paste = on_bulk_path_paste
         self.on_pin_image = on_pin_image
         self.on_new_memo = on_new_memo
+        self.on_live_draw = on_live_draw
         self.on_capture = on_capture
         self.on_record = on_record
         self.on_stt_start = on_stt_start
@@ -332,6 +334,11 @@ class PasteInterceptor:
         self._memo_need_ctrl: bool = False
         self._memo_need_shift: bool = False
         self._memo_need_alt: bool = False
+        # 라이브 화면 판서 단축키 (기본 Ctrl+Shift+D) — 켜기·그리기↔앱 쓰기 전환
+        self._livedraw_vk: int = 0
+        self._livedraw_need_ctrl: bool = False
+        self._livedraw_need_shift: bool = False
+        self._livedraw_need_alt: bool = False
         # 영역 캡처 단축키 (패널 토글과 동일 구조)
         self._capture_vk: int = 0
         self._capture_need_ctrl: bool = False
@@ -370,8 +377,9 @@ class PasteInterceptor:
         self._hook_proc = HOOKPROC(self._low_level_keyboard_proc)
 
     # 포그라운드 잠금 해제(AllowSetForegroundWindow)가 필요한 동작 — 지금까지 OCR·핀·메모·캡처·
-    # PrintScreen 캡처·녹화에서 했던 것과 같다.
-    _FOREGROUND_ACTIONS = frozenset({"ocr", "pin", "memo", "capture", "capture_printscreen", "record"})
+    # PrintScreen 캡처·녹화에서 했던 것과 같다. 판서도 그리기 상태에서 포커스를 받아야 한다.
+    _FOREGROUND_ACTIONS = frozenset({"ocr", "pin", "memo", "live_draw", "capture", "capture_printscreen",
+                                     "record"})
 
     def _action_callback(self, action: str):
         """동작 이름 → 지금까지 그 단축키가 부르던 콜백(없으면 None). stt_repeat는 콜백 없음."""
@@ -383,6 +391,7 @@ class PasteInterceptor:
             "bulk_path_paste": self.on_bulk_path_paste,
             "pin": self.on_pin_image,
             "memo": self.on_new_memo,
+            "live_draw": self.on_live_draw,
             "capture": self.on_capture,
             "capture_printscreen": self.on_capture,
             "record": self.on_record,
@@ -401,6 +410,8 @@ class PasteInterceptor:
                                      self._bulkpath_need_shift, self._bulkpath_need_alt),
             "pin": Combo(self._pin_vk, self._pin_need_ctrl, self._pin_need_shift, self._pin_need_alt),
             "memo": Combo(self._memo_vk, self._memo_need_ctrl, self._memo_need_shift, self._memo_need_alt),
+            "live_draw": Combo(self._livedraw_vk, self._livedraw_need_ctrl, self._livedraw_need_shift,
+                               self._livedraw_need_alt),
             "capture": Combo(self._capture_vk, self._capture_need_ctrl, self._capture_need_shift,
                              self._capture_need_alt),
             "record": Combo(self._record_vk, self._record_need_ctrl, self._record_need_shift, self._record_need_alt),
@@ -503,6 +514,20 @@ class PasteInterceptor:
             self._memo_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
         else:
             self._memo_vk = 0
+        self._rebuild_combos()
+
+    def set_live_draw_hotkey(self, hotkey_str: str):
+        """라이브 화면 판서 단축키 설정 — 켜기, 그다음부터 그리기↔앱 쓰기 전환."""
+        parts = hotkey_str.lower().replace(" ", "").split("+")
+        self._livedraw_need_ctrl  = any(p in ("ctrl", "control") for p in parts)
+        self._livedraw_need_shift = "shift" in parts
+        self._livedraw_need_alt   = "alt" in parts
+        key_parts = [p for p in parts if p not in ("ctrl", "control", "shift", "alt")]
+        if key_parts:
+            key = key_parts[-1]
+            self._livedraw_vk = _SPECIAL_KEY_MAP.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        else:
+            self._livedraw_vk = 0
         self._rebuild_combos()
 
     def set_capture_hotkey(self, hotkey_str: str):

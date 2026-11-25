@@ -67,7 +67,13 @@ _ICON_DARK = "#3a3a3a"
 # 그리기 도구가 만드는 도형(릴리스 시 너무 작으면 폐기 대상)
 _SHAPE_TOOLS = ("rect", "ellipse", "line", "arrow")
 # 현재 색으로 아이콘을 칠하는 도구(나머지는 중립색)
-_DRAW_TOOLS = ("rect", "ellipse", "line", "arrow", "pen", "text", "badge")
+_DRAW_TOOLS = ("rect", "ellipse", "line", "arrow", "pen", "text", "badge", "marker", "fade")
+# 손으로 긋는 펜 계열 — 주석 위에서도 항상 그리고(선택하지 않음), 같은 _PathItem을 만든다.
+# marker=형광펜(반투명 굵은 선), fade=사라지는 펜(판서 전용 — 호스트가 _allow_fade_pen을 켤 때만)
+_PEN_TOOLS = ("pen", "marker", "fade")
+_MARKER_ALPHA = 90            # 형광펜 불투명도(0~255) — 약 35%, 아래 글자가 비쳐 보이게
+_MARKER_DEFAULT_WIDTH = 18    # 형광펜 기본 두께(펜 기본 6의 3배)
+_FADE_HOLD_MS, _FADE_OUT_MS = 1000, 500   # 사라지는 펜: 손 뗀 뒤 머무는 시간 · 흐려지는 시간
 
 # 텍스트 배경 선택지: 투명 / 흰 / 회 / 검 / 반투명 검 (자막·스티커 느낌). 스와치로 직접 선택.
 _TEXT_BG_OPTIONS = [
@@ -82,7 +88,8 @@ _TEXT_BG_OPTIONS = [
 _TOOLS = [
     ("select", "선택", "1"), ("rect", "네모", "2"), ("arrow", "화살표", "3"),
     ("text", "텍스트", "4"), ("ellipse", "원", "5"), ("line", "선", "6"),
-    ("pen", "펜", "7"), ("badge", "번호", "8"),
+    ("pen", "펜", "7"), ("badge", "번호", "8"), ("marker", "형광펜", "9"),
+    ("fade", "사라지는 펜", "0"),
 ]
 
 
@@ -173,6 +180,24 @@ def _tool_icon(tool: str, color=None, neutral_override=None) -> QIcon:
         path = QPainterPath(QPointF(4, 16))
         path.cubicTo(8, 5, 14, 21, 18, 7)
         p.drawPath(path)
+    elif tool == "marker":
+        # 반투명 굵은 띠 + 그 위 짧은 진한 선(형광펜 촉)
+        band = QColor(col)
+        band.setAlpha(140)
+        p.setPen(QPen(band, 7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+        p.drawLine(3, 15, 19, 15)
+        p.setPen(QPen(col, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(13, 4, 18, 9)
+    elif tool == "fade":
+        # 점점 옅어지는 물결 — 사라지는 펜
+        for i, a in enumerate((255, 150, 70)):
+            c = QColor(col)
+            c.setAlpha(a)
+            p.setPen(QPen(c, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            x = 3 + i * 6
+            path = QPainterPath(QPointF(x, 14))
+            path.quadTo(x + 3, 6, x + 6, 12)
+            p.drawPath(path)
     elif tool == "text":
         f = QFont()
         f.setBold(True)
@@ -919,7 +944,16 @@ class _PathItem(_HandleResizeMixin, QGraphicsPathItem):
     def clone(self):
         c = _PathItem(QPainterPath(self.path()))
         c.setPen(QPen(self.pen()))
+        c.tool_kind = getattr(self, "tool_kind", "pen")
         return self._copy_common_to(c)
+
+    def apply_color(self, color):
+        # 형광펜은 반투명이 본질이라 색만 바꾸고 불투명도는 그대로 둔다(펜은 255라 그대로).
+        pen = self.pen()
+        c = QColor(color)
+        c.setAlpha(pen.color().alpha())
+        pen.setColor(c)
+        self.setPen(pen)
 
     def _content_rect(self):
         # _LineItem과 동일 사이클 방지: QGraphicsPathItem.boundingRect()는 brush가 NoBrush일 때
@@ -1724,11 +1758,44 @@ def _nearest_border(item, scene_pt):
     return sp, QPointF(nd.x() / L, nd.y() / L)
 
 
+def _fade_out_later(item: QGraphicsItem):
+    """사라지는 펜 획 — _FADE_HOLD_MS 머문 뒤 _FADE_OUT_MS 동안 흐려지며 장면에서 빠진다.
+    메인 스레드(뷰의 마우스 이벤트)에서만 부른다. 애니메이션은 아이템에 붙여 둬 GC를 막는다.
+    그사이 판서 창이 닫혀 아이템이 지워졌으면 아무것도 안 한다(지운 객체를 부르면 슬롯 예외)."""
+    from PyQt6 import sip
+    from PyQt6.QtCore import QVariantAnimation
+
+    def _start():
+        if sip.isdeleted(item) or item.scene() is None:
+            return
+        anim = QVariantAnimation()
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setDuration(_FADE_OUT_MS)
+        anim.valueChanged.connect(lambda v: None if sip.isdeleted(item) else item.setOpacity(float(v)))
+
+        def _done():
+            # item._fade_anim은 비우지 않는다 — 신호를 내는 중인 애니메이션의 마지막 참조를 놓게 된다.
+            # 장면에서 뺀 아이템과 애니메이션은 서로만 가리키므로 나중에 GC가 함께 치운다.
+            if sip.isdeleted(item):
+                return
+            sc = item.scene()
+            if sc is not None:
+                sc.removeItem(item)
+
+        anim.finished.connect(_done)
+        item._fade_anim = anim
+        anim.start()
+
+    QTimer.singleShot(_FADE_HOLD_MS, _start)
+
+
 class _AnnotatorView(QGraphicsView):
     _SHORTCUTS = {
         Qt.Key.Key_1: "select", Qt.Key.Key_2: "rect", Qt.Key.Key_3: "arrow",
         Qt.Key.Key_4: "text", Qt.Key.Key_5: "ellipse", Qt.Key.Key_6: "line",
-        Qt.Key.Key_7: "pen", Qt.Key.Key_8: "badge",
+        Qt.Key.Key_7: "pen", Qt.Key.Key_8: "badge", Qt.Key.Key_9: "marker",
+        Qt.Key.Key_0: "fade",
     }
 
     def __init__(self, scene: QGraphicsScene, owner):
@@ -2072,7 +2139,7 @@ class _AnnotatorView(QGraphicsView):
 
         # 도형 도구는 기존 주석 위를 클릭하면 그리기 대신 선택/이동.
         # 단, 펜은 빽빽이 겹쳐 그리므로 항상 그린다(펜 선의 선택/이동은 V 도구로).
-        if tool != "pen" and not self._is_empty_area(event.position().toPoint()):
+        if tool not in _PEN_TOOLS and not self._is_empty_area(event.position().toPoint()):
             self._snapshot_movable()
             return super().mousePressEvent(event)
 
@@ -2101,10 +2168,11 @@ class _AnnotatorView(QGraphicsView):
             self._arrow_snap_exit = None   # 자유 시작(테두리 스냅 아님) → 직선/자유 곡선
             self._arrow_tip_snap = None
             self._begin_draw(it)
-        elif tool == "pen":
+        elif tool in _PEN_TOOLS:
             self._path = QPainterPath(sp)
             it = _PathItem(self._path)
-            it.setPen(owner.make_pen("pen"))
+            it.setPen(owner.make_pen(tool))
+            it.tool_kind = tool
             self._begin_draw(it)
         elif tool == "text":
             td = owner.tool_defaults["text"]
@@ -2184,8 +2252,8 @@ class _AnnotatorView(QGraphicsView):
             vp.setCursor(Qt.CursorShape.SizeAllCursor)       # 편집 중 텍스트 테두리 — 이동
         elif tool == "arrow" and self._snap_preview is not None:
             vp.setCursor(Qt.CursorShape.CrossCursor)          # 테두리 스냅 — 화살표 시작(도형 위여도)
-        elif tool == "pen":
-            vp.setCursor(Qt.CursorShape.CrossCursor)         # 펜 — 주석 위에서도 항상 그리기
+        elif tool in _PEN_TOOLS:
+            vp.setCursor(Qt.CursorShape.CrossCursor)         # 펜 계열 — 주석 위에서도 항상 그리기
         elif not self._is_empty_area(view_pos):
             vp.setCursor(Qt.CursorShape.SizeAllCursor)       # 주석 위 — 선택/이동
         elif tool is None:
@@ -2232,7 +2300,7 @@ class _AnnotatorView(QGraphicsView):
                 self._temp.setRect(QRectF(self._start, sp).normalized())
             elif tool == "line":
                 self._temp.setLine(QLineF(self._start, sp))
-            elif tool == "pen" and self._path is not None:
+            elif tool in _PEN_TOOLS and self._path is not None:
                 self._path.lineTo(sp)
                 self._temp.setPath(self._path)
             return
@@ -2273,6 +2341,9 @@ class _AnnotatorView(QGraphicsView):
             if discard:
                 self.scene().removeItem(item)  # 클릭만 한 경우 폐기
                 self.scene().clearSelection()  # 빈 공간 클릭 = 선택 해제
+            elif tool == "fade":
+                # 사라지는 펜 — 선택·이동 불가, 되돌리기 목록에 안 넣고 잠시 뒤 흐려지며 빠진다
+                _fade_out_later(item)
             else:
                 item.setFlags(
                     QGraphicsItem.GraphicsItemFlag.ItemIsMovable
@@ -2282,7 +2353,7 @@ class _AnnotatorView(QGraphicsView):
                 # 방금 그린 주석을 바로 선택 — 추가 클릭 없이 이동/색·두께 수정 가능.
                 # 단 펜은 연속 그리기라 선택 네모가 거슬리므로 선택하지 않는다.
                 self.scene().clearSelection()
-                if tool != "pen":
+                if tool not in _PEN_TOOLS:
                     item.setSelected(True)
             return
         self._commit_move()   # 드래그 이동이 있었으면 undo에 기록
@@ -2476,6 +2547,9 @@ class _EditorMixin:
     # _persist_cb(main 등록)로 DB에 기록. (미등록이면 세션 내 기억만.)
     _tool_defaults = None   # dict[str, dict] — 클래스 변수, 최초 사용 시 _hardcoded_tool_defaults()로 채움
     _persist_cb = None      # callable(json_str) → DB 저장 (main이 시작 시 1회 등록)
+    # 사라지는 펜(fade)은 판서 창(ui/live_draw.py)만 켠다 — 이미지 주석은 남기려고 그리는 것이라
+    # 미리보기 편집기에선 툴바에 없고 키 0도 무시한다.
+    _allow_fade_pen = False
 
     @staticmethod
     def _hardcoded_tool_defaults() -> dict:
@@ -2488,6 +2562,8 @@ class _EditorMixin:
                         "head": _DEFAULT_HEAD, "head_at_end": True},
             "text":    {"color": _DEFAULT_COLOR, "font": _DEFAULT_FONT},
             "badge":   {"color": _DEFAULT_COLOR, "size": _DEFAULT_BADGE},
+            "marker":  {"color": "#FFCC00", "width": _MARKER_DEFAULT_WIDTH},
+            "fade":    {"color": _DEFAULT_COLOR, "width": _DEFAULT_WIDTH},
         }
 
     @classmethod
@@ -2561,6 +2637,8 @@ class _EditorMixin:
         group = QButtonGroup(self)
         group.setExclusive(False)  # '0개 선택'(손 모드) 허용 — set_tool이 체크를 직접 관리
         for key, name, sc in _TOOLS:
+            if key == "fade" and not self._allow_fade_pen:
+                continue
             btn = QToolButton()
             btn.setIconSize(QSize(18, 18))
             btn.setCheckable(True)
@@ -2826,7 +2904,7 @@ class _EditorMixin:
         if isinstance(item, _LineItem):
             return "line"
         if isinstance(item, _PathItem):
-            return "pen"
+            return getattr(item, "tool_kind", "pen")
         if isinstance(item, _TextItem):
             return "text"
         if isinstance(item, _BadgeItem):
@@ -2941,6 +3019,8 @@ class _EditorMixin:
 
     # ---- 도구/색/두께 상태 -------------------------------------------------
     def set_tool(self, tool):
+        if tool == "fade" and not self._allow_fade_pen:
+            return  # 미리보기 편집기에서 키 0 — 사라지는 펜 없음
         self.current_tool = tool
         self._hide_tool_popups()  # 도구를 바꾸면 열려 있던 미니패널은 정리
         if tool == "select":
@@ -2997,7 +3077,10 @@ class _EditorMixin:
 
     def make_pen(self, tool_key: str) -> QPen:
         d = self.tool_defaults[tool_key]
-        return QPen(QColor(d["color"]), d["width"], Qt.PenStyle.SolidLine,
+        color = QColor(d["color"])
+        if tool_key == "marker":
+            color.setAlpha(_MARKER_ALPHA)  # 한 획은 한 경로로 칠해져 겹친 곳도 더 진해지지 않는다
+        return QPen(color, d["width"], Qt.PenStyle.SolidLine,
                     Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
 
     def next_badge_number(self) -> int:

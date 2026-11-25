@@ -480,6 +480,7 @@ class SettingsDialog(QDialog):
     KEY_PIN_IMAGE_HOTKEY = "hotkey_pin_image"
     KEY_NEW_MEMO_HOTKEY = "hotkey_new_memo"
     KEY_CAPTURE_HOTKEY = "hotkey_capture"
+    KEY_LIVE_DRAW_HOTKEY = "hotkey_live_draw"
     KEY_CAPTURE_USE_PRINTSCREEN = "capture_use_printscreen"
     KEY_RECORD_HOTKEY = "hotkey_record"  # GIF/영상 공용(영역 선택 뒤 방식 선택)
     KEY_GIF_SHOW_CURSOR = "gif_show_cursor"
@@ -890,6 +891,16 @@ class SettingsDialog(QDialog):
         capture_form.addRow("•  저장 폴더", folder_row)
         tab_capture.addWidget(capture_group)
 
+        live_draw_group, live_draw_form = _group("화면 판서", tab_capture)
+        self._live_draw_hotkey = HotkeyEdit()
+        self._live_draw_hotkey.setToolTip(
+            "마우스가 있는 모니터 위에 바로 펜·네모·형광펜으로 그립니다(아래 화면은 계속 움직임).\n"
+            "한 번 더 누르면 그림은 남긴 채 아래 앱을 쓰고, 또 누르면 다시 그립니다.\n"
+            "Ctrl+C = 화면과 판서를 한 장으로 캡처 · Esc = 지우고 끝내기."
+        )
+        live_draw_form.addRow("•  판서", self._live_draw_hotkey)
+        tab_capture.addWidget(live_draw_group)
+
         recording_group, recording_form = _group("녹화", tab_capture)
         self._record_hotkey = HotkeyEdit()
         self._record_hotkey.setToolTip(
@@ -1124,6 +1135,7 @@ class SettingsDialog(QDialog):
             self._bulk_path_paste_hotkey, self._capture_hotkey,
             self._pin_image_hotkey, self._record_hotkey,
             self._ocr_hotkey, self._stt_hotkey, self._new_memo_hotkey,
+            self._live_draw_hotkey,
         ):
             _hk.listening_changed.connect(self.recording_active.emit)
 
@@ -1338,6 +1350,9 @@ class SettingsDialog(QDialog):
         )
         self._capture_printscreen_check.setChecked(
             self._settings.get(self.KEY_CAPTURE_USE_PRINTSCREEN, "1") == "1"
+        )
+        self._live_draw_hotkey.set_value(
+            self._settings.get(self.KEY_LIVE_DRAW_HOTKEY, "ctrl+shift+d")
         )
         self._record_hotkey.set_value(
             self._settings.get(self.KEY_RECORD_HOTKEY, "ctrl+shift+r")
@@ -1670,6 +1685,7 @@ class SettingsDialog(QDialog):
             self.KEY_PIN_IMAGE_HOTKEY: self._pin_image_hotkey.value() or "alt+f3",
             self.KEY_NEW_MEMO_HOTKEY: self._new_memo_hotkey.value() or "alt+`",
             self.KEY_CAPTURE_HOTKEY: self._capture_hotkey.value() or "alt+f2",
+            self.KEY_LIVE_DRAW_HOTKEY: self._live_draw_hotkey.value() or "ctrl+shift+d",
             self.KEY_CAPTURE_USE_PRINTSCREEN: "1" if self._capture_printscreen_check.isChecked() else "0",
             self.KEY_RECORD_HOTKEY: self._record_hotkey.value() or "ctrl+shift+r",
             self.KEY_STT_HOTKEY: self._stt_hotkey.value() or "ctrl+win",

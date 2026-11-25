@@ -21,6 +21,7 @@ class _SignalBridge(QObject):
     bulk_path_paste    = pyqtSignal()        # 훅 스레드 → 메인: 큐 전체를 경로 텍스트로 간격 두고 순차 자동주입(Ctrl+Shift+[ 벌크 버전)
     pin_image          = pyqtSignal()        # 훅 스레드 → 메인: 클립보드 이미지를 화면에 핀(떠 있는 창)으로 띄우기
     new_memo           = pyqtSignal()        # 훅 스레드 → 메인: 메모장에 새 메모를 만들고 메모창 열기
+    live_draw          = pyqtSignal()        # 훅 스레드 → 메인: 라이브 화면 판서 켜기 / 그리기↔앱 쓰기 전환
     capture_requested  = pyqtSignal()        # 훅 스레드 → 메인: 영역 캡처 오버레이 띄우기
     record             = pyqtSignal()        # 훅 스레드 → 메인: 녹화 영역 선택 오버레이 띄우기(GIF/영상은 선택 뒤 고름)
     gif_saved          = pyqtSignal(str)     # 인코딩 워커 → 메인: 저장된 GIF 경로

@@ -108,6 +108,7 @@ class SettingsMixin:
             "hotkey_pin_image": self.db.get_setting("hotkey_pin_image", "alt+f3"),
             "hotkey_new_memo": self.db.get_setting("hotkey_new_memo", "alt+`"),
             "hotkey_capture": self.db.get_setting("hotkey_capture", "alt+f2"),
+            "hotkey_live_draw": self.db.get_setting("hotkey_live_draw", "ctrl+shift+d"),
             "hotkey_record": self.db.get_setting("hotkey_record", "ctrl+shift+r"),
             "gif_show_cursor": self.db.get_setting("gif_show_cursor", "1"),
             "gif_fps": self.db.get_setting("gif_fps", "12"),
@@ -165,6 +166,7 @@ class SettingsMixin:
         old_pin_hotkey = self.db.get_setting("hotkey_pin_image", "alt+f3")
         old_memo_hotkey = self.db.get_setting("hotkey_new_memo", "alt+`")
         old_capture_hotkey = self.db.get_setting("hotkey_capture", "alt+f2")
+        old_live_draw_hotkey = self.db.get_setting("hotkey_live_draw", "ctrl+shift+d")
         old_capture_use_printscreen = self.db.get_setting("capture_use_printscreen", "1")
         old_record_hotkey = self.db.get_setting("hotkey_record", "ctrl+shift+r")
         old_stt_hotkey = self.db.get_setting("hotkey_stt", "ctrl+win")
@@ -207,6 +209,11 @@ class SettingsMixin:
         new_memo_hotkey = new_settings.get("hotkey_new_memo", "alt+`")
         if old_memo_hotkey != new_memo_hotkey:
             self.interceptor.set_memo_hotkey(new_memo_hotkey)
+
+        # 라이브 화면 판서 단축키 재설정
+        new_live_draw_hotkey = new_settings.get("hotkey_live_draw", "ctrl+shift+d")
+        if old_live_draw_hotkey != new_live_draw_hotkey:
+            self.interceptor.set_live_draw_hotkey(new_live_draw_hotkey)
 
         # 영역 캡처 단축키 재설정
         new_capture_hotkey = new_settings.get("hotkey_capture", "alt+f2")

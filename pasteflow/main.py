@@ -33,6 +33,7 @@ from pasteflow.app.drag import DragMixin
 from pasteflow.app.image_items import ImageItemMixin
 from pasteflow.app.items import ItemActionsMixin
 from pasteflow.app.lifecycle import LifecycleMixin
+from pasteflow.app.live_draw import LiveDrawMixin
 from pasteflow.app.ocr import OcrMixin
 from pasteflow.app.panel import PanelMixin
 from pasteflow.app.pin import PinMixin
@@ -52,6 +53,7 @@ class PasteFlowApp(
     OcrMixin,
     ImageItemMixin,
     PinMixin,
+    LiveDrawMixin,
     SttMixin,
     PanelMixin,
     ItemActionsMixin,
@@ -95,6 +97,7 @@ class PasteFlowApp(
         self._bridge.bulk_path_paste.connect(self._on_bulk_path_paste_hotkey)
         self._bridge.pin_image.connect(self._on_pin_hotkey)
         self._bridge.new_memo.connect(lambda: self._open_memo())
+        self._bridge.live_draw.connect(self._on_live_draw_hotkey)
         self._bridge.capture_requested.connect(self._on_capture_requested)
         self._bridge.record.connect(self._on_record_hotkey)
         self._bridge.gif_saved.connect(self._on_gif_saved)
@@ -147,6 +150,7 @@ class PasteFlowApp(
             on_bulk_path_paste=self._bridge.bulk_path_paste.emit,
             on_pin_image=self._bridge.pin_image.emit,
             on_new_memo=self._bridge.new_memo.emit,
+            on_live_draw=self._bridge.live_draw.emit,
             on_capture=self._bridge.capture_requested.emit,
             on_record=self._bridge.record.emit,
             on_stt_start=self._bridge.stt_start.emit,
@@ -191,6 +195,9 @@ class PasteFlowApp(
         self._pin_place_rect: QRect | None = None
         # 그 캡처가 저장된 히스토리 항목 id — 핀이 큐에서 이 항목을 꺼낼 때만 제자리 덮기.
         self._pin_place_item_id: int | None = None
+        # 라이브 화면 판서 창(켜져 있을 때만)과 앱 쓰기 상태의 「판서 중」 칩 — app/live_draw.py
+        self._live_draw = None
+        self._live_draw_chip = None
 
         # OCR은 호출마다 새 스레드 — asyncio.run()을 재사용 스레드에서 반복 호출 시
         # WinRT 콜백 상태가 누적돼 두 번째 호출부터 빈 결과를 반환하는 문제 방지
@@ -275,6 +282,7 @@ class PasteFlowApp(
         self.interceptor.set_pin_hotkey(pin_hotkey)
 
         self.interceptor.set_memo_hotkey(self.db.get_setting("hotkey_new_memo", "alt+`"))
+        self.interceptor.set_live_draw_hotkey(self.db.get_setting("hotkey_live_draw", "ctrl+shift+d"))
 
         # 메모창 글자 크기·마지막 창 자리 — 메모창이 바꿀 때마다 저장, 시작 시 되살림
         try:

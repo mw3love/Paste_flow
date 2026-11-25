@@ -14,6 +14,7 @@ VK_SNAPSHOT = 0x2C  # PrintScreen
 # 사용자가 바꿀 수 있는 단축키 이름 — 검사 순서대로(Ctrl+Shift+V는 고정이라 따로 본다)
 ORDER_BEFORE_PRINTSCREEN = (
     "panel", "ocr", "seq_image_to_path", "bulk_paste", "bulk_path_paste", "pin", "memo", "capture",
+    "live_draw",
 )
 ORDER_AFTER_PRINTSCREEN = ("record", "stt")
 

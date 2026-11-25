@@ -8,6 +8,7 @@ PasteFlow를 다른 언어로 다시 만들지 정하려고, **순차 붙여넣�
 | `csharp/` | C#(.NET 10 + WPF), 트레이는 WinForms `NotifyIcon` |
 | `tauri/` | Rust + TypeScript(Tauri 2) — 키 훅·클립보드·주입·트레이는 Rust, 작은 창 화면은 TypeScript |
 | `measure/` | 측정 스크립트 둘과 결과 `results.csv` |
+| `live_draw/` | (언어 비교와 별개) 라이브 화면 판서 0편 — 투명 전체 화면 창 성능 시험판(파이썬+PyQt6). 결과·판정은 그 폴더 `README.md` |
 
 두 시험판은 같은 일만 한다: 텍스트 복사를 줄에 쌓고(규칙은 `pasteflow/paste_queue.py`와 같음), Ctrl+Shift+V를 삼킨 뒤 클립보드를 다음 항목으로 바꾸고 깨끗한 Ctrl+V를 주입한다(`pasteflow/paste_interceptor.py`와 같은 방식). 평범한 Ctrl+V는 통과시키고 줄만 비운다. 복사하면 초점을 빼앗지 않는 작은 창이 뜬다. exe 옆 `spike.log`에 `READY`(트레이 등록 시각)와 `SWAP`(키 받은 시각·클립보드 쓰기 끝난 시각)을 남긴다.
 

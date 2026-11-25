@@ -130,3 +130,12 @@ _combos = st.fixed_dictionaries({name: _combo for name in COMBOS})
 def test_same_as_old_chain(vk, ctrl, shift, alt, win, injected, combos, printscreen, stt_active, ready):
     args = (vk, ctrl, shift, alt, win, injected, combos, printscreen, stt_active, ready)
     assert classify_keydown(*args) == _old_chain(*args)
+
+
+# ── 라이브 화면 판서(계획 docs/plan/done/20261125-2040-라이브-화면-판서.md) ───────────
+
+def test_live_draw_combo():
+    combos = dict(COMBOS, live_draw=Combo(0x44, ctrl=True, shift=True))  # Ctrl+Shift+D
+    assert decide(0x44, ctrl=True, shift=True, combos=combos).action == "live_draw"
+    assert decide(0x44, ctrl=True, combos=combos).action is None          # Shift 빠지면 아님
+    assert decide(0x44, ctrl=True, shift=True).action is None             # 설정 표에 없으면 아님
