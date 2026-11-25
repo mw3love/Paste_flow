@@ -78,7 +78,7 @@ class LifecycleMixin:
             self._fg_hook = None
 
         MemoWindow.close_all()  # DB가 닫히기 전에 — 쓰던 메모 저장·빈 메모 삭제
-        self._close_live_draw()  # 판서 창이 켜져 있으면 닫기(그림은 버림 — Esc와 같음)
+        self._close_live_draw()  # 판서 창을 모두 닫기(숨긴 칠판 포함 — 그림은 버림)
         self.interceptor.stop()
         self.monitor.stop()
         self.tray.hide()

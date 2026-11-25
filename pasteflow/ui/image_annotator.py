@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QWidget, QGraphicsScene, QGraphicsView, QGraphicsRectItem,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsPathItem,
     QGraphicsTextItem, QGraphicsItem, QHBoxLayout, QVBoxLayout,
-    QToolButton, QButtonGroup, QLabel, QSlider, QApplication,
+    QToolButton, QButtonGroup, QLabel, QSlider, QApplication, QCheckBox,
     QStyle, QStyleOptionGraphicsItem,
 )
 
@@ -192,12 +192,11 @@ def _tool_icon(tool: str, color=None, neutral_override=None) -> QIcon:
         p.drawRect(4, 5, 14, 12)
     elif tool == "ellipse":
         p.drawEllipse(4, 4, 14, 14)
-    elif tool == "straight":
-        # 곧게 잠금 — 반듯한 사선 + 양 끝 점(자 대고 긋기)
-        p.drawLine(5, 17, 17, 5)
-        p.setBrush(col)
-        p.drawEllipse(QPointF(5, 17), 2, 2)
-        p.drawEllipse(QPointF(17, 5), 2, 2)
+    elif tool == "newboard":
+        # 새 칠판 — 빈 판 + 오른쪽 위 반짝임(새로 시작)
+        p.drawRoundedRect(3, 6, 13, 12, 2, 2)
+        p.drawLine(18, 3, 18, 7)
+        p.drawLine(16, 5, 20, 5)
     elif tool == "arrow":
         p.drawLine(4, 18, 14, 8)
         p.setBrush(col)
@@ -2388,6 +2387,7 @@ class _AnnotatorView(QGraphicsView):
                 self.scene().clearSelection()  # 빈 공간 클릭 = 선택 해제
             elif tool == "fade":
                 # 사라지는 펜 — 선택·이동 불가, 되돌리기 목록에 안 넣고 잠시 뒤 흐려지며 빠진다
+                item.is_fade = True   # 새 칠판이 되돌리기 기록에 넣지 않고 그냥 지우게
                 _fade_out_later(item)
             else:
                 if tool in ("pen", "marker") and straight_end is not None and QLineF(QPointF(self._start), QPointF(straight_end)).length() >= 4:
@@ -2651,6 +2651,8 @@ class _EditorMixin:
     # 사라지는 펜(fade)은 판서 창(ui/live_draw.py)만 켠다 — 이미지 주석은 남기려고 그리는 것이라
     # 미리보기 편집기에선 툴바에 없고 키 0도 무시한다.
     _allow_fade_pen = False
+    # 「새 칠판」(그림 모두 지우기) 버튼도 판서 창만 — 계획: docs/plan/20261125-2301-판서-복원과-새-칠판.md
+    _allow_new_board = False
 
     @staticmethod
     def _hardcoded_tool_defaults() -> dict:
@@ -2730,7 +2732,7 @@ class _EditorMixin:
         self._tool_popups: dict[str, QWidget] = {}          # 도구별 우클릭 미니패널(지연 생성·캐시)
         self._tool_preset_buttons: dict[str, list] = {}     # 도구별 색 스와치 버튼 목록(하이라이트 갱신용)
         self._arrow_dir_panel_btn = None  # 화살표 미니패널 안의 방향 토글 버튼
-        # 곧게 잠금(백틱·툴바 「곧게」 버튼) — 켜면 새로 그릴 때 Shift를 누른 것처럼. 창마다 꺼진 채 시작
+        # 곧게 잠금(백틱·툴바 「Shift」 체크박스) — 켜면 새로 그릴 때 Shift를 누른 것처럼. 창마다 꺼진 채 시작
         self._straight_lock = False
         self._straight_btn = None
 
@@ -2812,11 +2814,11 @@ class _EditorMixin:
             tools.addWidget(btn)
             self._tool_buttons[key] = btn
 
-        # 곧게 잠금 — 백틱과 같은 일. 켜져 있으면 눌린 모양
-        straight_btn = QToolButton()
-        straight_btn.setCheckable(True)
-        straight_btn.setIcon(_tool_icon("straight", neutral_override=_ICON_DARK))
-        straight_btn.setIconSize(QSize(18, 18))
+        # 곧게 잠금 — 백틱과 같은 일. 작은 글씨 「Shift」 체크박스(켜면 Shift를 누른 것처럼)
+        straight_btn = QCheckBox("Shift")
+        straight_btn.setObjectName("straightlock")
+        # 눌러도 키보드 포커스를 가져가지 않게 — 가져가면 Esc·백틱·Ctrl+Z가 뷰를 거치지 않는다(Esc가 창 닫기로 샘)
+        straight_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         straight_btn.setToolTip("곧게 그리기 잠금 (`)\n켜면 Shift를 누른 것처럼 — 펜은 직선, 도형은 정사각·정원"
                                 "\n켜진 동안 Shift를 누르면 그 순간만 자유롭게")
         straight_btn.toggled.connect(self.set_straight_lock)
@@ -2832,6 +2834,14 @@ class _EditorMixin:
         tools.addWidget(undo_btn)
 
         tools.addWidget(self._vsep())
+
+        if self._allow_new_board:
+            board_btn = QToolButton()
+            board_btn.setIcon(_tool_icon("newboard", neutral_override=_ICON_DARK))
+            board_btn.setIconSize(QSize(18, 18))
+            board_btn.setToolTip("새 칠판 — 그림 모두 지우기 (Ctrl+Z로 되살림)")
+            board_btn.clicked.connect(self._do_new_board)
+            tools.addWidget(board_btn)
 
         # 색·두께는 이제 전역 버튼이 아니라 각 도구 아이콘 우클릭 미니패널로 도구별 독립 조절
         # (2026-07-31 개편 — 옛 무지개 버튼 1개가 모든 도구에 같은 색을 적용하던 방식 폐기).
@@ -3210,6 +3220,13 @@ class _EditorMixin:
                 background-color: {_BLUE};
                 border: 1px solid {_BLUE};
             }}
+            QCheckBox#straightlock {{
+                background: transparent;
+                color: {_ICON_DARK};
+                font-size: 11px;
+                spacing: 3px;
+                padding: 0px 3px;
+            }}
             QWidget#textopts {{
                 background-color: {_SURFACE0};
                 border: 1px solid {_BORDER};
@@ -3453,6 +3470,20 @@ class _EditorMixin:
             return
         self._undo.append(("move", pairs))
         self._last_move_key = coalesce_key
+
+    def clear_board(self):
+        """새 칠판 — 씬의 그림(최상위 항목)을 모두 빼고 한 번의 delete 기록으로 남긴다.
+        Ctrl+Z 한 번이면 모두 돌아온다. 그림이 없으면 기록도 쌓지 않는다."""
+        tops = [it for it in self._scene.items() if it.parentItem() is None]
+        for it in tops:
+            self._scene.removeItem(it)
+        # 사라지는 펜 획은 원래 되돌리기 밖 — 되살리면 영구 획이 되므로 기록에서 뺀다
+        items = [it for it in tops if not getattr(it, "is_fade", False)]
+        if items:
+            self.push_undo_delete(items)
+
+    def _do_new_board(self):
+        self.clear_board()
 
     def undo(self):
         # 이미 사라진 빈 텍스트의 "add"처럼 무의미한 항목은 건너뛰고 실제 동작 1건을 되돌린다.

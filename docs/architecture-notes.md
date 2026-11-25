@@ -107,7 +107,8 @@
 
 ### 라이브 화면 판서 (2026-11-25)
 
-- **무엇** — `ui/live_draw.py`의 `LiveDrawOverlay`가 단축키(기본 Ctrl+Shift+D) 순간 커서가 있는 모니터 하나를 덮는 투명 창을 띄우고, 이미지 주석 편집기(`_EditorMixin`·`_AnnotatorView`)를 그대로 물려받아 그 위에 그린다. 같은 단축키로 「그리기 ↔ 앱 쓰기」를 오가고(앱 쓰기 = 그림은 남고 클릭이 아래 앱으로), 그리기 상태의 Esc로 지우고 끝낸다. 계획: `docs/plan/done/20261125-2040-라이브-화면-판서.md`.
+- **Esc = 숨기기 · 모니터마다 칠판**(2026-11-25, 계획 `docs/plan/20261125-2301-판서-복원과-새-칠판.md`) — Esc는 창을 닫지 않고 `hide_board`(텍스트 확정·패널 정리·`hide`·앞 창 포커스)로 숨긴다. 창 객체가 남으니 그림·되돌리기 기록·도구가 그대로이고 `reopen`이 `show` 뒤 `_enter_draw`. 앱 쪽 `_live_draw_boards`(모니터 이름 → 창)에 두고, 보이는 판서 창이 없을 때 단축키를 누르면 커서 모니터의 것을 다시 연다. 만들 때 기억한 모니터 geometry와 지금이 다르면(`board_action` → replace) 옛 창을 닫고 새로 — 그림이 화면과 어긋나지 않게. 버린 안: 앱을 껐다 켜도 남기기(그림 종류마다 저장·읽기 코드, 되돌리기 기록은 못 살림). 「새 칠판」은 최상위 항목을 모두 빼고 `push_undo_delete` 한 번이라 Ctrl+Z 한 번에 돌아온다(사라지는 펜 획은 기록에서 뺀다). 「Shift」 체크박스는 `NoFocus` — 포커스를 가져가면 Esc가 뷰를 거치지 않고 `_EditorMixin.keyPressEvent`의 `close()`로 샌다.
+- **무엇** — `ui/live_draw.py`의 `LiveDrawOverlay`가 단축키(기본 Ctrl+Shift+D) 순간 커서가 있는 모니터 하나를 덮는 투명 창을 띄우고, 이미지 주석 편집기(`_EditorMixin`·`_AnnotatorView`)를 그대로 물려받아 그 위에 그린다. 같은 단축키로 「그리기 ↔ 앱 쓰기」를 오가고(앱 쓰기 = 그림은 남고 클릭이 아래 앱으로), 그리기 상태의 Esc로 숨긴다(다시 켜면 그림 그대로 — 아래 「Esc = 숨기기」). 계획: `docs/plan/done/20261125-2040-라이브-화면-판서.md`.
 - **0편 실측**(`spikes/live_draw/README.md`, 집 PC FHD 셋·배율 1.0): 가짜 마우스 이벤트로 펜 끌기 다시 그리기 평균 0.6ms, 선 200개 쌓인 뒤도 95번째 3.8ms·최대 4.8ms(`MinimalViewportUpdate`라 바뀐 사각형만 그림). 그래서 Rust 등 다른 언어로 이 창만 떼어 만들 이유가 없었다(검토 때 기각한 안 — 무거운 곳은 Qt·DWM 합성이라 언어를 바꿔도 같다). 4K·고배율은 못 잼.
 - **배경 알파 1** — 배경을 알파 0으로 두면 Windows가 그 화소의 클릭을 아래 창으로 넘긴다(`WindowFromPoint`가 아래 창 — 실측). 그리기 상태에서 클릭을 받으려고 `paintEvent`에서 알파 1로 칠한다(눈에는 안 보임).
 - **클릭 통과** — 창을 다시 만들지 않고 `WS_EX_TRANSPARENT`만 켜고 끈다(`winapi/click_through.py`, 전용 WinDLL). `setWindowFlags(WindowTransparentForInput)`는 창을 다시 만들어 깜빡이고 장면이 사라질 수 있어 쓰지 않았다(추정 — 시험하지 않음).

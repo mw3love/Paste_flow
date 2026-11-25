@@ -24,3 +24,14 @@ def test_tool_names_match_editor():
     for k, _n, _s in _TOOLS:
         want |= set(_SHAPE_KINDS) if k == "shape" else {k}
     assert set(_LIVE_DRAW_TOOLS) == want
+
+
+@pytest.mark.parametrize("stored, cur, want", [
+    (None, (0, 0, 1920, 1080), "new"),                    # 숨긴 칠판 없음
+    ((0, 0, 1920, 1080), (0, 0, 1920, 1080), "reuse"),    # 같은 모니터 그대로
+    ((0, 0, 1920, 1080), (0, 0, 2560, 1440), "replace"),  # 해상도가 바뀜
+    ((1920, 0, 1920, 1080), (-1920, 0, 1920, 1080), "replace"),  # 배치가 바뀜
+])
+def test_board_action(stored, cur, want):
+    from pasteflow.app.live_draw import board_action
+    assert board_action(stored, cur) == want

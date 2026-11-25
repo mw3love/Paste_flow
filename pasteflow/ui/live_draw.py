@@ -3,7 +3,9 @@
 계획: docs/plan/done/20261125-2040-라이브-화면-판서.md.
 
 두 상태를 단축키(기본 Ctrl+Shift+D) 하나로 오간다(app/live_draw.py가 toggle_mode를 부름).
-- 그리기: 창이 클릭·키보드를 받는다. 툴바는 모니터 아래 가운데. Esc = 그림을 버리고 닫기.
+- 그리기: 창이 클릭·키보드를 받는다. 툴바는 모니터 아래 가운데. Esc = 창을 숨기기만 한다 — 그림·되돌리기
+  기록·도구가 남아 다시 열면(reopen) 그대로다(docs/plan/20261125-2301-판서-복원과-새-칠판.md). 닫히는 건 앱 종료와
+  모니터 해상도·배치가 바뀌어 새 칠판으로 바꿀 때뿐이다.
 - 앱 쓰기: 그림은 남고 클릭은 아래 앱으로 지나간다(WS_EX_TRANSPARENT). 툴바는 숨김.
 
 배경을 알파 1(거의 투명)로 칠하는 이유: Windows는 알파 0 화소의 클릭을 아래 창으로 넘긴다 —
@@ -81,6 +83,7 @@ class _ToolbarGrip(QWidget):
 
 class LiveDrawOverlay(_EditorMixin, QWidget):
     _allow_fade_pen = True       # 사라지는 펜은 판서에만(이미지 주석은 남기려고 그리는 것)
+    _allow_new_board = True      # 「새 칠판」 버튼도 판서에만
     _instances: list = []        # _EditorMixin.closeEvent가 정리한다
 
     annotated_copy_requested = pyqtSignal(bytes)   # _EditorMixin 호스트 요건(이 창은 쓰지 않음)
@@ -88,6 +91,7 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
     screen_copy_requested = pyqtSignal(object, object)   # (QPixmap 화면+판서, QRect 논리 전역)
     mode_changed = pyqtSignal(bool)                # True=그리기, False=앱 쓰기
     closed = pyqtSignal()
+    hidden = pyqtSignal()        # Esc로 숨김(그림은 남음) — app/live_draw.py가 아이콘 닫기·도구 저장
 
     def __init__(self, screen):
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
@@ -149,6 +153,25 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         self._toolbar.raise_()
         self.set_tool(tool)
         self._enter_draw()
+
+    def reopen(self):
+        """Esc로 숨겼던 칠판을 다시 보이며 그리기 상태로 — 그림·도구·툴바 자리는 그대로."""
+        self.show()
+        self._toolbar.raise_()
+        self._enter_draw()
+
+    def hide_board(self):
+        """Esc — 지우지 않고 숨긴다. 쓰던 텍스트를 확정하고 떠 있는 패널을 정리한 뒤 앞 창에 포커스를 돌려준다."""
+        self._wheel_timer.stop()
+        self._commit_text()
+        self._hide_tool_popups()
+        self._scene.clearSelection()
+        bar = getattr(self, "_text_opts_bar", None)
+        if bar is not None:
+            bar.setVisible(False)
+        self.hide()
+        self._give_back_foreground()
+        self.hidden.emit()
 
     def toggle_mode(self):
         if self._drawing:
@@ -230,7 +253,7 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         if self._eyedrop_active:
             self._stop_eyedropper(False)
             return
-        self.close()
+        self.hide_board()
 
     def _win_drag_start(self, _pt: QPoint):
         pass   # 판서 창은 움직이지 않는다
@@ -274,9 +297,15 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
     def _do_export(self):
         self.copy_screen()   # 저장 버튼도 같은 일 — 캡처 폴더에 PNG가 남는다
 
+    def _do_new_board(self):
+        self._commit_text()
+        self.clear_board()
+
     def closeEvent(self, event):
+        was_visible = self.isVisible()   # 숨긴 칠판을 닫을 때는 포커스를 돌려주지 않는다(오래된 창으로 튐)
         self._wheel_timer.stop()
         self._hide_tool_popups()
         super().closeEvent(event)   # _EditorMixin: 스포이드 정리 · _instances에서 빼기
-        self._give_back_foreground()
+        if was_visible:
+            self._give_back_foreground()
         self.closed.emit()

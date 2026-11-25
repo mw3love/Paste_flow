@@ -135,3 +135,63 @@ def test_magnet_boundary_5_degrees():
     at6 = QPointF(100 * math.cos(math.radians(6)), 100 * math.sin(math.radians(6)))
     assert abs(_angle(s, _magnet_point(s, at5))) < 1e-6
     assert abs(_angle(s, _magnet_point(s, at6)) - 6) < 1e-6
+
+
+class _FakeItem:
+    def __init__(self, parent=None):
+        self._parent = parent
+
+    def parentItem(self):
+        return self._parent
+
+
+class _FakeScene:
+    def __init__(self, items):
+        self._items = list(items)
+
+    def items(self):
+        return list(self._items)
+
+    def removeItem(self, it):
+        self._items.remove(it)
+
+    def addItem(self, it):
+        self._items.append(it)
+
+
+def _board_host(items):
+    host = SimpleNamespace(_scene=_FakeScene(items), _undo=[], _last_move_key=None)
+    host.push_undo_delete = lambda its: _EditorMixin.push_undo_delete(host, its)
+    return host
+
+
+def test_clear_board_removes_all_and_undo_restores():
+    a, b = _FakeItem(), _FakeItem()
+    child = _FakeItem(parent=a)           # 손잡이 같은 자식은 부모와 함께 움직이므로 따로 빼지 않는다
+    host = _board_host([a, b, child])
+    _EditorMixin.clear_board(host)
+    assert host._scene.items() == [child]  # 가짜 씬이라 자식이 남지만, 최상위 둘만 뺐는지 본다
+    assert host._undo == [("delete", [a, b])]
+    _EditorMixin.undo(host)
+    assert set(host._scene.items()) == {a, b, child}
+
+
+def test_clear_board_on_empty_scene_records_nothing():
+    host = _board_host([])
+    _EditorMixin.clear_board(host)
+    assert host._undo == []
+
+
+def test_new_board_only_in_live_draw():
+    from pasteflow.ui.live_draw import LiveDrawOverlay
+    assert _EditorMixin._allow_new_board is False
+    assert LiveDrawOverlay._allow_new_board is True
+
+
+def test_clear_board_drops_fade_strokes_from_undo():
+    keep, fade = _FakeItem(), _FakeItem()
+    fade.is_fade = True                    # 사라지는 펜 획 — 되살리면 영구 획이 되므로 기록에서 뺀다
+    host = _board_host([keep, fade])
+    _EditorMixin.clear_board(host)
+    assert host._scene.items() == []
+    assert host._undo == [("delete", [keep])]

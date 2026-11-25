@@ -197,6 +197,7 @@ class PasteFlowApp(
         self._pin_place_item_id: int | None = None
         # 라이브 화면 판서 창(켜져 있을 때만)과 앱 쓰기 상태의 「판서 중」 칩 — app/live_draw.py
         self._live_draw = None
+        self._live_draw_boards = {}   # 모니터 이름 → 판서 창(Esc로 숨긴 것 포함)
         self._live_draw_chip = None
 
         # OCR은 호출마다 새 스레드 — asyncio.run()을 재사용 스레드에서 반복 호출 시
