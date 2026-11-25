@@ -274,3 +274,81 @@ def test_wheel_filter_counts_120_per_notch_and_swallows():
     f.eventFilter("btn", _FakeWheel(40))                            # 모아서 120 → +1
     f.eventFilter("btn", _FakeWheel(-240))                          # 아래로 두 칸 → -2
     assert got == [1, 1, -2]
+
+
+# ---- 주석 편집기 툴바 다듬기(docs/plan/20261126-0030-주석-편집기-툴바-다듬기.md) ----
+
+def test_shift_double_tap_toggles_on_second_release():
+    t = _ia._ShiftDoubleTap()
+    t.press(0.00); assert t.release(0.10) is False      # 첫 번째
+    t.press(0.30); assert t.release(0.40) is True       # 뗀 뒤 0.2초 안에 두 번째
+    # 셋째는 새로 시작 — 바로 잠금 풀기로 치지 않는다
+    t.press(0.50); assert t.release(0.60) is False
+    t.press(0.80); assert t.release(0.90) is True
+
+
+def test_shift_double_tap_too_slow_or_long_hold():
+    t = _ia._ShiftDoubleTap()
+    t.press(0.0); t.release(0.1)
+    t.press(0.6); assert t.release(0.7) is False        # 뗀 뒤 0.5초 — 너무 느림
+    t2 = _ia._ShiftDoubleTap()
+    t2.press(0.0); t2.release(0.35)                     # 0.35초 누름 = 오래 누름(Shift+끌기)
+    t2.press(0.5); assert t2.release(0.6) is False
+    t3 = _ia._ShiftDoubleTap()
+    t3.press(0.0); t3.release(0.1)
+    t3.press(0.2); assert t3.release(0.6) is False      # 두 번째를 오래 누름
+
+
+def test_shift_double_tap_other_key_between_cancels():
+    t = _ia._ShiftDoubleTap()
+    t.press(0.0); t.release(0.1)
+    t.other_key()                                       # Ctrl·D 등이 끼면 두 번이 아님
+    t.press(0.2); assert t.release(0.3) is False
+    t.press(0.4); assert t.release(0.5) is True         # 그 뒤 다시 두 번은 됨
+
+
+def test_shift_double_tap_autorepeat_press_ignored():
+    t = _ia._ShiftDoubleTap()
+    t.press(0.0); t.press(0.05); t.release(0.1)          # 자동 반복 press는 무시(첫 누름 시각 유지)
+    t.press(0.2); assert t.release(0.25) is True
+
+
+def test_pen_icon_straight_follows_drawing_rule():
+    assert _ia._pen_icon_straight(False, False) is False
+    assert _ia._pen_icon_straight(True, False) is True
+    assert _ia._pen_icon_straight(False, True) is True
+    assert _ia._pen_icon_straight(True, True) is False   # 잠금 중 Shift = 곡선
+
+
+def test_head_both_saved_value(restore_tool_defaults):
+    _EditorMixin.load_last_values(json.dumps({"arrow": {"head_at_end": False}}))
+    assert _EditorMixin._tool_defaults["arrow"]["head_both"] is False     # 옛 저장값엔 없음 → 거짓
+    _EditorMixin.load_last_values(json.dumps({"arrow": {"head_both": True}}))
+    assert _EditorMixin._tool_defaults["arrow"]["head_both"] is True
+    _EditorMixin.load_last_values(None)
+    assert _EditorMixin._tool_defaults["arrow"]["head_both"] is False
+
+
+def test_arrow_head_both_clone_and_ends():
+    a = _ia._ArrowItem(QColor("#FF3B30"), 6, True, 22, head_both=True)
+    a.set_points(QPointF(0, 0), QPointF(100, 0))
+    assert sorted(a._head_ends()) == [False, True]
+    c = a.clone()
+    assert c._head_both is True and c._head_at_end is True
+    a.set_head_both(False)
+    assert a._head_ends() == [True]
+    b = _ia._ArrowItem(QColor("#FF3B30"), 6, False, 22)
+    assert b._head_both is False and b._head_ends() == [False]
+    # 두 머리: 끝(p2) 머리는 오른쪽을, 처음(p1) 머리는 왼쪽을 향한다
+    tip_e, ang_e = a._tip_and_angle(True)
+    tip_s, ang_s = a._tip_and_angle(False)
+    assert (tip_e.x(), tip_s.x()) == (100, 0)
+    assert abs(ang_e) < 1e-9 and abs(abs(ang_s) - math.pi) < 1e-9
+
+
+def test_shift_double_tap_reset_clears_held_press():
+    t = _ia._ShiftDoubleTap()
+    t.press(0.0)
+    t.reset()                                          # 누른 채 포커스를 잃음
+    t.press(5.0); t.release(5.1)
+    t.press(5.2); assert t.release(5.3) is True        # 옛 누름 기록 없이 두 번이 된다

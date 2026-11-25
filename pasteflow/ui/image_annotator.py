@@ -27,10 +27,11 @@ from PyQt6.QtWidgets import (
     QWidget, QGraphicsScene, QGraphicsView, QGraphicsRectItem,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsPathItem,
     QGraphicsTextItem, QGraphicsItem, QHBoxLayout, QVBoxLayout,
-    QToolButton, QButtonGroup, QLabel, QSlider, QApplication, QCheckBox,
+    QToolButton, QButtonGroup, QLabel, QSlider, QApplication,
     QStyle, QStyleOptionGraphicsItem, QAbstractButton,
 )
 
+from pasteflow.ui.annot_icons import annot_icon
 from pasteflow.ui.theme import (
     BASE as _BG, SURFACE0 as _SURFACE0, SURFACE1 as _BORDER,
     SURFACE2 as _SURFACE2, TEXT as _TEXT, BLUE as _BLUE, SUBTEXT0 as _SUBTEXT,
@@ -102,6 +103,47 @@ def _straight_active(shift: bool, lock: bool) -> bool:
     return bool(shift) != bool(lock)
 
 
+def _pen_icon_straight(shift_held: bool, lock: bool) -> bool:
+    """펜 계열 버튼 아이콘을 직선 그림으로 그릴까 — 그리기 규칙(_straight_active)과 같다."""
+    return _straight_active(shift_held, lock)
+
+
+_SHIFT_TAP_GAP = 0.4    # 두 번째 Shift를 누른 때가 첫 번째를 뗀 뒤 이 안(초)
+_SHIFT_TAP_HOLD = 0.3   # 각 Shift를 누르고 있던 시간이 이 미만(초) — 길면 Shift+끌기로 본다
+
+
+class _ShiftDoubleTap:
+    """Shift 빠르게 두 번 = 곧게 잠금 켜고 끄기 판정(시각은 부르는 쪽이 넘긴다 — 시험 가능).
+    release가 True를 돌려주면 그때 잠금을 바꾼다. 두 번 사이에 다른 키가 끼면 other_key()."""
+
+    def __init__(self):
+        self._down = None          # 지금 눌린 Shift의 누른 시각(안 눌렸으면 None)
+        self._last_tap_up = None   # 짧게 누르고 뗀 첫 번째 Shift의 뗀 시각
+
+    def press(self, t: float):
+        if self._down is None:     # 자동 반복 press는 무시
+            self._down = t
+
+    def release(self, t: float) -> bool:
+        down, self._down = self._down, None
+        if down is None or t - down >= _SHIFT_TAP_HOLD:
+            self._last_tap_up = None
+            return False
+        if self._last_tap_up is not None and down - self._last_tap_up <= _SHIFT_TAP_GAP:
+            self._last_tap_up = None
+            return True
+        self._last_tap_up = t
+        return False
+
+    def other_key(self):
+        self._last_tap_up = None
+
+    def reset(self):
+        """포커스를 잃음 — 누른 기록까지 지운다(다른 창에서 뗀 Shift가 남지 않게)."""
+        self._down = None
+        self._last_tap_up = None
+
+
 def _magnet_point(start: QPointF, cur: QPointF, tol_deg: float = _MAGNET_DEG) -> QPointF:
     """start→cur 직선의 끝점. 0·45·90도…(45도 배수) 중 가장 가까운 각도와 tol_deg 이하로
     차이 나면 그 각도로 돌린다(길이 유지). 아니면 cur 그대로 — 아무 각도 직선."""
@@ -164,7 +206,8 @@ def _pixmap_from_data(data: bytes) -> QPixmap | None:
 # 아이콘 (QPainter로 그린 도형 — 그리기 도구는 현재 색, 나머지는 중립색)
 # ---------------------------------------------------------------------------
 
-def _tool_icon(tool: str, color=None, neutral_override=None) -> QIcon:
+def _tool_icon(tool: str, color=None, neutral_override=None, straight: bool = False) -> QIcon:
+    # straight: 펜·형광펜·사라지는 펜을 곧은 선 그림으로(Shift를 누르는 동안·곧게 잠금 동안).
     # neutral_override: 중립색을 바꿔야 할 때(예: 밝은 제목바 위 어두운 닫기 X).
     neutral = QColor(neutral_override) if neutral_override is not None else QColor(_TEXT)
     col = QColor(color) if (color is not None and tool in _DRAW_TOOLS) else neutral
@@ -193,38 +236,44 @@ def _tool_icon(tool: str, color=None, neutral_override=None) -> QIcon:
         p.drawRect(4, 5, 14, 12)
     elif tool == "ellipse":
         p.drawEllipse(4, 4, 14, 14)
-    elif tool == "newboard":
-        # 새 칠판 — 빈 판 + 오른쪽 위 반짝임(새로 시작)
-        p.drawRoundedRect(3, 6, 13, 12, 2, 2)
-        p.drawLine(18, 3, 18, 7)
-        p.drawLine(16, 5, 20, 5)
     elif tool == "arrow":
         p.drawLine(4, 18, 14, 8)
         p.setBrush(col)
         p.setPen(QPen(col, 1))
         p.drawPolygon(QPolygonF([QPointF(18, 4), QPointF(11, 7), QPointF(15, 11)]))
     elif tool == "pen":
-        path = QPainterPath(QPointF(4, 16))
-        path.cubicTo(8, 5, 14, 21, 18, 7)
-        p.drawPath(path)
+        if straight:
+            p.drawLine(4, 17, 18, 5)
+        else:
+            path = QPainterPath(QPointF(4, 16))
+            path.cubicTo(8, 5, 14, 21, 18, 7)
+            p.drawPath(path)
     elif tool == "marker":
-        # 반투명 굵은 띠 + 그 위 짧은 진한 선(형광펜 촉)
+        # 반투명 굵은 띠(평소 굽은 띠, 곧게면 곧은 띠) + 그 위 짧은 진한 선(형광펜 촉)
         band = QColor(col)
         band.setAlpha(140)
         p.setPen(QPen(band, 7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
-        p.drawLine(3, 15, 19, 15)
+        if straight:
+            p.drawLine(3, 15, 19, 15)
+        else:
+            path = QPainterPath(QPointF(3, 17))
+            path.cubicTo(8, 11, 13, 19, 19, 13)
+            p.drawPath(path)
         p.setPen(QPen(col, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawLine(13, 4, 18, 9)
     elif tool == "fade":
-        # 점점 옅어지는 물결 — 사라지는 펜
+        # 점점 옅어지는 물결(곧게면 점점 옅어지는 곧은 선 세 토막) — 사라지는 펜
         for i, a in enumerate((255, 150, 70)):
             c = QColor(col)
             c.setAlpha(a)
             p.setPen(QPen(c, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             x = 3 + i * 6
-            path = QPainterPath(QPointF(x, 14))
-            path.quadTo(x + 3, 6, x + 6, 12)
-            p.drawPath(path)
+            if straight:
+                p.drawLine(QPointF(x, 15 - i * 3), QPointF(x + 5, 12 - i * 3))
+            else:
+                path = QPainterPath(QPointF(x, 14))
+                path.quadTo(x + 3, 6, x + 6, 12)
+                p.drawPath(path)
     elif tool == "text":
         f = QFont()
         f.setBold(True)
@@ -242,19 +291,6 @@ def _tool_icon(tool: str, color=None, neutral_override=None) -> QIcon:
         p.setFont(f)
         p.setPen(QColor(_BG))
         p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, "1")
-    elif tool == "eyedrop":
-        # 드로퍼(스포이드) — 외곽선 캡(bulb) + 대각 몸통 + 좌하단 뾰족 끝(끝점만 작은 채움)
-        p.setPen(QPen(neutral, 1.6, Qt.PenStyle.SolidLine,
-                      Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(12, 2, 8, 8, 3, 3)            # 캡(bulb) — 외곽선만
-        p.setPen(QPen(neutral, 2.2, Qt.PenStyle.SolidLine,
-                      Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        p.drawLine(14, 9, 7, 16)                         # 대각 몸통
-        p.setBrush(neutral)                              # 촉(끝점)만 작게 채움
-        p.setPen(QPen(neutral, 1))
-        p.drawPolygon(QPolygonF([
-            QPointF(8, 14), QPointF(4, 18), QPointF(9, 15)]))
     elif tool == "undo":
         # 반시계 곡선 화살표
         p.setPen(QPen(neutral, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
@@ -298,24 +334,6 @@ def _tool_icon(tool: str, color=None, neutral_override=None) -> QIcon:
         p.setPen(QPen(neutral, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawLine(6, 6, 16, 16)
         p.drawLine(16, 6, 6, 16)
-    p.end()
-    return QIcon(pm)
-
-
-def _arrow_dir_icon(head_at_end: bool, color=_TEXT) -> QIcon:
-    pm = QPixmap(24, 18)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    col = QColor(color)
-    p.setPen(QPen(col, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-    p.drawLine(5, 9, 19, 9)
-    p.setBrush(col)
-    p.setPen(QPen(col, 1))
-    if head_at_end:
-        p.drawPolygon(QPolygonF([QPointF(21, 9), QPointF(15, 5), QPointF(15, 13)]))
-    else:
-        p.drawPolygon(QPolygonF([QPointF(3, 9), QPointF(9, 5), QPointF(9, 13)]))
     p.end()
     return QIcon(pm)
 
@@ -1078,11 +1096,26 @@ def _cubic_bezier_bbox(p1: QPointF, c1: QPointF, c2: QPointF, p2: QPointF) -> QR
     return QRectF(QPointF(min(xs), min(ys)), QPointF(max(xs), max(ys)))
 
 
+def _cubic_sub(P0, C1, C2, P3, t0: float, t1: float):
+    """3차 베지어 P0..P3의 [t0, t1] 구간을 같은 모양의 3차 베지어 네 점으로(De Casteljau 두 번)."""
+    def split(a, b, c, d, t):   # [0,t] 앞쪽 · [t,1] 뒤쪽
+        ab = a + (b - a) * t; bc = b + (c - b) * t; cd = c + (d - c) * t
+        abc = ab + (bc - ab) * t; bcd = bc + (cd - bc) * t
+        m = abc + (bcd - abc) * t
+        return (a, ab, abc, m), (m, bcd, cd, d)
+    pts = (QPointF(P0), QPointF(C1), QPointF(C2), QPointF(P3))
+    if t1 < 1.0:
+        pts = split(*pts, t1)[0]
+    if t0 > 0.0 and t1 > 1e-9:
+        pts = split(*pts, min(1.0, t0 / t1))[1]
+    return pts
+
+
 class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
-    """선 + 끝점 삼각형 화살촉. 머리 방향(head_at_end) 선택 가능."""
+    """선 + 끝점 삼각형 화살촉. 머리 방향(head_at_end) 선택 가능, head_both면 양 끝 모두."""
 
     def __init__(self, color: QColor, width: int, head_at_end: bool = True,
-                 head_size: float = _DEFAULT_HEAD):
+                 head_size: float = _DEFAULT_HEAD, head_both: bool = False):
         super().__init__()
         self._p1 = QPointF(0, 0)
         self._p2 = QPointF(0, 0)
@@ -1092,6 +1125,7 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         self._color = QColor(color)
         self._width = width
         self._head_at_end = head_at_end
+        self._head_both = bool(head_both)   # 양쪽 머리(켜져 있으면 head_at_end는 무시 — 뒤집기용으로만 남음)
         self._head_size_val = head_size  # 두께와 독립된 화살촉 크기(px) — 미니패널에서 조절
         self._init_resize()
         self.setFlags(
@@ -1105,8 +1139,18 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         self.update()
 
     def set_head_at_end(self, value: bool):
+        self.prepareGeometryChange()   # 머리 자리가 바뀌면 경계도 바뀐다
         self._head_at_end = value
         self.update()
+
+    def set_head_both(self, value: bool):
+        self.prepareGeometryChange()
+        self._head_both = bool(value)
+        self.update()
+
+    def _head_ends(self) -> list:
+        """머리가 붙는 끝 목록 — True=끝(p2), False=처음(p1)."""
+        return [True, False] if self._head_both else [self._head_at_end]
 
     def apply_color(self, color):
         self._color = QColor(color)
@@ -1124,7 +1168,7 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
 
     def clone(self):
         c = _ArrowItem(QColor(self._color), self._width, self._head_at_end,
-                        self._head_size_val)
+                        self._head_size_val, self._head_both)
         c.set_points(QPointF(self._p1), QPointF(self._p2))
         if self._ctrl1 is not None:
             c._ctrl1 = QPointF(self._ctrl1)
@@ -1251,14 +1295,17 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         # 선택돼 있으면 어떤 도구에서든 곡선 조절 가능(끝점·회전·크기조절 핸들과 동일 정책).
         return self.isSelected()
 
-    def _tip_and_angle(self):
-        """화살촉이 놓이는 tip 점과 그 지점의 진행 방향 각도(paint와 동일 규칙)."""
-        tail, tip = (self._p1, self._p2) if self._head_at_end else (self._p2, self._p1)
+    def _tip_and_angle(self, at_end=None):
+        """화살촉이 놓이는 tip 점과 그 지점의 진행 방향 각도(paint와 동일 규칙).
+        at_end: True=끝(p2) 머리, False=처음(p1) 머리, None=지금 방향(head_at_end)."""
+        if at_end is None:
+            at_end = self._head_at_end
+        tail, tip = (self._p1, self._p2) if at_end else (self._p2, self._p1)
         if self._ctrl1 is None:
             length = math.hypot(tip.x() - tail.x(), tip.y() - tail.y())
             angle = math.atan2(tip.y() - tail.y(), tip.x() - tail.x()) if length > 1e-6 else 0.0
         else:
-            C2, P3 = (self._ctrl2, self._p2) if self._head_at_end else (self._ctrl1, self._p1)
+            C2, P3 = (self._ctrl2, self._p2) if at_end else (self._ctrl1, self._p1)
             angle = math.atan2(P3.y() - C2.y(), P3.x() - C2.x())
         return tip, angle
 
@@ -1268,9 +1315,9 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         함께 바뀌어 원하는 크기로 못 고정하는 문제가 있어 별도 값으로 분리했다."""
         return self._head_size_val
 
-    def _head_points(self):
-        """화살촉 삼각형 세 꼭짓점(tip + 뒤쪽 두 점)."""
-        tip, angle = self._tip_and_angle()
+    def _head_points(self, at_end=None):
+        """화살촉 삼각형 세 꼭짓점(tip + 뒤쪽 두 점). at_end는 _tip_and_angle과 같다."""
+        tip, angle = self._tip_and_angle(at_end)
         size = self._head_size()
         a1 = angle + math.radians(150)
         a2 = angle - math.radians(150)
@@ -1290,8 +1337,9 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         # (옛 방식은 화살촉 크기를 네 변 모두에 더해 박스가 곡선보다 과하게 넓었음).
         stroke = self._width / 2.0 + 2
         r = r.adjusted(-stroke, -stroke, stroke, stroke)
-        hx = [p.x() for p in self._head_points()]
-        hy = [p.y() for p in self._head_points()]
+        pts = [p for e in self._head_ends() for p in self._head_points(e)]
+        hx = [p.x() for p in pts]
+        hy = [p.y() for p in pts]
         head_r = QRectF(QPointF(min(hx), min(hy)), QPointF(max(hx), max(hy)))
         return r.united(head_r.adjusted(-2, -2, 2, 2))
 
@@ -1309,7 +1357,8 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
         stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         shape = stroker.createStroke(body)
-        shape.addPolygon(QPolygonF(self._head_points()))
+        for e in self._head_ends():
+            shape.addPolygon(QPolygonF(self._head_points(e)))
         if self._bend_active():   # 초록 bend 핸들도 잡을 수 있게(넉넉한 잡기 영역)
             for which in (1, 2):
                 shape.addEllipse(self._inflate_to_hit(self._bend_handle_rect(which)))
@@ -1317,8 +1366,7 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
 
     def paint(self, painter, option, widget=None):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        tail, tip = (self._p1, self._p2) if self._head_at_end else (self._p2, self._p1)
-        length = math.hypot(tip.x() - tail.x(), tip.y() - tail.y())
+        length = math.hypot(self._p2.x() - self._p1.x(), self._p2.y() - self._p1.y())
         if self._ctrl1 is None and length < 1:
             return  # 클릭만 한 0길이 직선 화살표는 머리도 그리지 않음(깜빡임 방지)
 
@@ -1326,43 +1374,40 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         pen = QPen(self._color, self._width, Qt.PenStyle.SolidLine,
                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
 
+        # 몸통은 머리가 있는 끝마다 화살촉 밑변까지만 그린다(안 자르면 굵은 선 끝이 화살촉 밖으로
+        # 삐져나옴). 직선은 길이 비율로, 곡선은 끝 접선 크기 |B'|=3·|P3−C2|로 되돌릴 dt를 근사하고
+        # De Casteljau로 [t0, t1] 구간을 잘라 낸다. 양쪽 머리면 두 끝 다 자른다.
+        ends = self._head_ends()
+        trim_end, trim_start = (True in ends), (False in ends)
+        cut = size * 0.85
         if self._ctrl1 is None:
-            # 직선: 선은 화살촉 밑변까지만 그린다. 짧은 화살표에서 base가 tail 뒤로 넘어가
-            # 선이 거꾸로 삐져나오지 않도록 tail~tip 구간 안으로 클램프한다.
-            t = max(0.0, 1.0 - (size * 0.85) / length) if length > 1 else 0.0
-            base = QPointF(tail.x() + (tip.x() - tail.x()) * t,
-                           tail.y() + (tip.y() - tail.y()) * t)
+            p1, p2 = self._p1, self._p2
+            L = math.hypot(p2.x() - p1.x(), p2.y() - p1.y())
+            t0 = min(1.0, cut / L) if (trim_start and L > 1) else 0.0
+            t1 = max(0.0, 1.0 - cut / L) if (trim_end and L > 1) else 1.0
+            if t0 > t1:   # 아주 짧은 양쪽 화살표 — 몸통 없이 머리만
+                t0 = t1 = (t0 + t1) / 2
             painter.setPen(pen)
-            painter.drawLine(tail, base)
+            painter.drawLine(QPointF(p1.x() + (p2.x() - p1.x()) * t0, p1.y() + (p2.y() - p1.y()) * t0),
+                             QPointF(p1.x() + (p2.x() - p1.x()) * t1, p1.y() + (p2.y() - p1.y()) * t1))
         else:
-            # 곡선: p1→c1→c2→p2 3차 베지어. 머리 방향에 맞춰 그리기 순서(P0..P3)를 정렬한다
-            # (head_at_end면 p1→p2, 아니면 곡선을 뒤집어 p2→p1 — 제어점도 c2·c1 순서로 뒤집음).
-            # tip 쪽을 화살촉 밑변까지 잘라 그린다(안 자르면 굵은 선 끝이 화살촉 밖으로 삐져나옴):
-            # tip 접선 크기 |B'(1)|=3·|P3−C2| 로 되돌릴 dt를 근사하고 De Casteljau로 [0,te] 분할.
-            if self._head_at_end:
-                P0, C1, C2, P3 = self._p1, self._ctrl1, self._ctrl2, self._p2
-            else:
-                P0, C1, C2, P3 = self._p2, self._ctrl2, self._ctrl1, self._p1
-            seg = math.hypot(P3.x() - C2.x(), P3.y() - C2.y())
-            dt = min(0.5, (size * 0.85) / (3 * seg)) if seg > 1e-6 else 0.0
-            te = 1.0 - dt
-            ax = P0.x() + (C1.x() - P0.x()) * te; ay = P0.y() + (C1.y() - P0.y()) * te
-            bx = C1.x() + (C2.x() - C1.x()) * te; by = C1.y() + (C2.y() - C1.y()) * te
-            cx = C2.x() + (P3.x() - C2.x()) * te; cy = C2.y() + (P3.y() - C2.y()) * te
-            dx = ax + (bx - ax) * te; dyv = ay + (by - ay) * te
-            ex = bx + (cx - bx) * te; ey = by + (cy - by) * te
-            fx = dx + (ex - dx) * te; fy = dyv + (ey - dyv) * te  # 곡선 위 te 지점(화살촉 밑변)
-            path = QPainterPath(P0)
-            path.cubicTo(QPointF(ax, ay), QPointF(dx, dyv), QPointF(fx, fy))
+            P0, C1, C2, P3 = self._p1, self._ctrl1, self._ctrl2, self._p2
+            seg_e = math.hypot(P3.x() - C2.x(), P3.y() - C2.y())
+            seg_s = math.hypot(C1.x() - P0.x(), C1.y() - P0.y())
+            t1 = 1.0 - (min(0.5, cut / (3 * seg_e)) if (trim_end and seg_e > 1e-6) else 0.0)
+            t0 = min(0.5, cut / (3 * seg_s)) if (trim_start and seg_s > 1e-6) else 0.0
+            q = _cubic_sub(P0, C1, C2, P3, t0, t1)
+            path = QPainterPath(q[0])
+            path.cubicTo(q[1], q[2], q[3])
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(path)
 
-        head = QPolygonF(self._head_points())
         painter.setBrush(QBrush(self._color))
         painter.setPen(QPen(self._color, 1, Qt.PenStyle.SolidLine,
                             Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        painter.drawPolygon(head)
+        for e in ends:
+            painter.drawPolygon(QPolygonF(self._head_points(e)))
         if self.isSelected():
             self._paint_selection_outline(painter, self._scale_or_1())
         self._paint_handle(painter)
@@ -1380,7 +1425,8 @@ class _ArrowItem(_HandleResizeMixin, QGraphicsItem):
         stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
         stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         outline = stroker.createStroke(body)
-        outline.addPolygon(QPolygonF(self._head_points()))
+        for e in self._head_ends():
+            outline.addPolygon(QPolygonF(self._head_points(e)))
         painter.setPen(QPen(QColor(_BLUE), 1.0 / (scale or 1.0), Qt.PenStyle.DashLine))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(outline.simplified())
@@ -1853,6 +1899,19 @@ class _AnnotatorView(QGraphicsView):
         self._text_drag_item = None  # 편집 중인 텍스트를 테두리 band 드래그로 이동 중이면 그 아이템
         self._text_drag_last = None  # 위 드래그의 직전 씬 좌표(델타 계산용)
 
+    def _annotation_at(self, view_pos):
+        """커서(view 좌표) 아래 맨 위 주석 그림(최상위 아이템, 종류가 있는 것). 없으면 None."""
+        for it in self.items(view_pos):
+            if it is getattr(self._owner, "_bg_item", None):
+                continue
+            top = it
+            while top.parentItem() is not None:
+                top = top.parentItem()
+            if top.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable \
+                    and self._owner._tool_key_for_item(top) is not None:
+                return top
+        return None
+
     def _is_empty_area(self, view_pos) -> bool:
         """클릭 위치에 선택 가능한 주석 아이템이 없으면(배경뿐) True."""
         for it in self.items(view_pos):
@@ -2112,6 +2171,12 @@ class _AnnotatorView(QGraphicsView):
             if event.button() == Qt.MouseButton.LeftButton:
                 self._owner._win_drag_start(event.globalPosition().toPoint())
             return
+        if event.button() == Qt.MouseButton.RightButton:
+            # 그림 위 우클릭 = 그 그림 종류의 옵션창(그림 위쪽 가운데를 꼬리로 가리킴). 빈 곳은 지금과 같다.
+            it = self._annotation_at(event.position().toPoint())
+            if it is not None and self._owner._open_item_settings(it):
+                event.accept()
+                return
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
         # 캔버스를 클릭했다 = 미니패널 볼일이 끝난 것으로 보고 정리(그랩 없는 패널이라
@@ -2155,7 +2220,8 @@ class _AnnotatorView(QGraphicsView):
             if snap is not None:
                 owner = self._owner
                 ad = owner.tool_defaults["arrow"]
-                it = _ArrowItem(QColor(ad["color"]), ad["width"], ad["head_at_end"], ad["head"])
+                it = _ArrowItem(QColor(ad["color"]), ad["width"], ad["head_at_end"], ad["head"],
+                                ad.get("head_both", False))
                 self._start = snap[0]
                 self._arrow_snap_exit = snap[1]
                 self._arrow_tip_snap = None
@@ -2199,7 +2265,8 @@ class _AnnotatorView(QGraphicsView):
             self._begin_draw(it)
         elif tool == "arrow":
             ad = owner.tool_defaults["arrow"]
-            it = _ArrowItem(QColor(ad["color"]), ad["width"], ad["head_at_end"], ad["head"])
+            it = _ArrowItem(QColor(ad["color"]), ad["width"], ad["head_at_end"], ad["head"],
+                                ad.get("head_both", False))
             it.set_points(sp, sp)
             self._arrow_snap_exit = None   # 자유 시작(테두리 스냅 아님) → 직선/자유 곡선
             self._arrow_tip_snap = None
@@ -2431,6 +2498,8 @@ class _AnnotatorView(QGraphicsView):
         )
         key = event.key()
         mods = event.modifiers()
+        if not event.isAutoRepeat():
+            self._owner._editor_key_pressed(key == Qt.Key.Key_Shift, editing_text)
         if editing_text and key == Qt.Key.Key_Escape:
             # 텍스트 편집 중 ESC = 편집기 닫기가 아니라 텍스트 완료(=Ctrl+Enter와 동일).
             # clearFocus → focusOutEvent가 정리(빈 텍스트 폐기 / 비어있지 않으면 선택 해제).
@@ -2503,6 +2572,21 @@ class _AnnotatorView(QGraphicsView):
                 self._owner.undo()
                 return
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Shift and not event.isAutoRepeat():
+            fi = self.scene().focusItem()
+            editing_text = (
+                isinstance(fi, QGraphicsTextItem)
+                and fi.textInteractionFlags() != Qt.TextInteractionFlag.NoTextInteraction
+            )
+            self._owner._editor_shift_released(editing_text)
+        super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event):
+        # 뗀 신호를 못 받을 수 있다(다른 창에서 Shift를 뗌) — 포커스를 잃으면 Shift는 뗀 것으로
+        self._owner._editor_shift_reset()
+        super().focusOutEvent(event)
 
 
 # ---------------------------------------------------------------------------
@@ -2772,7 +2856,7 @@ class _EditorMixin:
             "line":    {"color": _DEFAULT_COLOR, "width": _DEFAULT_WIDTH},
             "pen":     {"color": _DEFAULT_COLOR, "width": _DEFAULT_WIDTH},
             "arrow":   {"color": _DEFAULT_COLOR, "width": _DEFAULT_WIDTH,
-                        "head": _DEFAULT_HEAD, "head_at_end": True},
+                        "head": _DEFAULT_HEAD, "head_at_end": True, "head_both": False},
             "text":    {"color": _DEFAULT_COLOR, "font": _DEFAULT_FONT},
             "badge":   {"color": _DEFAULT_COLOR, "size": _DEFAULT_BADGE},
             "marker":  {"color": "#FFCC00", "width": _MARKER_DEFAULT_WIDTH},
@@ -2810,6 +2894,8 @@ class _EditorMixin:
                     base["head"] = _clamp_int(entry.get("head"), _MIN_HEAD, _MAX_HEAD, base["head"])
                 if "head_at_end" in base:
                     base["head_at_end"] = bool(entry.get("head_at_end", base["head_at_end"]))
+                if "head_both" in base:
+                    base["head_both"] = bool(entry.get("head_both", base["head_both"]))
         cls._tool_defaults = defaults
 
     def _persist_tool_defaults(self):
@@ -2841,10 +2927,10 @@ class _EditorMixin:
         self._tool_buttons: dict[str, QToolButton] = {}
         self._tool_popups: dict[str, QWidget] = {}          # 도구별 우클릭 미니패널(지연 생성·캐시)
         self._tool_preset_buttons: dict[str, list] = {}     # 도구별 색 스와치 버튼 목록(하이라이트 갱신용)
-        self._arrow_dir_panel_btn = None  # 화살표 미니패널 안의 방향 토글 버튼
         # 곧게 잠금(백틱·툴바 「Shift」 체크박스) — 켜면 새로 그릴 때 Shift를 누른 것처럼. 창마다 꺼진 채 시작
         self._straight_lock = False
-        self._straight_btn = None
+        self._shift_held = False              # 키보드 Shift를 누르고 있나(펜 계열 아이콘 곧게 표시)
+        self._shift_tap = _ShiftDoubleTap()   # Shift 빠르게 두 번 = 곧게 잠금 켜고 끄기
 
     # ---- 도형 버튼(네모·원) · 곧게 잠금 ------------------------------------
     def _shape_kind(self) -> str:
@@ -2884,11 +2970,32 @@ class _EditorMixin:
 
     def set_straight_lock(self, on: bool):
         self._straight_lock = bool(on)
-        btn = self._straight_btn
-        if btn is not None and btn.isChecked() != self._straight_lock:
-            btn.blockSignals(True)
-            btn.setChecked(self._straight_lock)
-            btn.blockSignals(False)
+        self._refresh_tool_icons()   # 펜 계열 아이콘이 곧게 잠금을 보여 준다(체크박스 대신)
+
+    def _editor_key_pressed(self, is_shift: bool, editing_text: bool):
+        """뷰가 받은 키 누름(자동 반복 제외). Shift면 아이콘을 곧게, 두 번 판정 시작.
+        텍스트를 쓰는 중의 Shift(한글 ㄲ·ㅆ 등)와 다른 키는 두 번 판정을 끊는다."""
+        if is_shift and not editing_text:
+            self._shift_tap.press(time.monotonic())
+            if not self._shift_held:
+                self._shift_held = True
+                self._refresh_tool_icons()
+        else:
+            self._shift_tap.other_key()
+
+    def _editor_shift_released(self, editing_text: bool):
+        if editing_text:
+            self._shift_tap.other_key()
+        elif self._shift_tap.release(time.monotonic()):
+            self._straight_lock = not self._straight_lock   # Shift 빠르게 두 번 = 곧게 잠금 켜고 끄기
+        self._shift_held = False
+        self._refresh_tool_icons()
+
+    def _editor_shift_reset(self):
+        self._shift_tap.reset()
+        if self._shift_held:
+            self._shift_held = False
+            self._refresh_tool_icons()
 
     # ---- 툴바 / 액션바 (호스트가 배치) -------------------------------------
     def _build_toolbar(self) -> QHBoxLayout:
@@ -2926,17 +3033,6 @@ class _EditorMixin:
             tools.addWidget(btn)
             self._tool_buttons[key] = btn
 
-        # 곧게 잠금 — 백틱과 같은 일. 작은 글씨 「Shift」 체크박스(켜면 Shift를 누른 것처럼)
-        straight_btn = QCheckBox("Shift")
-        straight_btn.setObjectName("straightlock")
-        # 눌러도 키보드 포커스를 가져가지 않게 — 가져가면 Esc·백틱·Ctrl+Z가 뷰를 거치지 않는다(Esc가 창 닫기로 샘)
-        straight_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        straight_btn.setToolTip("곧게 그리기 잠금 (`)\n켜면 Shift를 누른 것처럼 — 펜은 직선, 도형은 정사각·정원"
-                                "\n켜진 동안 Shift를 누르면 그 순간만 자유롭게")
-        straight_btn.toggled.connect(self.set_straight_lock)
-        tools.addWidget(straight_btn)
-        self._straight_btn = straight_btn
-
         # 되돌리기 — 도구 행 끝(번호 옆)
         undo_btn = QToolButton()
         undo_btn.setIcon(_tool_icon("undo", neutral_override=_ICON_DARK))
@@ -2949,7 +3045,7 @@ class _EditorMixin:
 
         if self._allow_new_board:
             board_btn = QToolButton()
-            board_btn.setIcon(_tool_icon("newboard", neutral_override=_ICON_DARK))
+            board_btn.setIcon(annot_icon("trash", _ICON_DARK))
             board_btn.setIconSize(QSize(18, 18))
             board_btn.setToolTip("새 칠판 — 그림 모두 지우기 (Ctrl+Z로 되살림)")
             board_btn.clicked.connect(self._do_new_board)
@@ -3030,13 +3126,38 @@ class _EditorMixin:
             self._tool_popups[tool_key] = pop
         if pop.isVisible():
             return pop
+        return self._place_tool_popup(pop, btn.mapToGlobal(QPoint(btn.width() // 2, 0)), btn.screen())
+
+    def _open_item_settings(self, item) -> bool:
+        """그림 우클릭 — 그 그림을 선택하고(이미 선택돼 있으면 그대로) 그 종류의 옵션창을 그림 위쪽
+        가운데에 꼬리로 가리키며 연다. 값을 바꾸면 선택한 같은 종류 그림에 바로 적용된다."""
+        key = self._tool_key_for_item(item)
+        if key is None or (key == "fade" and not self._allow_fade_pen):
+            return False
+        if not item.isSelected():
+            self._scene.clearSelection()
+            item.setSelected(True)
+        pop = self._tool_popups.get(key)
+        if pop is None:
+            pop = self._build_tool_settings_popup(key)
+            self._tool_popups[key] = pop
+        pop.hide()
+        local = item._content_rect() if hasattr(item, "_content_rect") else item.boundingRect()
+        r = item.mapToScene(local).boundingRect()
+        vp = self._view.viewport()
+        top_mid = vp.mapToGlobal(self._view.mapFromScene(QPointF(r.center().x(), r.top())))
+        self._place_tool_popup(pop, top_mid, vp.screen())
+        return True
+
+    def _place_tool_popup(self, pop, top_mid: QPoint, fallback_screen):
+        """옵션창을 top_mid(가리킬 점, 화면 좌표) 위에 두고 꼬리로 가리킨다. 화면 밖으로 밀리면
+        상자만 옮기고 꼬리는 그 점을 계속 가리킨다."""
         self._hide_tool_popups()
         pop._refresh_from_defaults()  # 휠 조절 등으로 바뀐 값이 있으면 반영 후 표시
         pop.adjustSize()
-        top_mid = btn.mapToGlobal(QPoint(btn.width() // 2, 0))
         x = top_mid.x() - pop.width() // 2
         y = top_mid.y() - pop.height() - 2   # 꼬리 끝이 버튼 위 2px
-        scr = QApplication.screenAt(top_mid) or btn.screen()
+        scr = QApplication.screenAt(top_mid) or fallback_screen
         if scr is not None:
             a = scr.availableGeometry()
             x = max(a.left(), min(x, a.right() - pop.width() + 1))
@@ -3106,7 +3227,7 @@ class _EditorMixin:
         color_row.addWidget(self._vsep())
         color_row.addSpacing(2)
         eyedrop_btn = QToolButton()
-        eyedrop_btn.setIcon(_tool_icon("eyedrop", neutral_override=_ICON_DARK))
+        eyedrop_btn.setIcon(annot_icon("eyedropper", _ICON_DARK))
         eyedrop_btn.setIconSize(QSize(18, 18))
         eyedrop_btn.setToolTip("스포이드 — 화면에서 색 따오기 (클릭으로 선택, ESC 취소)")
         eyedrop_btn.clicked.connect(lambda _c=None, k=tool_key: self._pick_tool_eyedrop(k))
@@ -3130,7 +3251,7 @@ class _EditorMixin:
         col.addLayout(row)
 
         head_btns: list[tuple[int, QToolButton]] = []
-        dir_btn = None
+        flip_btn = both_btn = None
         if tool_key == "arrow":
             head_row = QHBoxLayout()
             head_row.setSpacing(2)
@@ -3147,14 +3268,22 @@ class _EditorMixin:
             head_row.addSpacing(2)
             head_row.addWidget(self._vsep())
             head_row.addSpacing(2)
-            dir_btn = QToolButton()
-            dir_btn.setIconSize(QSize(28, 20))
-            dir_btn.setToolTip("화살표 방향 바꾸기 (선택된 화살표도 뒤집음)")
-            dir_btn.clicked.connect(self._toggle_arrow_dir_panel)
-            head_row.addWidget(dir_btn)
+            # 뒤집기 = 누를 때마다 머리 방향을 바꾸는 버튼(아이콘 고정) · 양쪽 = 켜고 끄는 버튼
+            flip_btn = QToolButton()
+            flip_btn.setIcon(annot_icon("arrows-left-right", _ICON_DARK, disabled_color="#b8b8b8"))
+            flip_btn.setIconSize(QSize(18, 18))
+            flip_btn.setToolTip("화살표 방향 뒤집기 (선택된 화살표도 뒤집음)")
+            flip_btn.clicked.connect(self._toggle_arrow_dir_panel)
+            head_row.addWidget(flip_btn)
+            both_btn = QToolButton()
+            both_btn.setCheckable(True)
+            both_btn.setIcon(annot_icon("arrows-horizontal", _ICON_DARK))
+            both_btn.setIconSize(QSize(18, 18))
+            both_btn.setToolTip("양쪽 머리 (선택된 화살표도)")
+            both_btn.clicked.connect(lambda _c: (self._toggle_arrow_both(), pop._refresh_from_defaults()))
+            head_row.addWidget(both_btn)
             head_row.addStretch()
             col.addLayout(head_row)
-            self._arrow_dir_panel_btn = dir_btn
 
         def _refresh():
             d = self.tool_defaults[rk()]
@@ -3174,8 +3303,11 @@ class _EditorMixin:
                 near = _nearest_head_step(d["head"])
                 for step, hb in head_btns:
                     hb.setChecked(step == near)
-                if dir_btn is not None:
-                    dir_btn.setIcon(_arrow_dir_icon(d["head_at_end"], _ICON_DARK))
+                # 선택한 화살표가 있으면 그 화살표의 상태를(우클릭으로 연 경우), 없으면 기본값을
+                sel = [it for it in self._scene.selectedItems() if isinstance(it, _ArrowItem)]
+                both = sel[0]._head_both if sel else bool(d.get("head_both", False))
+                both_btn.setChecked(both)
+                flip_btn.setEnabled(not both)   # 양쪽인 동안 뒤집기는 흐림
             cur_kind = rk()
             for kind, sb in shape_btns.items():
                 sb.setChecked(kind == cur_kind)
@@ -3250,9 +3382,16 @@ class _EditorMixin:
             new_val = not self.tool_defaults["arrow"]["head_at_end"]
         self.tool_defaults["arrow"]["head_at_end"] = new_val
         self._persist_tool_defaults()
-        btn = self._arrow_dir_panel_btn
-        if btn is not None:
-            btn.setIcon(_arrow_dir_icon(new_val))
+
+    def _toggle_arrow_both(self):
+        """양쪽 머리 켜고 끄기 — 선택한 화살표가 있으면 그것들도 바로(첫 화살표 기준으로 뒤집음)."""
+        sel = [it for it in self._scene.selectedItems() if isinstance(it, _ArrowItem)]
+        cur = sel[0]._head_both if sel else self.tool_defaults["arrow"].get("head_both", False)
+        new_val = not cur
+        for it in sel:
+            it.set_head_both(new_val)
+        self.tool_defaults["arrow"]["head_both"] = new_val
+        self._persist_tool_defaults()
 
     def _tool_key_for_item(self, item) -> str | None:
         if isinstance(item, _ArrowItem):
@@ -3337,13 +3476,6 @@ class _EditorMixin:
             QToolButton:checked {{
                 background-color: {_BLUE};
                 border: 1px solid {_BLUE};
-            }}
-            QCheckBox#straightlock {{
-                background: transparent;
-                color: {_ICON_DARK};
-                font-size: 11px;
-                spacing: 3px;
-                padding: 0px 3px;
             }}
             QWidget#textopts {{
                 background-color: {_SURFACE0};
@@ -3462,7 +3594,9 @@ class _EditorMixin:
         for key, btn in self._tool_buttons.items():
             draw = self._resolve_tool_key(key)   # 도형 버튼은 지금 모양의 그림·색
             color = self.tool_defaults[draw]["color"] if draw in _DRAW_TOOLS else None
-            btn.setIcon(_tool_icon(draw, color, neutral_override=_ICON_DARK))
+            straight = draw in _PEN_TOOLS and _pen_icon_straight(
+                getattr(self, "_shift_held", False), getattr(self, "_straight_lock", False))
+            btn.setIcon(_tool_icon(draw, color, neutral_override=_ICON_DARK, straight=straight))
 
     def _font_size_targets(self) -> list:
         fi = self._scene.focusItem()
