@@ -46,3 +46,36 @@ def foreground_window() -> int:
 
 def is_window(hwnd: int) -> bool:
     return bool(hwnd) and bool(_user32.IsWindow(hwnd))
+
+
+# ---- 휠 다시 넣기(판서 그리기 상태에서 아래 창 스크롤) ------------------------
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long), ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _KEYBDINPUT(ctypes.Structure):   # 공용체 크기를 맞추려고만 둔다
+    _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD), ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
+
+
+_INPUT_MOUSE = 0
+_MOUSEEVENTF_WHEEL = 0x0800
+_user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT), ctypes.c_int]
+_user32.SendInput.restype = wintypes.UINT
+
+
+def send_wheel(delta: int) -> bool:
+    """세로 휠 한 번을 운영체제에 다시 넣는다(커서 아래 창이 평소 휠처럼 받음). 성공하면 True."""
+    inp = _INPUT(type=_INPUT_MOUSE)
+    inp.u.mi = _MOUSEINPUT(0, 0, ctypes.c_ulong(int(delta)).value, _MOUSEEVENTF_WHEEL, 0, 0)
+    return _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) == 1

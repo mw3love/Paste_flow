@@ -25,6 +25,7 @@ from pasteflow.winapi import click_through
 
 _TOOLBAR_BOTTOM_GAP = 28     # 툴바와 모니터 아래 끝 사이(논리 px)
 _GRAB_DELAY_MS = 50          # 툴바를 숨긴 뒤 화면에 반영될 틈을 주고 찍는다
+_WHEEL_PASS_MS = 100         # 휠을 아래 창에 넘기는 동안 클릭 통과를 켜 두는 시간(마지막 휠부터)
 
 # 공유 편집기 스타일의 `QWidget{background:_BG}`가 판서 창 전체를 검게 칠하지 않게 되돌린다.
 _LIVE_QSS = (
@@ -97,6 +98,11 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         self._drawing = True
         self._prev_fg = click_through.foreground_window()   # 앱 쓰기·끝낼 때 돌려줄 창(그리기로 올 때마다 새로)
         self.setGeometry(screen.geometry())
+        # 그리기 상태의 휠 → 아래 창 스크롤: 잠깐 클릭 통과를 켜고 휠을 다시 넣는다
+        self._wheel_timer = QTimer(self)
+        self._wheel_timer.setSingleShot(True)
+        self._wheel_timer.timeout.connect(self._end_wheel_pass)
+        self._injecting_wheel = False
 
         self._init_editor_state()
         g = screen.geometry()
@@ -133,7 +139,7 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         return int(self.winId())
 
     # ---- 켜기 · 상태 전환 ----------------------------------------------------
-    def start(self):
+    def start(self, tool: str = "pen"):
         self.show()
         self._toolbar.adjustSize()
         # 작업 표시줄 위(사용 가능 영역 아래 끝) 기준 — 판서 창은 작업 표시줄까지 덮는다
@@ -141,7 +147,7 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         self._toolbar.move((self.width() - self._toolbar.width()) // 2,
                            avail_bottom - self._toolbar.height() - _TOOLBAR_BOTTOM_GAP)
         self._toolbar.raise_()
-        self.set_tool("pen")
+        self.set_tool(tool)
         self._enter_draw()
 
     def toggle_mode(self):
@@ -151,6 +157,7 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
             self._enter_draw()
 
     def _enter_draw(self):
+        self._wheel_timer.stop()
         fg = click_through.foreground_window()
         if fg and fg != self._hwnd():
             self._prev_fg = fg   # 앱 쓰기 동안 옮겨 간 창으로 돌려주게
@@ -166,6 +173,7 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         self.mode_changed.emit(True)
 
     def _enter_pass(self):
+        self._wheel_timer.stop()   # 앱 쓰기는 어차피 클릭 통과가 켜진 채
         self._commit_text()
         self._hide_tool_popups()
         self._scene.clearSelection()
@@ -233,8 +241,26 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
     def _win_drag_end(self):
         pass
 
-    def _on_wheel_zoom(self, _delta: int):
-        pass   # 확대 없음
+    def _on_wheel_zoom(self, delta: int):
+        """그리기 상태의 휠 = 아래 창 스크롤. 클릭 통과를 켜고 같은 휠을 운영체제에 다시 넣으면
+        커서 아래 앱이 평소 휠처럼 받는다. 마지막 휠에서 0.1초 뒤 클릭 통과를 끈다.
+        클릭 통과가 아직 안 먹어 다시 넣은 휠이 이 창에 또 오면 넘기지 않는다(무한 반복 방지)."""
+        if not self._drawing or self._injecting_wheel:
+            return
+        click_through.set_click_through(self._hwnd(), True)
+        self._injecting_wheel = True
+        try:
+            click_through.send_wheel(delta)
+        finally:
+            QTimer.singleShot(0, self._clear_injecting)
+        self._wheel_timer.start(_WHEEL_PASS_MS)
+
+    def _clear_injecting(self):
+        self._injecting_wheel = False
+
+    def _end_wheel_pass(self):
+        if self._drawing:
+            click_through.set_click_through(self._hwnd(), False)
 
     def copy_selection(self):
         self.copy_screen()
@@ -249,6 +275,7 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         self.copy_screen()   # 저장 버튼도 같은 일 — 캡처 폴더에 PNG가 남는다
 
     def closeEvent(self, event):
+        self._wheel_timer.stop()
         self._hide_tool_popups()
         super().closeEvent(event)   # _EditorMixin: 스포이드 정리 · _instances에서 빼기
         self._give_back_foreground()

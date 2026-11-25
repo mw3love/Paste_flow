@@ -92,6 +92,7 @@ pasteflow/
     ├── image_preview.py    # 이미지 미리보기 팝업 (다중 창 지원, Space로 인라인 주석 편집 진입)
     ├── image_annotator.py  # 이미지 주석 편집기 (QGraphicsScene — 도형(네모·원)·화살표·펜(곧게=직선)·텍스트·번호·형광펜, 판서 전용 사라지는 펜)
     ├── live_draw.py        # 라이브 화면 판서 창 — 커서 모니터를 덮는 투명 창(배경 알파 1)에 _EditorMixin 호스트, 그리기↔앱 쓰기(클릭 통과), Ctrl+C=화면+판서 캡처
+    ├── live_draw_badge.py  # 앱 쓰기 상태의 「판서 중」 작은 둥근 연필 아이콘(모니터 오른쪽 위, 누르면 그리기로)
     ├── text_preview.py     # 텍스트 미리보기 팝업
     ├── memo_window.py      # 빠른 메모창 — 메모장 텍스트 항목을 쓰는 동안 자동 저장(일반 창, Esc·Ctrl+W=닫기, Ctrl+T·오른쪽 위 핀=항상 위, Ctrl+휠/Ctrl+0=글자 크기, 우클릭=공통 메뉴)
     ├── toast.py            # 우하단 스택형 토스트 (복사 알림·시작·OCR)
@@ -119,7 +120,8 @@ tests/
 ├── test_crypto.py
 ├── test_paste_queue_stateful.py  # 순차 붙여넣기 규칙 조합 시험(hypothesis — 사건을 무작위 순서로)
 ├── test_check_file_length.py     # tools/check_file_length.py 시험
-└── test_annotator_tools.py       # 주석 편집기 도구 표(번호 1~8·곧게 판정·직선 자석 각도·도형 모양 기억·형광펜 직선 알파)
+├── test_annotator_tools.py       # 주석 편집기 도구 표(번호 1~8·곧게 판정·직선 자석 각도·도형 모양 기억·형광펜 직선 알파)
+└── test_live_draw_prefs.py      # 판서를 켤 때 시작 도구 고르기(pick_start_tool)
 
 tools/
 ├── make_icon.py
@@ -175,7 +177,7 @@ docs/
 - **`paste_hud.py`** — 순차 붙여넣기 진행 HUD(비활성 창, ✓▶·, ✕ 취소 → `_on_cancel_paste_queue`).
 - **`settings_dialog.py`** — 왼쪽 목록 내비(`일반`/`붙여넣기`/`캡처·녹화`/`AI`, 실제 페이지는 탭 바를 숨긴 `QTabWidget`), 기능 카드마다 그 기능의 단축키·옵션. AI 탭: `AI 연결 (OpenAI 호환 API)`(Base URL·API 키·모델조회·연결 테스트 = 연결+OCR 모델+크레딧), OCR, 음성 입력(STT 모델은 Gemini만, 마이크 테스트). 창-모달(`WindowModal`) + `_open_settings` 재진입 가드. 녹화 중 훅 정지는 `recording_active` → `done()`/`closeEvent`에서도 해제. 모델 콤보는 editable이라 표시 텍스트 = 저장값(계열 헤더는 비활성, 들여쓰기는 델리게이트로). 디자인 비교 하네스 `tools/settings_bakeoff.py`.
 - **`nav_icons.py`** — 설정창 아이콘(SVG 문자열 내장 — spec datas 불필요).
-- **`live_draw.py`** — 라이브 화면 판서(`LiveDrawOverlay`). 단축키(기본 Ctrl+Shift+D) 한 번에 커서 모니터를 덮고 그리기, 다시 누르면 앱 쓰기(그림은 남고 `WS_EX_TRANSPARENT`로 클릭 통과, 모니터 오른쪽 위 「판서 중」 칩 — `app/live_draw.py`), 또 누르면 그리기. 그리기 상태 Esc=지우고 닫기(단계적 취소는 뷰가), Space=아무것도 안 함, Ctrl+C·툴바 복사·저장=툴바를 숨기고 `grabWindow`로 화면+판서 한 장 → `_on_capture_region`(영역 캡처와 같은 저장). 배경을 알파 1로 칠해야 클릭을 받는다(알파 0 화소는 Windows가 아래 창으로 넘김 — `spikes/live_draw/README.md` 실측). 툴바는 작업 표시줄 위 가운데, 왼쪽 손잡이로 창 안에서 이동.
+- **`live_draw.py`** — 라이브 화면 판서(`LiveDrawOverlay`). 단축키(기본 Ctrl+Shift+D) 한 번에 커서 모니터를 덮고 그리기, 다시 누르면 앱 쓰기(그림은 남고 `WS_EX_TRANSPARENT`로 클릭 통과, 모니터 오른쪽 위 작은 연필 아이콘 — `ui/live_draw_badge.py`, 누르면 그리기로), 또 누르면 그리기. 그리기 상태 Esc=지우고 닫기(단계적 취소는 뷰가), Space=아무것도 안 함, Ctrl+C·툴바 복사·저장=툴바를 숨기고 `grabWindow`로 화면+판서 한 장 → `_on_capture_region`(영역 캡처와 같은 저장). 배경을 알파 1로 칠해야 클릭을 받는다(알파 0 화소는 Windows가 아래 창으로 넘김 — `spikes/live_draw/README.md` 실측). 툴바는 작업 표시줄 위 가운데, 왼쪽 손잡이로 창 안에서 이동. 그리기 상태의 휠은 잠깐 클릭 통과를 켜고 `click_through.send_wheel`로 다시 넣어 아래 창이 스크롤된다(0.1초 뒤 끔). 켤 때는 지난번 닫을 때의 도구로 시작(DB `live_draw_last_tool`).
 - **`capture_overlay.py`** — 마그네틱 영역 캡처(아래 「캡처 동작」). **`ocr_overlay.py`** — OCR 영역 선택(모니터별 위젯). 손을 뗄 때 Shift가 눌려 있으면 번역(`region_captured(pixmap, translate)`), 끄는 동안 선택 영역 위에 '번역' 꼬리표. **`record_chooser.py`** — 녹화 종류 선택 바. **`ai_query.py`** — 이미지 우클릭 "Gemini에게 질문" 입력창(비모달·TOPMOST, 이미지 1장, Tab 순환·키워드 접두어). **`stt_indicator.py`** — 녹음 중 이퀄라이저 pill(클릭=정지). **`tray.py`** — 트레이(좌클릭 패널, 우클릭 패널·설정·종료).
 
 ### 캡처 동작 (Alt+F2 · Alt+F3)

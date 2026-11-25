@@ -116,6 +116,9 @@
 - **포커스** — 켤 때와 그리기로 돌아올 때 메모창의 `_force_foreground`(AttachThreadInput 뒤 BringWindowToTop)와 `SetWindowPos(HWND_TOPMOST)`를 60ms 뒤 한 번 더. 켜기 직전의 포그라운드 창을 기억했다가 앱 쓰기로 갈 때와 닫을 때 돌려준다. 훅의 `_FOREGROUND_ACTIONS`에 `live_draw`를 넣어 잠금을 푼다.
 - **새 도구** — 형광펜(지금 키 2, `marker`)은 판서와 미리보기 편집 양쪽. 반투명(`_MARKER_ALPHA` 90/255)이라 `_PathItem.apply_color`가 색만 바꾸고 알파는 지킨다. 사라지는 펜(지금 키 8, `fade`)은 `_EditorMixin._allow_fade_pen`(기본 False)을 켠 호스트(판서 창)에만 툴바에 생기고 그 키도 그때만 먹는다(직선으로 그어도 선 그림으로 바꾸지 않고 그대로 사라진다) — 이미지 주석은 남기려고 그리는 것이라서. 손을 떼면 되돌리기 목록에 넣지 않고 1초 뒤 0.5초 흐려지며 장면에서 빠진다(`_fade_out_later`, 애니메이션은 아이템에 붙여 GC 방지).
 - **Space** — 뷰가 호스트 `toggle_edit_mode`를 부르지만 판서 창에선 아무것도 안 한다(전환은 단축키만).
+- **휠 = 아래 창 스크롤**(2026-11-25, 계획 `docs/plan/done/20261125-2226-판서-조작-개선.md`) — 그리기 상태에서 휠을 받으면 클릭 통과를 켜고 같은 휠을 `SendInput(MOUSEEVENTF_WHEEL)`로 다시 넣는다(`click_through.send_wheel`). 커서 아래 앱이 평소 휠처럼 받으므로 앱마다 다르게 할 일이 없다. 마지막 휠에서 100ms 뒤 클릭 통과를 끈다(그 사이 클릭은 아래로 감). 다시 넣은 휠이 판서 창에 또 오면 넘기지 않게 「주입 중」 표시를 이벤트 한 바퀴 동안 둔다. 버린 안: 아래 창에 `WM_MOUSEWHEEL`을 직접 보내기 — 앱마다 받는 창·방식이 달라 안 되는 앱이 생길 수 있다. 그림은 화면 고정이라 글을 따라 움직이지 않는다. 그림 위 Shift+휠(두께)은 그대로.
+- **마지막 도구** — 닫을 때 `current_tool`을 DB `live_draw_last_tool`에 쓰고 켤 때 `pick_start_tool`(도구 표에 없으면 펜)로 시작. 앱 종료 때도 `_close_live_draw`가 `db.close()` 전에 돌아 저장된다.
+- **「판서 중」 아이콘** — 옛 글자 칩(`ToastNotification`, 클릭 통과)을 지름 36px 둥근 연필 버튼(`ui/live_draw_badge.py`)으로 바꿨다(사용자: 클 필요 없음, 눌러서 돌아가고 싶음). 포커스를 뺏지 않고(`WA_ShowWithoutActivating`) 판서 창 위로 `claim_topmost`. 누르면 `toggle_mode`로 그리기.
 
 ### 화면 핀 · 영역 캡처 (Snipaste식, v1.8.0~)
 
