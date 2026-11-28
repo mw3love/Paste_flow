@@ -53,6 +53,15 @@ class LiveDrawMixin:
         if hotkey_action(ov is not None) == "hide":
             ov.hide_board()   # 앱 쓰기 상태여도 — hidden 시그널이 아이콘을 닫는다
             return
+        self._open_live_draw()
+
+    def _on_tray_live_draw(self):
+        """트레이 「판서 켜기」 — 이미 보이면 그대로 둔다(끄지 않음)."""
+        if self._live_draw is None:
+            self._open_live_draw()
+
+    def _open_live_draw(self):
+        """커서 모니터에 판서를 켠다 — 숨겨 둔 칠판이 있으면 그것을, 없으면 새로."""
         from pasteflow.ui.live_draw import LiveDrawOverlay
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         key, cur = screen.name(), _geom_tuple(screen)
