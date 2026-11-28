@@ -389,6 +389,32 @@ def _bg_swatch_icon(bg) -> QIcon:
 _ROTATE_CURSOR = None
 
 
+_STRAIGHT_CURSOR = None
+
+
+def _straight_cursor() -> QCursor:
+    """곧게(Shift·곧게 잠금) 동안 펜 계열 커서 — 십자 + 오른쪽 아래 짧은 사선(시안 C1,
+    docs/plan/20261128-2140-곧게-모드-커서-표시.md). 검정 + 흰 테두리라 어느 바탕에서도 보인다."""
+    global _STRAIGHT_CURSOR
+    if _STRAIGHT_CURSOR is not None:
+        return _STRAIGHT_CURSOR
+    pm = QPixmap(32, 32)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    c = 11.5   # 십자 가운데(핫스팟 11,11)
+    for color, w in (("#ffffff", 3.0), ("#000000", 1.0)):
+        p.setPen(QPen(QColor(color), w))
+        p.drawLine(QPointF(c - 9, c), QPointF(c + 9, c))
+        p.drawLine(QPointF(c, c - 9), QPointF(c, c + 9))
+    for color, w in (("#ffffff", 4.0), ("#000000", 2.0)):
+        p.setPen(QPen(QColor(color), w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(c + 8, c + 17), QPointF(c + 19, c + 9))
+    p.end()
+    _STRAIGHT_CURSOR = QCursor(pm, 11, 11)
+    return _STRAIGHT_CURSOR
+
+
 def _rotate_cursor() -> QCursor:
     """회전 핸들 hover용 커스텀 커서(곡선 화살표). Qt 기본에 회전 커서가 없어 픽스맵으로
     1회 생성·캐시. 검은 본체 + 흰 halo라 밝은/어두운 배경 모두에서 보인다."""
@@ -2191,6 +2217,11 @@ class _AnnotatorView(QGraphicsView):
         self._shift_taps.other_key()   # Shift+클릭 사이의 Shift는 두 번 누르기로 치지 않는다
         if event.button() == Qt.MouseButton.RightButton and self._open_item_settings_at(event):
             return
+        board_menu = getattr(self._owner, "open_board_menu", None)   # 판서만 — 빈 곳 우클릭 메뉴
+        if event.button() == Qt.MouseButton.RightButton and board_menu is not None:
+            self._owner._hide_tool_popups()
+            board_menu(event.globalPosition().toPoint())
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
         # 캔버스를 클릭했다 = 미니패널 볼일이 끝난 것으로 보고 정리(그랩 없는 패널이라
@@ -2370,8 +2401,10 @@ class _AnnotatorView(QGraphicsView):
             vp.setCursor(Qt.CursorShape.SizeAllCursor)       # 편집 중 텍스트 테두리 — 이동
         elif tool == "arrow" and self._snap_preview is not None:
             vp.setCursor(Qt.CursorShape.CrossCursor)          # 테두리 스냅 — 화살표 시작(도형 위여도)
-        elif tool in _PEN_TOOLS:
-            vp.setCursor(Qt.CursorShape.CrossCursor)         # 펜 계열 — 주석 위에서도 항상 그리기
+        elif tool in _PEN_TOOLS:                              # 펜 계열 — 주석 위에서도 항상 그리기
+            straight = _straight_active(getattr(self._owner, "_shift_held", False),
+                                        getattr(self._owner, "_straight_lock", False))
+            vp.setCursor(_straight_cursor() if straight else Qt.CursorShape.CrossCursor)
         elif not self._is_empty_area(view_pos):
             vp.setCursor(Qt.CursorShape.SizeAllCursor)       # 주석 위 — 선택/이동
         elif tool is None:
@@ -3042,6 +3075,7 @@ class _EditorMixin:
             return
         self._straight_lock = on
         self._refresh_tool_icons()   # 펜 계열 아이콘이 직선·곡선으로
+        self._refresh_view_cursor()
 
     def set_shift_held(self, held: bool):
         """뷰가 Shift 누름·뗌(포커스를 잃으면 뗌)을 알린다 — 펜 계열 아이콘만 바꾼다."""
@@ -3050,6 +3084,18 @@ class _EditorMixin:
             return
         self._shift_held = held
         self._refresh_tool_icons()
+        self._refresh_view_cursor()
+
+    def _refresh_view_cursor(self):
+        """곧게 상태가 바뀐 순간 커서가 캔버스 위면 바로 다시 고른다(마우스를 안 움직여도 바뀌게)."""
+        view = getattr(self, "_view", None)
+        if view is None or not self.is_edit_mode():
+            return
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            return   # 그리는 중 — 손을 뗀 뒤 움직이면 고른다(이동 경로와 같은 조건)
+        pos = view.viewport().mapFromGlobal(QCursor.pos())
+        if view.viewport().rect().contains(pos):
+            view._update_hover_cursor(pos)
 
     # ---- 툴바 / 액션바 (호스트가 배치) -------------------------------------
     def _build_toolbar(self) -> QHBoxLayout:

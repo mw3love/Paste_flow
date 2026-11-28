@@ -30,6 +30,7 @@ from pasteflow.winapi import click_through
 
 _TOOLBAR_BOTTOM_GAP = 28     # 툴바와 모니터 아래 끝 사이(논리 px)
 _GRAB_DELAY_MS = 50          # 툴바를 숨긴 뒤 화면에 반영될 틈을 주고 찍는다
+_MENU_GONE_MS = 200        # 빈 곳 메뉴의 복사·저장 — 메뉴가 화면에서 사라질 틈
 _WHEEL_PASS_MS = 100         # 휠을 아래 창에 넘기는 동안 클릭 통과를 켜 두는 시간(마지막 휠부터)
 
 # 공유 편집기 스타일의 `QWidget{background:_BG}`가 판서 창 전체를 검게 칠하지 않게 되돌린다.
@@ -360,6 +361,24 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
 
     def _do_export(self):
         self.copy_screen()   # 저장 버튼도 같은 일 — 캡처 폴더에 PNG가 남는다
+
+    def open_board_menu(self, global_pos):
+        """빈 곳 우클릭 — 툴바와 같은 일을 커서 자리에서(시안 M1, docs/plan/20261128-2132-판서-빈곳-우클릭-메뉴.md).
+        저장은 판서에선 복사와 같은 일(_do_export)이라 단축키 표시가 없다."""
+        from pasteflow.ui.menu_style import make_menu
+        self._commit_text()
+        menu = make_menu()
+        # 화면을 찍는 두 항목은 메뉴가 화면에서 사라진 뒤에(닫힘 효과가 사진에 찍히지 않게)
+        menu.add("복사	Ctrl+C", "copy").triggered.connect(
+            lambda: QTimer.singleShot(_MENU_GONE_MS, self._do_copy))
+        menu.add("저장", "file-arrow-down").triggered.connect(
+            lambda: QTimer.singleShot(_MENU_GONE_MS, self._do_export))
+        menu.addSeparator()
+        menu.add("새 칠판", "trash").triggered.connect(self._do_new_board)
+        menu.add("앱 쓰기", "cursor-click").triggered.connect(self._enter_pass)
+        menu.addSeparator()
+        menu.add("끄기	Esc", "x").triggered.connect(self.hide_board)
+        menu.exec(global_pos)
 
     def _do_new_board(self):
         self._commit_text()
