@@ -15,6 +15,7 @@ from pasteflow.winapi import click_through
 _SIZE = 36        # 지름(논리 px)
 _ICON = 20        # 연필 그림 크기
 _MARGIN = 12      # 모니터 사용 가능 영역 오른쪽·위에서 띄우는 거리
+_DIM = 0.45       # 평소 불투명도 — 화면을 덜 가리게, 마우스를 올리면 1.0
 
 
 class LiveDrawBadge(QWidget):
@@ -31,6 +32,7 @@ class LiveDrawBadge(QWidget):
         self._icon = menu_icon("pencil-simple", PEACH, PEACH).pixmap(QSize(_ICON, _ICON))
         a = screen.availableGeometry()
         self.move(QPoint(a.right() - _MARGIN - _SIZE + 1, a.top() + _MARGIN))
+        self.setWindowOpacity(_DIM)
 
     def show_on_top(self):
         self.show()
@@ -44,6 +46,14 @@ class LiveDrawBadge(QWidget):
         p.drawEllipse(QRectF(0.5, 0.5, _SIZE - 1, _SIZE - 1))
         off = (_SIZE - _ICON) // 2
         p.drawPixmap(off, off, self._icon)
+
+    def enterEvent(self, e):
+        self.setWindowOpacity(1.0)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.setWindowOpacity(_DIM)
+        super().leaveEvent(e)
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):

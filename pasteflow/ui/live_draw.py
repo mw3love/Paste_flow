@@ -40,15 +40,15 @@ _LIVE_QSS = (
 )
 
 
-def _pass_icon() -> QIcon:
-    """「앱 쓰기」 버튼 — 손으로 그린 마우스 화살표(툴바 중립색, 화면 배율 반영)."""
+def _pass_icon(size: int = 18) -> QIcon:
+    """「앱 쓰기」 버튼 — 손으로 그린 마우스 화살표(툴바 중립색, 화면 배율 반영). 18 격자로 그려 size로 키운다."""
     scr = QApplication.primaryScreen()
     ratio = scr.devicePixelRatio() if scr else 1.0
-    pm = QPixmap(round(18 * ratio), round(18 * ratio))
+    pm = QPixmap(round(size * ratio), round(size * ratio))
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.scale(ratio, ratio)
+    p.scale(ratio * size / 18, ratio * size / 18)
     p.setPen(QColor(_ICON_DARK))
     p.setBrush(QColor(_ICON_DARK))
     # 화살표는 오른쪽 아래로 비켜 두고, 끝 주위에 클릭 표시 선 셋 — 툴바 맨 앞 「선택」 화살표와 구분
@@ -76,6 +76,7 @@ class _ToolbarGrip(QWidget):
         self.setObjectName("livegrip")
         self._bar = toolbar
         self._grab = None
+        self._start_pos = None
         self.setFixedSize(14, 26)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
         self.setToolTip("끌어서 툴바 옮기기")
@@ -94,6 +95,7 @@ class _ToolbarGrip(QWidget):
             parent = self._bar.parentWidget()
             parent._hide_tool_popups()   # 떠 있는 옵션창이 옛 자리·옛 꼬리 방향으로 남지 않게
             self._grab = parent.mapFromGlobal(e.globalPosition().toPoint()) - self._bar.pos()
+            self._start_pos = self._bar.pos()
 
     def mouseMoveEvent(self, e):
         if self._grab is None or not (e.buttons() & Qt.MouseButton.LeftButton):
@@ -105,12 +107,15 @@ class _ToolbarGrip(QWidget):
         self._bar.move(x, y)
 
     def mouseReleaseEvent(self, e):
+        if self._grab is not None and self._bar.pos() != self._start_pos:   # 누르기만 했으면 저장 안 함
+            self._bar.parentWidget().toolbar_moved.emit(self._bar.x(), self._bar.y())   # 앱이 DB에 기억
         self._grab = None
 
 
 class LiveDrawOverlay(_EditorMixin, QWidget):
     _allow_fade_pen = True       # 사라지는 펜은 판서에만(이미지 주석은 남기려고 그리는 것)
     _allow_new_board = True      # 「새 칠판」 버튼도 판서에만
+    _toolbar_icon_px = 22        # 화면 전체를 덮는 창이라 미리보기 편집기(18)보다 크게
     _instances: list = []        # _EditorMixin.closeEvent가 정리한다
 
     annotated_copy_requested = pyqtSignal(bytes)   # _EditorMixin 호스트 요건(이 창은 쓰지 않음)
@@ -118,6 +123,7 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
     screen_copy_requested = pyqtSignal(object, object)   # (QPixmap 화면+판서, QRect 논리 전역)
     mode_changed = pyqtSignal(bool)                # True=그리기, False=앱 쓰기
     closed = pyqtSignal()
+    toolbar_moved = pyqtSignal(int, int)   # 손잡이로 옮겨 놓은 툴바 자리(판서 창 = 모니터 기준)
     hidden = pyqtSignal()        # Esc로 숨김(그림은 남음) — app/live_draw.py가 아이콘 닫기·도구 저장
 
     def __init__(self, screen):
@@ -159,15 +165,15 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         bar.addLayout(self._build_toolbar())
         bar.addWidget(self._vsep())
         pass_btn = QToolButton()
-        pass_btn.setIcon(_pass_icon())
-        pass_btn.setIconSize(QSize(18, 18))
+        pass_btn.setIcon(_pass_icon(self._toolbar_icon_px))
+        pass_btn.setIconSize(QSize(self._toolbar_icon_px, self._toolbar_icon_px))
         pass_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # 포커스를 가져가면 Esc가 뷰를 안 거친다
         pass_btn.setToolTip("앱 쓰기 — 그림은 두고 아래 앱 클릭 (연필 아이콘을 누르면 다시 그리기)")
         pass_btn.clicked.connect(self._enter_pass)
         bar.addWidget(pass_btn)
         self._close_btn = QToolButton()
         self._close_btn.setIcon(_tool_icon("close", neutral_override=_ICON_DARK))
-        self._close_btn.setIconSize(QSize(18, 18))
+        self._close_btn.setIconSize(QSize(self._toolbar_icon_px, self._toolbar_icon_px))
         self._close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # 앱 쓰기 버튼과 같은 이유
         self._close_btn.clicked.connect(self.hide_board)          # 단축키·Esc로 끈 것과 같다
         bar.addWidget(self._close_btn)
@@ -190,13 +196,17 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         return int(self.winId())
 
     # ---- 켜기 · 상태 전환 ----------------------------------------------------
-    def start(self, tool: str = "pen"):
+    def start(self, tool: str = "pen", toolbar_pos=None):
+        """toolbar_pos = 기억한 툴바 자리(창 안으로 이미 맞춘 (x, y) — app/live_draw.pick_toolbar_pos), 없으면 아래 가운데."""
         self.show()
         self._toolbar.adjustSize()
-        # 작업 표시줄 위(사용 가능 영역 아래 끝) 기준 — 판서 창은 작업 표시줄까지 덮는다
-        avail_bottom = self._screen.availableGeometry().bottom() - self._screen.geometry().top()
-        self._toolbar.move((self.width() - self._toolbar.width()) // 2,
-                           avail_bottom - self._toolbar.height() - _TOOLBAR_BOTTOM_GAP)
+        if toolbar_pos is not None:
+            self._toolbar.move(*toolbar_pos)
+        else:
+            # 작업 표시줄 위(사용 가능 영역 아래 끝) 기준 — 판서 창은 작업 표시줄까지 덮는다
+            avail_bottom = self._screen.availableGeometry().bottom() - self._screen.geometry().top()
+            self._toolbar.move((self.width() - self._toolbar.width()) // 2,
+                               avail_bottom - self._toolbar.height() - _TOOLBAR_BOTTOM_GAP)
         self._toolbar.raise_()
         self.set_tool(tool)
         self._enter_draw()

@@ -2912,6 +2912,8 @@ class _EditorMixin:
     _allow_fade_pen = False
     # 「새 칠판」(그림 모두 지우기) 버튼도 판서 창만 — 계획: docs/plan/20261125-2301-판서-복원과-새-칠판.md
     _allow_new_board = False
+    # 툴바 아이콘 크기(논리 px) — 판서 창은 22로 키운다(화면 전체를 덮는 창이라 18은 작았다, 2026-11-28)
+    _toolbar_icon_px = 18
 
     @staticmethod
     def _hardcoded_tool_defaults() -> dict:
@@ -3064,7 +3066,7 @@ class _EditorMixin:
             if key == "fade" and not self._allow_fade_pen:
                 continue
             btn = QToolButton()
-            btn.setIconSize(QSize(18, 18))
+            btn.setIconSize(QSize(self._toolbar_icon_px, self._toolbar_icon_px))
             btn.setCheckable(True)
             tip = f"{name} ({sc})"
             if key == "shape":
@@ -3092,7 +3094,7 @@ class _EditorMixin:
         # 되돌리기 — 도구 행 끝(번호 옆)
         undo_btn = QToolButton()
         undo_btn.setIcon(_tool_icon("undo", neutral_override=_ICON_DARK))
-        undo_btn.setIconSize(QSize(18, 18))
+        undo_btn.setIconSize(QSize(self._toolbar_icon_px, self._toolbar_icon_px))
         undo_btn.setToolTip("되돌리기 (Ctrl+Z)")
         undo_btn.clicked.connect(self.undo)
         tools.addWidget(undo_btn)
@@ -3101,8 +3103,8 @@ class _EditorMixin:
 
         if self._allow_new_board:
             board_btn = QToolButton()
-            board_btn.setIcon(annot_icon("trash", _ICON_DARK))
-            board_btn.setIconSize(QSize(18, 18))
+            board_btn.setIcon(annot_icon("trash", _ICON_DARK, self._toolbar_icon_px))
+            board_btn.setIconSize(QSize(self._toolbar_icon_px, self._toolbar_icon_px))
             board_btn.setToolTip("새 칠판 — 그림 모두 지우기 (Ctrl+Z로 되살림)")
             board_btn.clicked.connect(self._do_new_board)
             tools.addWidget(board_btn)
@@ -3116,14 +3118,14 @@ class _EditorMixin:
         # 복사/저장은 같은 중립색으로 통일. 닫기는 이미지 우상단 floating(호스트가 배치).
         copy_btn = QToolButton()
         copy_btn.setIcon(_tool_icon("copy", neutral_override=_ICON_DARK))
-        copy_btn.setIconSize(QSize(18, 18))
+        copy_btn.setIconSize(QSize(self._toolbar_icon_px, self._toolbar_icon_px))
         copy_btn.setToolTip("복사 — 클립보드에 복사 (히스토리에도 새 항목으로 저장)")
         copy_btn.clicked.connect(self._do_copy)
         tools.addWidget(copy_btn)
 
         export_btn = QToolButton()
         export_btn.setIcon(_tool_icon("save", neutral_override=_ICON_DARK))
-        export_btn.setIconSize(QSize(18, 18))
+        export_btn.setIconSize(QSize(self._toolbar_icon_px, self._toolbar_icon_px))
         export_btn.setToolTip("저장 — PNG 파일로 저장")
         export_btn.clicked.connect(self._do_export)
         tools.addWidget(export_btn)

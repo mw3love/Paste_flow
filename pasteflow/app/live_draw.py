@@ -12,17 +12,34 @@ Esc는 판서 창을 숨기기만 한다(docs/plan/20261125-2301-판서-복원�
 _live_draw_boards에 남아 있다가, 보이는 판서 창이 없을 때 단축키를 누르면 커서 모니터의 것을 다시 연다.
 앱 종료 때 모두 닫는다.
 """
+import json
+
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import QApplication
 
 # 판서에서 고를 수 있는 도구 이름 — 주석 편집기 _TOOLS에서 도형 버튼(shape)을 실제 모양 rect·ellipse로 푼 것
 _LIVE_DRAW_TOOLS = ("select", "marker", "pen", "rect", "ellipse", "arrow", "text", "badge", "fade")
 _LAST_TOOL_KEY = "live_draw_last_tool"
+_TOOLBAR_POS_KEY = "live_draw_toolbar_pos"   # JSON [x, y] — 모니터 왼쪽 위 기준
 
 
 def pick_start_tool(saved) -> str:
     """저장된 마지막 도구 → 시작 도구. 없거나·도구 없음이었거나·모르는 이름이면 펜."""
     return saved if saved in _LIVE_DRAW_TOOLS else "pen"
+
+
+def pick_toolbar_pos(saved, bar_size, area_size):
+    """저장한 툴바 자리(JSON 글자) → 판서 창 안으로 맞춘 (x, y). 없거나 깨졌으면 None(아래 가운데).
+    해상도가 다른 모니터에서 켜도 툴바가 화면 밖으로 나가지 않게 자른다."""
+    try:
+        v = json.loads(saved) if saved else None
+    except (TypeError, ValueError):
+        return None
+    if not (isinstance(v, list) and len(v) == 2 and all(isinstance(n, int) for n in v)):
+        return None
+    bw, bh = bar_size
+    aw, ah = area_size
+    return (max(0, min(v[0], aw - bw)), max(0, min(v[1], ah - bh)))
 
 
 def hotkey_action(visible: bool) -> str:
@@ -83,9 +100,13 @@ class LiveDrawMixin:
         ov.mode_changed.connect(self._on_live_draw_mode)
         ov.hidden.connect(lambda o=ov: self._on_live_draw_hidden(o))
         ov.closed.connect(lambda o=ov: self._on_live_draw_closed(o))
+        ov.toolbar_moved.connect(lambda x, y: self.db.set_setting(_TOOLBAR_POS_KEY, json.dumps([x, y])))
         self._live_draw_boards[key] = ov
         self._live_draw = ov
-        ov.start(pick_start_tool(self.db.get_setting(_LAST_TOOL_KEY, "")))
+        bar = ov._toolbar.sizeHint()
+        pos = pick_toolbar_pos(self.db.get_setting(_TOOLBAR_POS_KEY, ""), (bar.width(), bar.height()),
+                               (ov.width(), ov.height()))
+        ov.start(pick_start_tool(self.db.get_setting(_LAST_TOOL_KEY, "")), pos)
 
     def _on_live_draw_mode(self, drawing: bool):
         """앱 쓰기 상태에서만 모니터 오른쪽 위에 「판서 중」 작은 아이콘(누르면 그리기로)."""
