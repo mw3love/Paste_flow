@@ -58,8 +58,10 @@ class LiveDrawMixin:
         key, cur = screen.name(), _geom_tuple(screen)
         old = self._live_draw_boards.get(key)
         act = board_action(None if old is None else old._board_geom, cur)
+        hotkey = _pretty_hotkey(self.db.get_setting("hotkey_live_draw", "ctrl+shift+d"))
         if act == "reuse":
             self._live_draw = old
+            old.set_hotkey_label(hotkey)   # 설정에서 단축키를 바꿨을 수 있다
             old.reopen()
             return
         if act == "replace":
@@ -67,6 +69,7 @@ class LiveDrawMixin:
             old.close()
         ov = LiveDrawOverlay(screen)
         ov._board_geom = cur
+        ov.set_hotkey_label(hotkey)
         ov.screen_copy_requested.connect(self._on_capture_region)
         ov.mode_changed.connect(self._on_live_draw_mode)
         ov.hidden.connect(lambda o=ov: self._on_live_draw_hidden(o))

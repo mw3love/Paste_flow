@@ -6,7 +6,8 @@
 - 그리기: 창이 클릭·키보드를 받는다. 툴바는 모니터 아래 가운데. Esc·단축키 = 창을 숨기기만 한다 — 되돌리기
   기록·도구가 남고, 다시 열면(reopen) 빈 칠판으로 시작하되 Ctrl+Z 한 번이면 직전 그림이 돌아온다.
   닫히는 건 앱 종료와 모니터 해상도·배치가 바뀌어 새 칠판으로 바꿀 때뿐이다.
-- 앱 쓰기(툴바 맨 오른쪽 버튼): 그림은 남고 클릭은 아래 앱으로 지나간다(WS_EX_TRANSPARENT). 툴바는 숨김.
+- 툴바 맨 오른쪽 X = 끄기(단축키·Esc와 같음).
+- 앱 쓰기(툴바 오른쪽 끝, X 앞 버튼): 그림은 남고 클릭은 아래 앱으로 지나간다(WS_EX_TRANSPARENT). 툴바는 숨김.
   「판서 중」 아이콘을 누르면 그리기로(toggle_mode).
 
 배경을 알파 1(거의 투명)로 칠하는 이유: Windows는 알파 0 화소의 클릭을 아래 창으로 넘긴다 —
@@ -21,7 +22,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from pasteflow.ui.image_annotator import _ICON_DARK, _AnnotatorView, _EditorMixin
+from pasteflow.ui.image_annotator import _ICON_DARK, _AnnotatorView, _EditorMixin, _tool_icon
 from pasteflow.ui.image_preview import _CHROME_QSS
 from pasteflow.ui.memo_window import _force_foreground
 from pasteflow.ui.theme import SURFACE2 as _SURFACE2
@@ -163,10 +164,21 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         pass_btn.setToolTip("앱 쓰기 — 그림은 두고 아래 앱 클릭 (연필 아이콘을 누르면 다시 그리기)")
         pass_btn.clicked.connect(self._enter_pass)
         bar.addWidget(pass_btn)
+        self._close_btn = QToolButton()
+        self._close_btn.setIcon(_tool_icon("close", neutral_override=_ICON_DARK))
+        self._close_btn.setIconSize(QSize(18, 18))
+        self._close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # 앱 쓰기 버튼과 같은 이유
+        self._close_btn.clicked.connect(self.hide_board)          # 단축키·Esc로 끈 것과 같다
+        bar.addWidget(self._close_btn)
+        self.set_hotkey_label("Ctrl+Shift+D")
         bar.addSpacing(4)
         self.setStyleSheet(self._editor_stylesheet(_SURFACE2) + _CHROME_QSS + _LIVE_QSS)
         self._refresh_tool_icons()
         type(self)._instances.append(self)
+
+    def set_hotkey_label(self, text: str):
+        """닫기 버튼 툴팁의 단축키 글자 — 판서 창은 DB를 모르므로 앱 쪽(app/live_draw.py)이 설정값을 넘긴다."""
+        self._close_btn.setToolTip(f"끄기 ({text}) — 다시 켜면 빈 칠판, Ctrl+Z로 지난 그림")
 
     # ---- 배경(알파 1) -------------------------------------------------------
     def paintEvent(self, e):
