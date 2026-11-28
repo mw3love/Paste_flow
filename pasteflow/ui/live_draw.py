@@ -2,24 +2,27 @@
 
 계획: docs/plan/done/20261125-2040-라이브-화면-판서.md.
 
-두 상태를 단축키(기본 Ctrl+Shift+D) 하나로 오간다(app/live_draw.py가 toggle_mode를 부름).
-- 그리기: 창이 클릭·키보드를 받는다. 툴바는 모니터 아래 가운데. Esc = 창을 숨기기만 한다 — 그림·되돌리기
-  기록·도구가 남아 다시 열면(reopen) 그대로다(docs/plan/20261125-2301-판서-복원과-새-칠판.md). 닫히는 건 앱 종료와
-  모니터 해상도·배치가 바뀌어 새 칠판으로 바꿀 때뿐이다.
-- 앱 쓰기: 그림은 남고 클릭은 아래 앱으로 지나간다(WS_EX_TRANSPARENT). 툴바는 숨김.
+단축키(기본 Ctrl+Shift+D)는 켜고 끄기다(docs/plan/20261128-2049-판서-단축키-켜고-끄기.md — app/live_draw.py).
+- 그리기: 창이 클릭·키보드를 받는다. 툴바는 모니터 아래 가운데. Esc·단축키 = 창을 숨기기만 한다 — 되돌리기
+  기록·도구가 남고, 다시 열면(reopen) 빈 칠판으로 시작하되 Ctrl+Z 한 번이면 직전 그림이 돌아온다.
+  닫히는 건 앱 종료와 모니터 해상도·배치가 바뀌어 새 칠판으로 바꿀 때뿐이다.
+- 툴바 맨 오른쪽 X = 끄기(단축키·Esc와 같음).
+- 앱 쓰기(툴바 오른쪽 끝, X 앞 버튼): 그림은 남고 클릭은 아래 앱으로 지나간다(WS_EX_TRANSPARENT). 툴바는 숨김.
+  「판서 중」 아이콘을 누르면 그리기로(toggle_mode).
 
 배경을 알파 1(거의 투명)로 칠하는 이유: Windows는 알파 0 화소의 클릭을 아래 창으로 넘긴다 —
 그리기 상태에서 클릭을 받으려면 0이 아니어야 한다(0편 시험판 실측, spikes/live_draw/README.md).
 편집 동작(도구·색·두께·되돌리기·스포이드)은 _EditorMixin을 그대로 물려받는다. 이 창에서는
 Ctrl+C·툴바 복사·저장이 「주석 복제」가 아니라 「화면 + 판서」 한 장을 만드는 일이다.
 """
-from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter
+from PyQt6.QtCore import QBuffer, QIODevice, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
-    QFrame, QGraphicsScene, QGraphicsTextItem, QGraphicsView, QHBoxLayout, QVBoxLayout, QWidget,
+    QApplication, QFrame, QGraphicsScene, QGraphicsTextItem, QGraphicsView, QHBoxLayout, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
-from pasteflow.ui.image_annotator import _AnnotatorView, _EditorMixin
+from pasteflow.ui.image_annotator import _ICON_DARK, _AnnotatorView, _EditorMixin, _tool_icon
 from pasteflow.ui.image_preview import _CHROME_QSS
 from pasteflow.ui.memo_window import _force_foreground
 from pasteflow.ui.theme import SURFACE2 as _SURFACE2
@@ -27,6 +30,7 @@ from pasteflow.winapi import click_through
 
 _TOOLBAR_BOTTOM_GAP = 28     # 툴바와 모니터 아래 끝 사이(논리 px)
 _GRAB_DELAY_MS = 50          # 툴바를 숨긴 뒤 화면에 반영될 틈을 주고 찍는다
+_MENU_GONE_MS = 200        # 빈 곳 메뉴의 복사·저장 — 메뉴가 화면에서 사라질 틈
 _WHEEL_PASS_MS = 100         # 휠을 아래 창에 넘기는 동안 클릭 통과를 켜 두는 시간(마지막 휠부터)
 
 # 공유 편집기 스타일의 `QWidget{background:_BG}`가 판서 창 전체를 검게 칠하지 않게 되돌린다.
@@ -35,6 +39,29 @@ _LIVE_QSS = (
     "\nQGraphicsView { background: transparent; border: none; }"
     "\nQWidget#livegrip { background: transparent; }"
 )
+
+
+def _pass_icon(size: int = 18) -> QIcon:
+    """「앱 쓰기」 버튼 — 손으로 그린 마우스 화살표(툴바 중립색, 화면 배율 반영). 18 격자로 그려 size로 키운다."""
+    scr = QApplication.primaryScreen()
+    ratio = scr.devicePixelRatio() if scr else 1.0
+    pm = QPixmap(round(size * ratio), round(size * ratio))
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.scale(ratio * size / 18, ratio * size / 18)
+    p.setPen(QColor(_ICON_DARK))
+    p.setBrush(QColor(_ICON_DARK))
+    # 화살표는 오른쪽 아래로 비켜 두고, 끝 주위에 클릭 표시 선 셋 — 툴바 맨 앞 「선택」 화살표와 구분
+    p.drawPolygon(QPolygonF([QPointF(7, 6), QPointF(7, 17), QPointF(10, 14), QPointF(12, 18.5),
+                             QPointF(13.8, 17.6), QPointF(11.8, 13.2), QPointF(15.5, 13.2)]))
+    p.setPen(QPen(QColor(_ICON_DARK), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawLine(QPointF(5.5, 4.5), QPointF(3.5, 2.5))
+    p.drawLine(QPointF(4.5, 7), QPointF(1.8, 7))
+    p.drawLine(QPointF(8, 3.5), QPointF(8, 1))
+    p.end()
+    pm.setDevicePixelRatio(ratio)
+    return QIcon(pm)
 
 
 class _ToolbarGrip(QWidget):
@@ -50,6 +77,7 @@ class _ToolbarGrip(QWidget):
         self.setObjectName("livegrip")
         self._bar = toolbar
         self._grab = None
+        self._start_pos = None
         self.setFixedSize(14, 26)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
         self.setToolTip("끌어서 툴바 옮기기")
@@ -66,7 +94,9 @@ class _ToolbarGrip(QWidget):
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             parent = self._bar.parentWidget()
+            parent._hide_tool_popups()   # 떠 있는 옵션창이 옛 자리·옛 꼬리 방향으로 남지 않게
             self._grab = parent.mapFromGlobal(e.globalPosition().toPoint()) - self._bar.pos()
+            self._start_pos = self._bar.pos()
 
     def mouseMoveEvent(self, e):
         if self._grab is None or not (e.buttons() & Qt.MouseButton.LeftButton):
@@ -78,19 +108,23 @@ class _ToolbarGrip(QWidget):
         self._bar.move(x, y)
 
     def mouseReleaseEvent(self, e):
+        if self._grab is not None and self._bar.pos() != self._start_pos:   # 누르기만 했으면 저장 안 함
+            self._bar.parentWidget().toolbar_moved.emit(self._bar.x(), self._bar.y())   # 앱이 DB에 기억
         self._grab = None
 
 
 class LiveDrawOverlay(_EditorMixin, QWidget):
     _allow_fade_pen = True       # 사라지는 펜은 판서에만(이미지 주석은 남기려고 그리는 것)
     _allow_new_board = True      # 「새 칠판」 버튼도 판서에만
+    _toolbar_icon_px = 22        # 화면 전체를 덮는 창이라 미리보기 편집기(18)보다 크게
     _instances: list = []        # _EditorMixin.closeEvent가 정리한다
 
     annotated_copy_requested = pyqtSignal(bytes)   # _EditorMixin 호스트 요건(이 창은 쓰지 않음)
-    export_file_requested = pyqtSignal(bytes)      # 〃
+    export_file_requested = pyqtSignal(bytes)      # 저장 — 화면+판서 PNG, app이 저장 창으로 위치를 묻는다
     screen_copy_requested = pyqtSignal(object, object)   # (QPixmap 화면+판서, QRect 논리 전역)
     mode_changed = pyqtSignal(bool)                # True=그리기, False=앱 쓰기
     closed = pyqtSignal()
+    toolbar_moved = pyqtSignal(int, int)   # 손잡이로 옮겨 놓은 툴바 자리(판서 창 = 모니터 기준)
     hidden = pyqtSignal()        # Esc로 숨김(그림은 남음) — app/live_draw.py가 아이콘 닫기·도구 저장
 
     def __init__(self, screen):
@@ -130,9 +164,29 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         bar.setSpacing(0)
         bar.addWidget(_ToolbarGrip(self._toolbar))
         bar.addLayout(self._build_toolbar())
+        bar.addWidget(self._vsep())
+        pass_btn = QToolButton()
+        pass_btn.setIcon(_pass_icon(self._toolbar_icon_px))
+        pass_btn.setIconSize(QSize(self._toolbar_icon_px, self._toolbar_icon_px))
+        pass_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # 포커스를 가져가면 Esc가 뷰를 안 거친다
+        pass_btn.setToolTip("앱 쓰기 — 그림은 두고 아래 앱 클릭 (연필 아이콘을 누르면 다시 그리기)")
+        pass_btn.clicked.connect(self._enter_pass)
+        bar.addWidget(pass_btn)
+        self._close_btn = QToolButton()
+        self._close_btn.setIcon(_tool_icon("close", neutral_override=_ICON_DARK))
+        self._close_btn.setIconSize(QSize(self._toolbar_icon_px, self._toolbar_icon_px))
+        self._close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # 앱 쓰기 버튼과 같은 이유
+        self._close_btn.clicked.connect(self.hide_board)          # 단축키·Esc로 끈 것과 같다
+        bar.addWidget(self._close_btn)
+        self.set_hotkey_label("Ctrl+Shift+D")
+        bar.addSpacing(4)
         self.setStyleSheet(self._editor_stylesheet(_SURFACE2) + _CHROME_QSS + _LIVE_QSS)
         self._refresh_tool_icons()
         type(self)._instances.append(self)
+
+    def set_hotkey_label(self, text: str):
+        """닫기 버튼 툴팁의 단축키 글자 — 판서 창은 DB를 모르므로 앱 쪽(app/live_draw.py)이 설정값을 넘긴다."""
+        self._close_btn.setToolTip(f"끄기 ({text}) — 다시 켜면 빈 칠판, Ctrl+Z로 지난 그림")
 
     # ---- 배경(알파 1) -------------------------------------------------------
     def paintEvent(self, e):
@@ -143,25 +197,31 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         return int(self.winId())
 
     # ---- 켜기 · 상태 전환 ----------------------------------------------------
-    def start(self, tool: str = "pen"):
+    def start(self, tool: str = "pen", toolbar_pos=None):
+        """toolbar_pos = 기억한 툴바 자리(창 안으로 이미 맞춘 (x, y) — app/live_draw.pick_toolbar_pos), 없으면 아래 가운데."""
         self.show()
         self._toolbar.adjustSize()
-        # 작업 표시줄 위(사용 가능 영역 아래 끝) 기준 — 판서 창은 작업 표시줄까지 덮는다
-        avail_bottom = self._screen.availableGeometry().bottom() - self._screen.geometry().top()
-        self._toolbar.move((self.width() - self._toolbar.width()) // 2,
-                           avail_bottom - self._toolbar.height() - _TOOLBAR_BOTTOM_GAP)
+        if toolbar_pos is not None:
+            self._toolbar.move(*toolbar_pos)
+        else:
+            # 작업 표시줄 위(사용 가능 영역 아래 끝) 기준 — 판서 창은 작업 표시줄까지 덮는다
+            avail_bottom = self._screen.availableGeometry().bottom() - self._screen.geometry().top()
+            self._toolbar.move((self.width() - self._toolbar.width()) // 2,
+                               avail_bottom - self._toolbar.height() - _TOOLBAR_BOTTOM_GAP)
         self._toolbar.raise_()
         self.set_tool(tool)
         self._enter_draw()
 
     def reopen(self):
-        """Esc로 숨겼던 칠판을 다시 보이며 그리기 상태로 — 그림·도구·툴바 자리는 그대로."""
-        self.show()
+        """숨겼던 칠판을 다시 보이며 그리기 상태로 — 빈 칠판으로 시작(직전 그림은 Ctrl+Z 한 번으로), 도구·툴바 자리는 그대로."""
+        self.show()   # 그림은 끌 때(hide_board) 이미 지웠다
         self._toolbar.raise_()
         self._enter_draw()
 
     def hide_board(self):
-        """Esc — 지우지 않고 숨긴다. 쓰던 텍스트를 확정하고 떠 있는 패널을 정리한 뒤 앞 창에 포커스를 돌려준다."""
+        """Esc·단축키 — 지우지 않고 숨긴다. 쓰던 텍스트를 확정하고 떠 있는 패널을 정리한 뒤, 그리기 상태였으면
+        앞 창에 포커스를 돌려준다(앱 쓰기 상태면 사용자가 이미 다른 앱에 있을 수 있어 돌려주지 않는다 —
+        _prev_fg는 그리기로 들어올 때 기억한 옛 창)."""
         self._wheel_timer.stop()
         self._commit_text()
         self._hide_tool_popups()
@@ -169,8 +229,13 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         bar = getattr(self, "_text_opts_bar", None)
         if bar is not None:
             bar.setVisible(False)
+        # 끌 때 지운다(직전 그림은 Ctrl+Z 한 번으로) — 다시 열 때 지우면 숨기기 전 화면이 잠깐 보였다가
+        # 바뀌었다(2026-11-28 사용자 실사용). 숨기기 전에 빈 화면을 한 번 그려 둔다.
+        self.clear_board()
+        self.repaint()
         self.hide()
-        self._give_back_foreground()
+        if self._drawing:
+            self._give_back_foreground()
         self.hidden.emit()
 
     def toggle_mode(self):
@@ -220,9 +285,10 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
             fi.clearFocus()
 
     # ---- 화면 + 판서 한 장 ---------------------------------------------------
-    def copy_screen(self):
+    def copy_screen(self, to_file: bool = False):
         """툴바·미니패널을 숨기고 그 모니터를 찍는다 — grabWindow가 이 창의 그림까지 찍는다
-        (0편 실측 「찍힘」). 찍은 뒤 툴바를 다시 보이고 app 쪽에 넘긴다(영역 캡처와 같은 저장)."""
+        (0편 실측 「찍힘」). 찍은 뒤 툴바를 다시 보이고 app 쪽에 넘긴다 — 복사는 영역 캡처와 같은 저장,
+        to_file(저장)은 PNG를 export_file_requested로(app이 저장 창으로 위치를 묻는다)."""
         self._commit_text()
         self._scene.clearSelection()
         self._hide_tool_popups()
@@ -238,7 +304,13 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
                 self._toolbar.setVisible(True)
                 if text_bar_was:
                     bar.setVisible(True)
-            self.screen_copy_requested.emit(pm, QRect(self._screen.geometry()))
+            if to_file:
+                buf = QBuffer()
+                buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                pm.save(buf, "PNG")
+                self.export_file_requested.emit(bytes(buf.data()))
+            else:
+                self.screen_copy_requested.emit(pm, QRect(self._screen.geometry()))
 
         QTimer.singleShot(_GRAB_DELAY_MS, _grab)
 
@@ -295,7 +367,27 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         self.copy_screen()
 
     def _do_export(self):
-        self.copy_screen()   # 저장 버튼도 같은 일 — 캡처 폴더에 PNG가 남는다
+        # 저장 = 저장 창으로 위치를 골라 PNG 파일만(클립보드·히스토리는 안 건드림). 예전엔 복사와 같은
+        # 일이라 버튼 둘이 똑같았다(2026-11-28 사용자 — 「저장은 이미지 파일로 저장하는 거 아닌가?」).
+        self.copy_screen(to_file=True)
+
+    def open_board_menu(self, global_pos):
+        """빈 곳 우클릭 — 툴바와 같은 일을 커서 자리에서(시안 M1, docs/plan/20261128-2132-판서-빈곳-우클릭-메뉴.md).
+        저장은 저장 창으로 위치를 고른다(_do_export) — 단축키는 없다."""
+        from pasteflow.ui.menu_style import make_menu
+        self._commit_text()
+        menu = make_menu()
+        # 화면을 찍는 두 항목은 메뉴가 화면에서 사라진 뒤에(닫힘 효과가 사진에 찍히지 않게)
+        menu.add("복사	Ctrl+C", "copy").triggered.connect(
+            lambda: QTimer.singleShot(_MENU_GONE_MS, self._do_copy))
+        menu.add("저장", "file-arrow-down").triggered.connect(
+            lambda: QTimer.singleShot(_MENU_GONE_MS, self._do_export))
+        menu.addSeparator()
+        menu.add("새 칠판", "trash").triggered.connect(self._do_new_board)
+        menu.add("앱 쓰기", "cursor-click").triggered.connect(self._enter_pass)
+        menu.addSeparator()
+        menu.add("끄기	Esc", "x").triggered.connect(self.hide_board)
+        menu.exec(global_pos)
 
     def _do_new_board(self):
         self._commit_text()

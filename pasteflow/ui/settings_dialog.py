@@ -895,8 +895,9 @@ class SettingsDialog(QDialog):
         self._live_draw_hotkey = HotkeyEdit()
         self._live_draw_hotkey.setToolTip(
             "마우스가 있는 모니터 위에 바로 펜·네모·형광펜으로 그립니다(아래 화면은 계속 움직임).\n"
-            "한 번 더 누르면 그림은 남긴 채 아래 앱을 쓰고, 또 누르면 다시 그립니다.\n"
-            "Ctrl+C = 화면과 판서를 한 장으로 캡처 · Esc = 지우고 끝내기."
+            "한 번 더 누르면 끕니다. 다시 켜면 빈 칠판 — 지난 그림은 Ctrl+Z로 되살립니다.\n"
+            "그림을 둔 채 아래 앱을 쓰려면 판서 툴바 맨 오른쪽 「앱 쓰기」 버튼(연필 아이콘을 누르면 다시 그리기).\n"
+            "Ctrl+C = 화면과 판서를 한 장으로 캡처 · Esc = 끄기."
         )
         live_draw_form.addRow("•  판서", self._live_draw_hotkey)
         tab_capture.addWidget(live_draw_group)

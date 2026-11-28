@@ -274,3 +274,107 @@ def test_wheel_filter_counts_120_per_notch_and_swallows():
     f.eventFilter("btn", _FakeWheel(40))                            # 모아서 120 → +1
     f.eventFilter("btn", _FakeWheel(-240))                          # 아래로 두 칸 → -2
     assert got == [1, 1, -2]
+
+
+# ---- 툴바 다듬기(docs/plan/20261126-0030-주석-편집기-툴바-다듬기.md) ----------------
+
+def _taps(*events):
+    """("p"|"r"|"k", 시각) 사건열 → 두 번 누르기가 잡힌 횟수."""
+    from pasteflow.ui.image_annotator import _ShiftDoubleTap
+    d = _ShiftDoubleTap()
+    hits = 0
+    for kind, t in events:
+        if kind == "p":
+            d.press(t)
+        elif kind == "r":
+            hits += d.release(t)
+        else:
+            d.other_key()
+    return hits
+
+
+def test_shift_double_tap_quick():
+    assert _taps(("p", 0.0), ("r", 0.1), ("p", 0.3), ("r", 0.4)) == 1
+
+
+def test_shift_double_tap_too_slow_between():
+    # 첫 번째를 뗀 뒤 0.4초가 지나 두 번째를 누름
+    assert _taps(("p", 0.0), ("r", 0.1), ("p", 0.6), ("r", 0.7)) == 0
+
+
+def test_shift_double_tap_long_hold_is_not_tap():
+    # Shift+끌기처럼 오래 누름(0.3초 이상)은 두 번 누르기가 아니다
+    assert _taps(("p", 0.0), ("r", 0.5), ("p", 0.6), ("r", 0.7)) == 0
+    assert _taps(("p", 0.0), ("r", 0.1), ("p", 0.2), ("r", 0.6)) == 0
+
+
+def test_shift_double_tap_other_key_between_breaks():
+    assert _taps(("p", 0.0), ("r", 0.1), ("k", 0.15), ("p", 0.2), ("r", 0.3)) == 0
+    # Shift를 누른 채 다른 키(한글 ㄲ 등)
+    assert _taps(("p", 0.0), ("k", 0.05), ("r", 0.1), ("p", 0.2), ("r", 0.3)) == 0
+
+
+def test_shift_double_tap_three_taps_count_once():
+    # 두 번에 한 번 잡히고 셋째는 새로 시작 — 네 번이면 두 번 잡힌다(켜고 끄기)
+    ev = [("p", 0.0), ("r", 0.05), ("p", 0.1), ("r", 0.15), ("p", 0.2), ("r", 0.25)]
+    assert _taps(*ev) == 1
+    assert _taps(*ev, ("p", 0.3), ("r", 0.35)) == 2
+
+
+@pytest.mark.parametrize("shift, lock, want", [
+    (False, False, False), (True, False, True), (False, True, True), (True, True, False),
+])
+def test_pen_icon_straight_follows_drawing_rule(shift, lock, want):
+    from pasteflow.ui.image_annotator import _pen_icon_straight
+    assert _pen_icon_straight(shift, lock) is want
+
+
+@pytest.mark.parametrize("saved, want", [
+    (None, False),
+    (json.dumps({"arrow": {"head_at_end": False}}), False),      # 옛 저장값 — 칸 없음
+    (json.dumps({"arrow": {"head_both": True}}), True),
+    (json.dumps({"arrow": {"head_both": 0}}), False),
+])
+def test_arrow_head_both_loaded(restore_tool_defaults, saved, want):
+    _EditorMixin.load_last_values(saved)
+    assert _EditorMixin._tool_defaults["arrow"]["head_both"] is want
+
+
+def test_arrow_clone_keeps_head_both():
+    from pasteflow.ui.image_annotator import _ArrowItem
+    a = _ArrowItem(QColor("#FF0000"), 4, True, 22, head_both=True)
+    a.set_points(QPointF(0, 0), QPointF(100, 0))
+    assert a.clone()._head_both is True
+    a.set_head_both(False)
+    assert a.clone()._head_both is False
+
+
+def test_arrow_head_both_draws_two_heads():
+    from pasteflow.ui.image_annotator import _ArrowItem
+    a = _ArrowItem(QColor("#FF0000"), 4, True, 22)
+    a.set_points(QPointF(0, 0), QPointF(100, 0))
+    assert len(a._all_head_points()) == 1
+    a.set_head_both(True)
+    heads = a._all_head_points()
+    assert len(heads) == 2
+    tips = sorted((h[0].x(), h[0].y()) for h in heads)
+    assert tips == [(0.0, 0.0), (100.0, 0.0)]
+    # 머리 뒤쪽 꼭짓점은 선 안쪽(0과 100 사이)으로 — 바깥을 가리킨다
+    for h in heads:
+        for p in h[1:]:
+            assert 0 < p.x() < 100
+
+
+def test_only_pen_family_icons_turn_straight():
+    from pasteflow.ui.image_annotator import _STRAIGHT_ICON_TOOLS
+    assert set(_STRAIGHT_ICON_TOOLS) == {"pen", "marker", "fade"}   # 도형·화살표 아이콘은 그대로
+
+
+@pytest.mark.parametrize("a_top, a_bot, pop_h, top, bot, want", [
+    (900, 930, 200, 0, 1040, (698, False)),    # 위에 자리 있음 → 위, 꼬리 아래
+    (40, 70, 200, 0, 1040, (72, True)),        # 위에 자리 없음 → 아래로 뒤집기, 꼬리 위
+    (202, 230, 200, 0, 1040, (0, False)),      # 위에 딱 맞음 → 위
+    (100, 900, 200, 0, 1040, (0, False)),      # 위·아래 둘 다 모자람 → 지금처럼 화면 안으로(위 기준)
+])
+def test_popup_y_flips_below_when_no_room_above(a_top, a_bot, pop_h, top, bot, want):
+    assert _ia._popup_y(a_top, a_bot, pop_h, top, bot) == want

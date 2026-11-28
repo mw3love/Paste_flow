@@ -234,6 +234,7 @@ class PasteFlowApp(
         self.tray.quit_requested.connect(self._quit)
         self.tray.panel_toggle_requested.connect(self._toggle_panel)
         self.tray.settings_requested.connect(self._open_settings)
+        self.tray.live_draw_requested.connect(self._on_tray_live_draw)
 
         self.panel.paste_item_requested.connect(self._on_panel_paste)
         self.panel.pin_item_requested.connect(self._on_pin_item)
