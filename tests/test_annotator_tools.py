@@ -368,3 +368,13 @@ def test_arrow_head_both_draws_two_heads():
 def test_only_pen_family_icons_turn_straight():
     from pasteflow.ui.image_annotator import _STRAIGHT_ICON_TOOLS
     assert set(_STRAIGHT_ICON_TOOLS) == {"pen", "marker", "fade"}   # 도형·화살표 아이콘은 그대로
+
+
+@pytest.mark.parametrize("a_top, a_bot, pop_h, top, bot, want", [
+    (900, 930, 200, 0, 1040, (698, False)),    # 위에 자리 있음 → 위, 꼬리 아래
+    (40, 70, 200, 0, 1040, (72, True)),        # 위에 자리 없음 → 아래로 뒤집기, 꼬리 위
+    (202, 230, 200, 0, 1040, (0, False)),      # 위에 딱 맞음 → 위
+    (100, 900, 200, 0, 1040, (0, False)),      # 위·아래 둘 다 모자람 → 지금처럼 화면 안으로(위 기준)
+])
+def test_popup_y_flips_below_when_no_room_above(a_top, a_bot, pop_h, top, bot, want):
+    assert _ia._popup_y(a_top, a_bot, pop_h, top, bot) == want

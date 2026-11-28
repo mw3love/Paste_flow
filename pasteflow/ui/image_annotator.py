@@ -2695,6 +2695,19 @@ def _tail_offset(center_x: int, box_x: int, box_w: int, inset: int = _POP_TAIL_I
     return max(inset, min(int(center_x) - int(box_x), int(box_w) - inset))
 
 
+def _popup_y(anchor_top: int, anchor_bottom: int, pop_h: int, avail_top: int, avail_bottom: int):
+    """옵션창 y와 꼬리 방향 → (y, 꼬리가 위인가). 버튼(그림) 위에 자리가 있으면 위(꼬리 아래),
+    없으면 아래로 뒤집는다(꼬리 위) — 툴바를 화면 맨 위로 옮기면 옵션창이 툴바를 가렸다(2026-11-28).
+    위·아래 둘 다 모자라면 예전처럼 위 기준으로 화면 안에 밀어 넣는다. avail_bottom은 마지막 화소 줄."""
+    above = anchor_top - pop_h - 2          # 꼬리 끝이 버튼 위 2px
+    if above >= avail_top:
+        return above, False
+    below = anchor_bottom + 2
+    if below + pop_h - 1 <= avail_bottom:
+        return below, True
+    return max(avail_top, min(above, avail_bottom - pop_h + 1)), False
+
+
 def _head_step_icon(head: int) -> QIcon:
     """머리 단계 버튼 그림 — 같은 길이의 화살표, 머리만 단계 크기로."""
     pm = QPixmap(30, 20)
@@ -2761,8 +2774,8 @@ class _SizeDot(QWidget):
 
 class _ToolSettingsPopup(QWidget):
     """도구 옵션창(색·슬라이더 하나, 도형은 모양, 화살표는 머리 단계·방향). 밝은 말풍선을
-    직접 그린다 — 창 바탕은 투명, paintEvent가 둥근 상자 + 연 버튼을 가리키는 아래 꼬리
-    (tail_x = 꼬리 끝의 창 안 x, _show_tool_settings가 정함).
+    직접 그린다 — 창 바탕은 투명, paintEvent가 둥근 상자 + 연 버튼을 가리키는 꼬리
+    (tail_x = 꼬리 끝의 창 안 x, tail_up = 위로 뒤집혔나 — _open_tool_settings가 정함).
 
     ⚠ 처음엔 Qt.WindowType.Popup으로 만들었으나(색 팔레트 팝업과 같은 패턴), Popup은
     떠 있는 동안 마우스 입력을 통째로 그랩한다 — 그래서 패널이 열린 채로 캔버스에서
@@ -2782,6 +2795,14 @@ class _ToolSettingsPopup(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.hidden_at = 0.0
         self.tail_x = None
+        self.tail_up = False   # True면 꼬리가 위(옵션창이 버튼 아래로 뒤집혀 뜸)
+
+    def set_tail_up(self, up: bool):
+        """꼬리 방향을 바꾸고 꼬리 자리 여백을 위·아래로 옮긴다(창 높이는 그대로)."""
+        self.tail_up = up
+        lay = self.layout()
+        if lay is not None:
+            lay.setContentsMargins(10, 8 + (_POP_TAIL if up else 0), 10, 8 + (0 if up else _POP_TAIL))
 
     def hideEvent(self, event):
         self.hidden_at = time.monotonic()
@@ -2791,14 +2812,20 @@ class _ToolSettingsPopup(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        box = QRectF(0.5, 0.5, w - 1.0, h - 1.0 - _POP_TAIL)
+        top = _POP_TAIL if self.tail_up else 0
+        box = QRectF(0.5, 0.5 + top, w - 1.0, h - 1.0 - _POP_TAIL)
         path = QPainterPath()
         path.addRoundedRect(box, 8, 8)
         tx = float(self.tail_x if self.tail_x is not None else w / 2)
         tail = QPainterPath()
-        tail.addPolygon(QPolygonF([QPointF(tx - _POP_TAIL, box.bottom() - 1),
-                                   QPointF(tx + _POP_TAIL, box.bottom() - 1),
-                                   QPointF(tx, h - 0.5)]))
+        if self.tail_up:
+            tail.addPolygon(QPolygonF([QPointF(tx - _POP_TAIL, box.top() + 1),
+                                       QPointF(tx + _POP_TAIL, box.top() + 1),
+                                       QPointF(tx, 0.5)]))
+        else:
+            tail.addPolygon(QPolygonF([QPointF(tx - _POP_TAIL, box.bottom() - 1),
+                                       QPointF(tx + _POP_TAIL, box.bottom() - 1),
+                                       QPointF(tx, h - 0.5)]))
         tail.closeSubpath()
         p.setPen(QPen(QColor(_POP_LINE), 1))
         p.setBrush(QColor(_POP_BG))
@@ -3146,9 +3173,11 @@ class _EditorMixin:
             return
         self._open_tool_settings(tool_key, btn)
 
-    def _open_tool_settings(self, tool_key: str, btn, anchor: QPoint | None = None):
+    def _open_tool_settings(self, tool_key: str, btn, anchor: QPoint | None = None,
+                            anchor_below: QPoint | None = None):
         """그 도구 옵션창을 연다(이미 열려 있으면 그대로) — 연 버튼 가운데 위에 두고 꼬리로
         버튼을 가리킨다. anchor(전역 점)를 주면 버튼 대신 그 점(그림 위쪽 가운데)을 가리킨다.
+        위에 자리가 없으면 버튼(그림 — anchor_below) 아래로 뒤집어 꼬리가 위를 가리킨다(_popup_y).
         화면 밖으로 밀리면 상자만 옮기고 꼬리는 그 점을 계속 가리킨다."""
         pop = self._tool_popups.get(tool_key)
         if pop is None:
@@ -3162,13 +3191,19 @@ class _EditorMixin:
         pop._refresh_from_defaults()  # 휠 조절 등으로 바뀐 값이 있으면 반영 후 표시
         pop.adjustSize()
         top_mid = anchor if anchor is not None else btn.mapToGlobal(QPoint(btn.width() // 2, 0))
+        if anchor is not None:
+            bot_mid = anchor_below if anchor_below is not None else anchor
+        else:
+            bot_mid = btn.mapToGlobal(QPoint(btn.width() // 2, btn.height()))
         x = top_mid.x() - pop.width() // 2
         y = top_mid.y() - pop.height() - 2   # 꼬리 끝이 버튼 위 2px
+        tail_up = False
         scr = QApplication.screenAt(top_mid) or (btn.screen() if btn is not None else self._view.screen())
         if scr is not None:
             a = scr.availableGeometry()
             x = max(a.left(), min(x, a.right() - pop.width() + 1))
-            y = max(a.top(), min(y, a.bottom() - pop.height() + 1))
+            y, tail_up = _popup_y(top_mid.y(), bot_mid.y(), pop.height(), a.top(), a.bottom())
+        pop.set_tail_up(tail_up)
         pop.tail_x = _tail_offset(top_mid.x(), x, pop.width())
         pop.move(QPoint(x, y))
         pop.show()
@@ -3428,7 +3463,8 @@ class _EditorMixin:
         view = self._view
         r = view.mapFromScene(scene_rect).boundingRect()
         anchor = view.viewport().mapToGlobal(QPoint(r.center().x(), r.top()))
-        self._open_tool_settings(key, None, anchor=anchor)
+        below = view.viewport().mapToGlobal(QPoint(r.center().x(), r.bottom() + 1))   # 마지막 화소 줄 다음 — 위쪽과 같은 2px
+        self._open_tool_settings(key, None, anchor=anchor, anchor_below=below)
         return True
 
     def _tool_key_for_item(self, item) -> str | None:

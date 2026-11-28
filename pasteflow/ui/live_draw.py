@@ -92,6 +92,7 @@ class _ToolbarGrip(QWidget):
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             parent = self._bar.parentWidget()
+            parent._hide_tool_popups()   # 떠 있는 옵션창이 옛 자리·옛 꼬리 방향으로 남지 않게
             self._grab = parent.mapFromGlobal(e.globalPosition().toPoint()) - self._bar.pos()
 
     def mouseMoveEvent(self, e):
