@@ -190,8 +190,7 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
 
     def reopen(self):
         """숨겼던 칠판을 다시 보이며 그리기 상태로 — 빈 칠판으로 시작(직전 그림은 Ctrl+Z 한 번으로), 도구·툴바 자리는 그대로."""
-        self.clear_board()
-        self.show()
+        self.show()   # 그림은 끌 때(hide_board) 이미 지웠다
         self._toolbar.raise_()
         self._enter_draw()
 
@@ -206,6 +205,10 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         bar = getattr(self, "_text_opts_bar", None)
         if bar is not None:
             bar.setVisible(False)
+        # 끌 때 지운다(직전 그림은 Ctrl+Z 한 번으로) — 다시 열 때 지우면 숨기기 전 화면이 잠깐 보였다가
+        # 바뀌었다(2026-11-28 사용자 실사용). 숨기기 전에 빈 화면을 한 번 그려 둔다.
+        self.clear_board()
+        self.repaint()
         self.hide()
         if self._drawing:
             self._give_back_foreground()
