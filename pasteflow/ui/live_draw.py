@@ -15,7 +15,7 @@
 편집 동작(도구·색·두께·되돌리기·스포이드)은 _EditorMixin을 그대로 물려받는다. 이 창에서는
 Ctrl+C·툴바 복사·저장이 「주석 복제」가 아니라 「화면 + 판서」 한 장을 만드는 일이다.
 """
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QBuffer, QIODevice, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QApplication, QFrame, QGraphicsScene, QGraphicsTextItem, QGraphicsView, QHBoxLayout, QToolButton,
@@ -120,7 +120,7 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
     _instances: list = []        # _EditorMixin.closeEvent가 정리한다
 
     annotated_copy_requested = pyqtSignal(bytes)   # _EditorMixin 호스트 요건(이 창은 쓰지 않음)
-    export_file_requested = pyqtSignal(bytes)      # 〃
+    export_file_requested = pyqtSignal(bytes)      # 저장 — 화면+판서 PNG, app이 저장 창으로 위치를 묻는다
     screen_copy_requested = pyqtSignal(object, object)   # (QPixmap 화면+판서, QRect 논리 전역)
     mode_changed = pyqtSignal(bool)                # True=그리기, False=앱 쓰기
     closed = pyqtSignal()
@@ -285,9 +285,10 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
             fi.clearFocus()
 
     # ---- 화면 + 판서 한 장 ---------------------------------------------------
-    def copy_screen(self):
+    def copy_screen(self, to_file: bool = False):
         """툴바·미니패널을 숨기고 그 모니터를 찍는다 — grabWindow가 이 창의 그림까지 찍는다
-        (0편 실측 「찍힘」). 찍은 뒤 툴바를 다시 보이고 app 쪽에 넘긴다(영역 캡처와 같은 저장)."""
+        (0편 실측 「찍힘」). 찍은 뒤 툴바를 다시 보이고 app 쪽에 넘긴다 — 복사는 영역 캡처와 같은 저장,
+        to_file(저장)은 PNG를 export_file_requested로(app이 저장 창으로 위치를 묻는다)."""
         self._commit_text()
         self._scene.clearSelection()
         self._hide_tool_popups()
@@ -303,7 +304,13 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
                 self._toolbar.setVisible(True)
                 if text_bar_was:
                     bar.setVisible(True)
-            self.screen_copy_requested.emit(pm, QRect(self._screen.geometry()))
+            if to_file:
+                buf = QBuffer()
+                buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                pm.save(buf, "PNG")
+                self.export_file_requested.emit(bytes(buf.data()))
+            else:
+                self.screen_copy_requested.emit(pm, QRect(self._screen.geometry()))
 
         QTimer.singleShot(_GRAB_DELAY_MS, _grab)
 
@@ -360,11 +367,13 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         self.copy_screen()
 
     def _do_export(self):
-        self.copy_screen()   # 저장 버튼도 같은 일 — 캡처 폴더에 PNG가 남는다
+        # 저장 = 저장 창으로 위치를 골라 PNG 파일만(클립보드·히스토리는 안 건드림). 예전엔 복사와 같은
+        # 일이라 버튼 둘이 똑같았다(2026-11-28 사용자 — 「저장은 이미지 파일로 저장하는 거 아닌가?」).
+        self.copy_screen(to_file=True)
 
     def open_board_menu(self, global_pos):
         """빈 곳 우클릭 — 툴바와 같은 일을 커서 자리에서(시안 M1, docs/plan/20261128-2132-판서-빈곳-우클릭-메뉴.md).
-        저장은 판서에선 복사와 같은 일(_do_export)이라 단축키 표시가 없다."""
+        저장은 저장 창으로 위치를 고른다(_do_export) — 단축키는 없다."""
         from pasteflow.ui.menu_style import make_menu
         self._commit_text()
         menu = make_menu()

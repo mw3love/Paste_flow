@@ -97,6 +97,7 @@ class LiveDrawMixin:
         ov._board_geom = cur
         ov.set_hotkey_label(hotkey)
         ov.screen_copy_requested.connect(self._on_capture_region)
+        ov.export_file_requested.connect(lambda png, o=ov: self._on_live_draw_export(o, png))
         ov.mode_changed.connect(self._on_live_draw_mode)
         ov.hidden.connect(lambda o=ov: self._on_live_draw_hidden(o))
         ov.closed.connect(lambda o=ov: self._on_live_draw_closed(o))
@@ -107,6 +108,30 @@ class LiveDrawMixin:
         pos = pick_toolbar_pos(self.db.get_setting(_TOOLBAR_POS_KEY, ""), (bar.width(), bar.height()),
                                (ov.width(), ov.height()))
         ov.start(pick_start_tool(self.db.get_setting(_LAST_TOOL_KEY, "")), pos)
+
+    def _on_live_draw_export(self, ov, png: bytes):
+        """판서 저장 — 「다른 이름으로 저장」 창(미리보기 편집기의 저장과 같은 모양). 처음 자리는 캡처 폴더.
+        창의 부모를 판서 창으로 둬야 맨 위(TOPMOST) 판서 밑에 깔리지 않는다."""
+        import os
+        import time
+        from PyQt6.QtWidgets import QFileDialog
+        from pasteflow.ui.toast import ToastNotification
+        from pasteflow.winapi.image_io import _default_capture_folder
+        folder = self.db.get_setting("capture_save_folder", "") or _default_capture_folder()
+        name = time.strftime("판서_%Y%m%d_%H%M%S.png")
+        path, _ = QFileDialog.getSaveFileName(ov, "판서 이미지 저장", os.path.join(os.path.normpath(folder), name),
+                                              "PNG 이미지 (*.png)")
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+        try:
+            with open(path, "wb") as f:
+                f.write(png)
+        except OSError as e:
+            ToastNotification(f"저장 실패 — {e}", icon="🖼")
+            return
+        ToastNotification(f"저장됨: {os.path.basename(path)}", icon="", image_path=path)
 
     def _on_live_draw_mode(self, drawing: bool):
         """앱 쓰기 상태에서만 모니터 오른쪽 위에 「판서 중」 작은 아이콘(누르면 그리기로)."""
