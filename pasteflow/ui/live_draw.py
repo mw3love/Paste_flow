@@ -2,24 +2,26 @@
 
 계획: docs/plan/done/20261125-2040-라이브-화면-판서.md.
 
-두 상태를 단축키(기본 Ctrl+Shift+D) 하나로 오간다(app/live_draw.py가 toggle_mode를 부름).
-- 그리기: 창이 클릭·키보드를 받는다. 툴바는 모니터 아래 가운데. Esc = 창을 숨기기만 한다 — 그림·되돌리기
-  기록·도구가 남아 다시 열면(reopen) 그대로다(docs/plan/20261125-2301-판서-복원과-새-칠판.md). 닫히는 건 앱 종료와
-  모니터 해상도·배치가 바뀌어 새 칠판으로 바꿀 때뿐이다.
-- 앱 쓰기: 그림은 남고 클릭은 아래 앱으로 지나간다(WS_EX_TRANSPARENT). 툴바는 숨김.
+단축키(기본 Ctrl+Shift+D)는 켜고 끄기다(docs/plan/20261128-2049-판서-단축키-켜고-끄기.md — app/live_draw.py).
+- 그리기: 창이 클릭·키보드를 받는다. 툴바는 모니터 아래 가운데. Esc·단축키 = 창을 숨기기만 한다 — 되돌리기
+  기록·도구가 남고, 다시 열면(reopen) 빈 칠판으로 시작하되 Ctrl+Z 한 번이면 직전 그림이 돌아온다.
+  닫히는 건 앱 종료와 모니터 해상도·배치가 바뀌어 새 칠판으로 바꿀 때뿐이다.
+- 앱 쓰기(툴바 맨 오른쪽 버튼): 그림은 남고 클릭은 아래 앱으로 지나간다(WS_EX_TRANSPARENT). 툴바는 숨김.
+  「판서 중」 아이콘을 누르면 그리기로(toggle_mode).
 
 배경을 알파 1(거의 투명)로 칠하는 이유: Windows는 알파 0 화소의 클릭을 아래 창으로 넘긴다 —
 그리기 상태에서 클릭을 받으려면 0이 아니어야 한다(0편 시험판 실측, spikes/live_draw/README.md).
 편집 동작(도구·색·두께·되돌리기·스포이드)은 _EditorMixin을 그대로 물려받는다. 이 창에서는
 Ctrl+C·툴바 복사·저장이 「주석 복제」가 아니라 「화면 + 판서」 한 장을 만드는 일이다.
 """
-from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
-    QFrame, QGraphicsScene, QGraphicsTextItem, QGraphicsView, QHBoxLayout, QVBoxLayout, QWidget,
+    QApplication, QFrame, QGraphicsScene, QGraphicsTextItem, QGraphicsView, QHBoxLayout, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
-from pasteflow.ui.image_annotator import _AnnotatorView, _EditorMixin
+from pasteflow.ui.image_annotator import _ICON_DARK, _AnnotatorView, _EditorMixin
 from pasteflow.ui.image_preview import _CHROME_QSS
 from pasteflow.ui.memo_window import _force_foreground
 from pasteflow.ui.theme import SURFACE2 as _SURFACE2
@@ -35,6 +37,29 @@ _LIVE_QSS = (
     "\nQGraphicsView { background: transparent; border: none; }"
     "\nQWidget#livegrip { background: transparent; }"
 )
+
+
+def _pass_icon() -> QIcon:
+    """「앱 쓰기」 버튼 — 손으로 그린 마우스 화살표(툴바 중립색, 화면 배율 반영)."""
+    scr = QApplication.primaryScreen()
+    ratio = scr.devicePixelRatio() if scr else 1.0
+    pm = QPixmap(round(18 * ratio), round(18 * ratio))
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.scale(ratio, ratio)
+    p.setPen(QColor(_ICON_DARK))
+    p.setBrush(QColor(_ICON_DARK))
+    # 화살표는 오른쪽 아래로 비켜 두고, 끝 주위에 클릭 표시 선 셋 — 툴바 맨 앞 「선택」 화살표와 구분
+    p.drawPolygon(QPolygonF([QPointF(7, 6), QPointF(7, 17), QPointF(10, 14), QPointF(12, 18.5),
+                             QPointF(13.8, 17.6), QPointF(11.8, 13.2), QPointF(15.5, 13.2)]))
+    p.setPen(QPen(QColor(_ICON_DARK), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawLine(QPointF(5.5, 4.5), QPointF(3.5, 2.5))
+    p.drawLine(QPointF(4.5, 7), QPointF(1.8, 7))
+    p.drawLine(QPointF(8, 3.5), QPointF(8, 1))
+    p.end()
+    pm.setDevicePixelRatio(ratio)
+    return QIcon(pm)
 
 
 class _ToolbarGrip(QWidget):
@@ -130,6 +155,15 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         bar.setSpacing(0)
         bar.addWidget(_ToolbarGrip(self._toolbar))
         bar.addLayout(self._build_toolbar())
+        bar.addWidget(self._vsep())
+        pass_btn = QToolButton()
+        pass_btn.setIcon(_pass_icon())
+        pass_btn.setIconSize(QSize(18, 18))
+        pass_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # 포커스를 가져가면 Esc가 뷰를 안 거친다
+        pass_btn.setToolTip("앱 쓰기 — 그림은 두고 아래 앱 클릭 (연필 아이콘을 누르면 다시 그리기)")
+        pass_btn.clicked.connect(self._enter_pass)
+        bar.addWidget(pass_btn)
+        bar.addSpacing(4)
         self.setStyleSheet(self._editor_stylesheet(_SURFACE2) + _CHROME_QSS + _LIVE_QSS)
         self._refresh_tool_icons()
         type(self)._instances.append(self)
@@ -155,13 +189,16 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         self._enter_draw()
 
     def reopen(self):
-        """Esc로 숨겼던 칠판을 다시 보이며 그리기 상태로 — 그림·도구·툴바 자리는 그대로."""
+        """숨겼던 칠판을 다시 보이며 그리기 상태로 — 빈 칠판으로 시작(직전 그림은 Ctrl+Z 한 번으로), 도구·툴바 자리는 그대로."""
+        self.clear_board()
         self.show()
         self._toolbar.raise_()
         self._enter_draw()
 
     def hide_board(self):
-        """Esc — 지우지 않고 숨긴다. 쓰던 텍스트를 확정하고 떠 있는 패널을 정리한 뒤 앞 창에 포커스를 돌려준다."""
+        """Esc·단축키 — 지우지 않고 숨긴다. 쓰던 텍스트를 확정하고 떠 있는 패널을 정리한 뒤, 그리기 상태였으면
+        앞 창에 포커스를 돌려준다(앱 쓰기 상태면 사용자가 이미 다른 앱에 있을 수 있어 돌려주지 않는다 —
+        _prev_fg는 그리기로 들어올 때 기억한 옛 창)."""
         self._wheel_timer.stop()
         self._commit_text()
         self._hide_tool_popups()
@@ -170,7 +207,8 @@ class LiveDrawOverlay(_EditorMixin, QWidget):
         if bar is not None:
             bar.setVisible(False)
         self.hide()
-        self._give_back_foreground()
+        if self._drawing:
+            self._give_back_foreground()
         self.hidden.emit()
 
     def toggle_mode(self):

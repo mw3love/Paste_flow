@@ -1,7 +1,9 @@
 """라이브 화면 판서 — 단축키 슬롯과 「판서 중」 아이콘. 계획: docs/plan/done/20261125-2040-라이브-화면-판서.md,
-docs/plan/20261125-2226-판서-조작-개선.md.
+docs/plan/20261125-2226-판서-조작-개선.md, docs/plan/20261128-2049-판서-단축키-켜고-끄기.md.
 
-단축키 한 번 = 꺼져 있으면 커서 모니터에 켜기(그리기), 켜져 있으면 그리기↔앱 쓰기 전환.
+단축키 = 켜고 끄기(hotkey_action): 보이는 판서가 없으면 커서 모니터에 켜기(그리기), 보이면 끄기
+(그리기·앱 쓰기 어느 상태든 hide_board — Esc와 같음). 앱 쓰기는 판서 툴바 버튼으로만 들어가고,
+그동안만 「판서 중」 아이콘이 뜬다(누르면 그리기로). 다시 켜면 빈 칠판, 직전 그림은 Ctrl+Z로.
 그리기 상태의 Esc는 판서 창을 숨긴다(hidden — 아래). 판서 창의 Ctrl+C는
 영역 캡처와 같은 저장 경로(_on_capture_region)로 간다. 닫을 때 쓰던 도구를 DB 설정
 live_draw_last_tool에 적어 두고 다음에 그 도구로 시작한다(숨길 때도).
@@ -21,6 +23,11 @@ _LAST_TOOL_KEY = "live_draw_last_tool"
 def pick_start_tool(saved) -> str:
     """저장된 마지막 도구 → 시작 도구. 없거나·도구 없음이었거나·모르는 이름이면 펜."""
     return saved if saved in _LIVE_DRAW_TOOLS else "pen"
+
+
+def hotkey_action(visible: bool) -> str:
+    """판서 단축키 — 보이는 판서가 있으면 "hide"(끄기), 없으면 "open"(커서 모니터에 켜기)."""
+    return "hide" if visible else "open"
 
 
 def board_action(stored, cur) -> str:
@@ -43,8 +50,8 @@ def _pretty_hotkey(s: str) -> str:
 class LiveDrawMixin:
     def _on_live_draw_hotkey(self):
         ov = self._live_draw
-        if ov is not None:
-            ov.toggle_mode()
+        if hotkey_action(ov is not None) == "hide":
+            ov.hide_board()   # 앱 쓰기 상태여도 — hidden 시그널이 아이콘을 닫는다
             return
         from pasteflow.ui.live_draw import LiveDrawOverlay
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
